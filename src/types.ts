@@ -10,6 +10,8 @@ export type ProposalStatus = "open" | "accepted" | "rejected" | "reviewed";
 
 export type ProposalChangeDecision = "accepted" | "rejected";
 
+export type EditorLanguage = "en-GB" | "en-US";
+
 export type ContextLedgerEventType =
   | "chat_message"
   | "thread_created"
@@ -22,9 +24,11 @@ export type ContextLedgerEventType =
   | "proposal_change_decision"
   | "proposal_revision_requested"
   | "document_imported"
+  | "document_revision_restored"
   | "agent_reply";
 
 export interface Anchor {
+  kind?: "markdown-range";
   exact: string;
   prefix: string;
   suffix: string;
@@ -37,6 +41,7 @@ export interface ThreadMessage {
   author: Author;
   body: string;
   createdAt: string;
+  skills?: AgentSkillSelection[];
 }
 
 export interface Suggestion {
@@ -65,6 +70,7 @@ export interface ChatMessage {
   author: Author;
   body: string;
   createdAt: string;
+  skills?: AgentSkillSelection[];
 }
 
 export interface DocumentProposal {
@@ -93,9 +99,14 @@ export interface ContextLedgerEvent {
   metadata?: Record<string, string | number | boolean | null>;
 }
 
+export interface ReviewSettings {
+  editorLanguage: EditorLanguage;
+}
+
 export interface ReviewState {
   version: number;
   title: string;
+  settings: ReviewSettings;
   threads: ReviewThread[];
   chat: ChatMessage[];
   proposals: DocumentProposal[];
@@ -106,6 +117,9 @@ export interface ReviewState {
 export interface AgentSession {
   id: string;
   runtime: string;
+  configuredRuntime?: string;
+  model?: string | null;
+  configuredModel?: string;
   status: "idle" | "running" | "error";
   turnCount: number;
   queueDepth: number;
@@ -121,6 +135,12 @@ export interface AgentSession {
 }
 
 export interface FileInfo {
+  docId: string;
+  source: "internal" | "external";
+  title: string;
+  markdownPath: string;
+  displayPath: string;
+  docDir: string;
   draftPath: string;
   reviewPath: string;
   sessionPath?: string;
@@ -137,7 +157,23 @@ export interface DocumentState {
   fileInfo?: FileInfo;
 }
 
+export interface DocumentRevision {
+  id: string;
+  parentId: string | null;
+  createdAt: string;
+  reason: string;
+  title: string;
+  words: number;
+  hash: string;
+}
+
+export interface RevisionState {
+  revisions: DocumentRevision[];
+  currentRevisionId: string | null;
+}
+
 export interface SelectionDraft {
+  kind?: "markdown-range";
   exact: string;
   prefix: string;
   suffix: string;
@@ -145,9 +181,52 @@ export interface SelectionDraft {
   end: number;
 }
 
+export interface AgentSkill {
+  id: string;
+  name: string;
+  description: string;
+  source: string;
+}
+
+export interface AgentSkillSelection {
+  id: string;
+  name: string;
+  description?: string;
+  source?: string;
+}
+
+export interface AgentRuntimeModel {
+  id: string;
+  label: string;
+  source?: string;
+}
+
+export interface AgentRuntimeStatus {
+  id: string;
+  label: string;
+  command?: string | null;
+  available: boolean;
+  version: string | null;
+  supportsModelFlag: boolean;
+  supportsStructuredOutput: boolean;
+  supportsManualModel: boolean;
+  models: AgentRuntimeModel[];
+  defaultModel: string | null;
+  notes: string[];
+}
+
+export interface AgentRuntimeConfig {
+  configuredRuntime: string;
+  resolvedRuntime: string | null;
+  configuredModel: string;
+  resolvedModel: string | null;
+  runtimes: AgentRuntimeStatus[];
+}
+
 export interface AgentMessageRequest {
   source: "chat" | "thread";
   body: string;
   threadId?: string | null;
   document: DocumentState;
+  skills?: AgentSkillSelection[];
 }

@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "reply": {
+      "type": "string"
+    },
+    "chatReply": {
+      "type": "string"
+    },
+    "threadReplies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "threadId": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          }
+        },
+        "required": ["body"]
+      }
+    },
+    "suggestions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "threadId": {
+            "type": "string"
+          },
+          "replacement": {
+            "type": "string"
+          }
+        },
+        "required": ["replacement"]
+      }
+    },
+    "documentProposals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "replacementMarkdown": {
+            "type": "string"
+          }
+        },
+        "required": ["replacementMarkdown"]
+      }
+    }
+  }
+}

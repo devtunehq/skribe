@@ -1,6 +1,6 @@
 import type { ReviewThread, SelectionDraft } from "./types";
 
-export type MarkdownBlockType = "heading" | "paragraph" | "ordered-list" | "unordered-list" | "quote" | "code";
+export type MarkdownBlockType = "heading" | "paragraph" | "ordered-list" | "unordered-list" | "quote" | "code" | "table";
 
 export interface MarkdownBlock {
   id: string;
@@ -9,6 +9,35 @@ export interface MarkdownBlock {
   level?: number;
   marker?: string;
   language?: string;
+}
+
+export type MarkdownBlockIdentity = Omit<MarkdownBlock, "id">;
+
+export function markdownBlockSignature(block: MarkdownBlockIdentity) {
+  return [
+    block.type,
+    block.level ?? "",
+    block.marker ?? "",
+    block.language ?? "",
+    block.text.replace(/\s+/g, " ").trim()
+  ].join("\u001f");
+}
+
+export function markdownBlockIdFromSignature(signature: string, occurrence: number) {
+  let hash = 2166136261;
+  for (let index = 0; index < signature.length; index += 1) {
+    hash ^= signature.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `block-${(hash >>> 0).toString(36)}-${occurrence}`;
+}
+
+export function makeMarkdownBlockId(block: MarkdownBlockIdentity, occurrence: number) {
+  return markdownBlockIdFromSignature(markdownBlockSignature(block), occurrence);
+}
+
+export function markdownBlockIdFromIndex(index: number) {
+  return `block-${index}`;
 }
 
 export function nowIso() {
@@ -43,30 +72,104 @@ export function buildSelection(markdown: string, selectedText: string): Selectio
 
 export function applySuggestion(markdown: string, original: string, replacement: string) {
   if (!original) return markdown;
+  if (markdown.includes(replacement)) return markdown;
+
   const index = markdown.indexOf(original);
   if (index === -1) {
     const whitespaceFlexible = original.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
     const match = markdown.match(new RegExp(whitespaceFlexible));
-    if (!match || match.index === undefined) return markdown;
-    return `${markdown.slice(0, match.index)}${replacement}${markdown.slice(match.index + match[0].length)}`;
+    if (match && match.index !== undefined) {
+      return `${markdown.slice(0, match.index)}${replacement}${markdown.slice(match.index + match[0].length)}`;
+    }
+
+    const renderedRange = findRenderedMarkdownRange(markdown, original);
+    if (!renderedRange) return markdown;
+    return `${markdown.slice(0, renderedRange.start)}${replacement}${markdown.slice(renderedRange.end)}`;
   }
   return `${markdown.slice(0, index)}${replacement}${markdown.slice(index + original.length)}`;
 }
 
+function findRenderedMarkdownRange(markdown: string, renderedNeedle: string) {
+  const characters = renderedMarkdownCharacters(markdown);
+  const renderedText = characters.map((character) => character.value).join("");
+  const pattern = renderedNeedle
+    .trim()
+    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\s+/g, "\\s+");
+  if (!pattern) return null;
+
+  const match = renderedText.match(new RegExp(pattern));
+  if (!match || match.index === undefined) return null;
+
+  const firstCharacter = characters[match.index];
+  const lastCharacter = characters[match.index + match[0].length - 1];
+  if (!firstCharacter || !lastCharacter) return null;
+
+  return {
+    start:
+      firstCharacter.linkStart !== undefined && firstCharacter.sourceIndex === firstCharacter.linkLabelStart
+        ? firstCharacter.linkStart
+        : firstCharacter.sourceIndex,
+    end:
+      lastCharacter.linkEnd !== undefined && lastCharacter.sourceIndex === (lastCharacter.linkLabelEnd ?? 0) - 1
+        ? lastCharacter.linkEnd
+        : lastCharacter.sourceIndex + 1
+  };
+}
+
+function renderedMarkdownCharacters(markdown: string) {
+  const characters: Array<{
+    value: string;
+    sourceIndex: number;
+    linkStart?: number;
+    linkEnd?: number;
+    linkLabelStart?: number;
+    linkLabelEnd?: number;
+  }> = [];
+
+  for (let index = 0; index < markdown.length; index += 1) {
+    const linkMatch = markdown.slice(index).match(/^\[([^\]\n]+)\]\(([^)\s]+)\)/);
+    if (linkMatch) {
+      const label = linkMatch[1];
+      const labelStart = index + 1;
+      const labelEnd = labelStart + label.length;
+      const linkEnd = index + linkMatch[0].length;
+      for (let offset = 0; offset < label.length; offset += 1) {
+        characters.push({
+          value: label[offset],
+          sourceIndex: labelStart + offset,
+          linkStart: index,
+          linkEnd,
+          linkLabelStart: labelStart,
+          linkLabelEnd: labelEnd
+        });
+      }
+      index = linkEnd - 1;
+      continue;
+    }
+
+    const twoCharacterMarker = markdown.slice(index, index + 2);
+    if (twoCharacterMarker === "**" || twoCharacterMarker === "__" || twoCharacterMarker === "~~") {
+      index += 1;
+      continue;
+    }
+
+    const character = markdown[index];
+    if (character === "*" || character === "_" || character === "`") continue;
+    characters.push({ value: character, sourceIndex: index });
+  }
+
+  return characters;
+}
+
 export function extractOutline(markdown: string) {
-  return markdown
-    .split("\n")
-    .map((line, index) => {
-      const match = line.match(/^(#{1,3})\s+(.+)$/);
-      if (!match) return null;
-      return {
-        id: `line-${index + 1}`,
-        level: match[1].length,
-        title: match[2].trim(),
-        line: index + 1
-      };
-    })
-    .filter(Boolean) as Array<{ id: string; level: number; title: string; line: number }>;
+  return parseMarkdownBlocks(markdown)
+    .filter((block) => block.type === "heading" && (block.level ?? 1) <= 3)
+    .map((block) => ({
+      id: block.id,
+      level: block.level ?? 2,
+      title: block.text.trim()
+    }));
 }
 
 export function openThreads(threads: ReviewThread[]) {
@@ -77,17 +180,64 @@ export function wordCount(markdown: string) {
   return markdown.trim() ? markdown.trim().split(/\s+/).length : 0;
 }
 
+function splitTableRow(line: string) {
+  const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+  const cells: string[] = [];
+  let cell = "";
+  let escaped = false;
+
+  for (const character of trimmed) {
+    if (escaped) {
+      cell += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      cell += character;
+      escaped = true;
+      continue;
+    }
+    if (character === "|") {
+      cells.push(cell.trim());
+      cell = "";
+      continue;
+    }
+    cell += character;
+  }
+
+  cells.push(cell.trim());
+  return cells;
+}
+
+function isTableRow(line: string) {
+  const trimmed = line.trim();
+  return trimmed.includes("|") && splitTableRow(trimmed).length >= 2;
+}
+
+function isTableSeparator(line: string) {
+  const cells = splitTableRow(line);
+  return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
+}
+
+function isTableStart(lines: string[], index: number) {
+  return isTableRow(lines[index] ?? "") && isTableSeparator(lines[index + 1] ?? "");
+}
+
 export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
   const lines = markdown.replace(/\r\n/g, "\n").split("\n");
   const blocks: MarkdownBlock[] = [];
   let paragraph: string[] = [];
-  let blockIndex = 0;
 
-  const nextId = () => `block-${blockIndex++}`;
+  const pushBlock = (block: MarkdownBlockIdentity) => {
+    blocks.push({
+      id: markdownBlockIdFromIndex(blocks.length),
+      ...block
+    });
+  };
+
   const flushParagraph = () => {
     if (paragraph.length === 0) return;
-    blocks.push({
-      id: nextId(),
+    pushBlock({
       type: "paragraph",
       text: paragraph.join("\n").trim()
     });
@@ -113,8 +263,7 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
         codeLines.push(lines[index]);
         index += 1;
       }
-      blocks.push({
-        id: nextId(),
+      pushBlock({
         type: "code",
         text: codeLines.join("\n"),
         language
@@ -122,11 +271,26 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       continue;
     }
 
+    if (isTableStart(lines, index)) {
+      flushParagraph();
+      const tableLines = [line, lines[index + 1]];
+      index += 2;
+      while (index < lines.length && lines[index].trim() && isTableRow(lines[index])) {
+        tableLines.push(lines[index]);
+        index += 1;
+      }
+      index -= 1;
+      pushBlock({
+        type: "table",
+        text: tableLines.join("\n")
+      });
+      continue;
+    }
+
     const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
     if (heading) {
       flushParagraph();
-      blocks.push({
-        id: nextId(),
+      pushBlock({
         type: "heading",
         level: heading[1].length,
         text: heading[2]
@@ -137,8 +301,7 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
     const ordered = trimmed.match(/^(\d+)\.\s+(.+)$/);
     if (ordered) {
       flushParagraph();
-      blocks.push({
-        id: nextId(),
+      pushBlock({
         type: "ordered-list",
         marker: ordered[1],
         text: ordered[2]
@@ -149,8 +312,7 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
     const unordered = trimmed.match(/^[-*]\s+(.+)$/);
     if (unordered) {
       flushParagraph();
-      blocks.push({
-        id: nextId(),
+      pushBlock({
         type: "unordered-list",
         text: unordered[1]
       });
@@ -160,8 +322,7 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
     const quote = trimmed.match(/^>\s?(.+)$/);
     if (quote) {
       flushParagraph();
-      blocks.push({
-        id: nextId(),
+      pushBlock({
         type: "quote",
         text: quote[1]
       });
@@ -184,6 +345,7 @@ export function serializeMarkdownBlocks(blocks: MarkdownBlock[]) {
       if (block.type === "unordered-list") return `- ${text}`;
       if (block.type === "quote") return text.split("\n").map((line) => `> ${line}`).join("\n");
       if (block.type === "code") return `\`\`\`${block.language ?? ""}\n${block.text}\n\`\`\``;
+      if (block.type === "table") return text;
       return text;
     })
     .join("\n\n")
@@ -194,7 +356,11 @@ export function serializeMarkdownBlocks(blocks: MarkdownBlock[]) {
 export function updateMarkdownBlock(markdown: string, blockId: string, text: string) {
   const blocks = parseMarkdownBlocks(markdown);
   return serializeMarkdownBlocks(
-    blocks.map((block) => (block.id === blockId ? { ...block, text } : block))
+    blocks.flatMap((block) => {
+      if (block.id !== blockId) return [block];
+      const nextText = text.trim();
+      return nextText ? [{ ...block, text }] : [];
+    })
   );
 }
 
@@ -209,13 +375,44 @@ export function updateMarkdownBlockShape(
   );
 }
 
+export function deleteMarkdownBlock(markdown: string, blockId: string) {
+  return serializeMarkdownBlocks(parseMarkdownBlocks(markdown).filter((block) => block.id !== blockId));
+}
+
+export function moveMarkdownBlock(
+  markdown: string,
+  blockId: string,
+  targetBlockId: string,
+  placement: "before" | "after"
+) {
+  if (blockId === targetBlockId) return markdown;
+
+  const blocks = parseMarkdownBlocks(markdown);
+  const sourceIndex = blocks.findIndex((block) => block.id === blockId);
+  const targetIndex = blocks.findIndex((block) => block.id === targetBlockId);
+  if (sourceIndex === -1 || targetIndex === -1) return markdown;
+
+  const [sourceBlock] = blocks.splice(sourceIndex, 1);
+  const adjustedTargetIndex = blocks.findIndex((block) => block.id === targetBlockId);
+  if (adjustedTargetIndex === -1) return markdown;
+
+  const insertionIndex = placement === "before" ? adjustedTargetIndex : adjustedTargetIndex + 1;
+  blocks.splice(insertionIndex, 0, sourceBlock);
+  return serializeMarkdownBlocks(blocks);
+}
+
 export function inlineMarkdownToHtml(markdown: string) {
   let html = escapeHtml(markdown);
 
   const codeSegments: string[] = [];
+  const linkSegments: string[] = [];
   html = html.replace(/`([^`]+)`/g, (_, code) => {
     const index = codeSegments.push(`<code>${code}</code>`) - 1;
     return `\u0000CODE${index}\u0000`;
+  });
+  html = html.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_, label, href) => {
+    const index = linkSegments.push(`<a href="${href}" target="_blank" rel="noreferrer">${label}</a>`) - 1;
+    return `\u0000LINK${index}\u0000`;
   });
 
   html = html
@@ -226,6 +423,10 @@ export function inlineMarkdownToHtml(markdown: string) {
     .replace(/_([^_]+)_/g, "<em>$1</em>")
     .replace(/\n/g, "<br />");
 
+  linkSegments.forEach((segment, index) => {
+    html = html.replace(`\u0000LINK${index}\u0000`, segment);
+  });
+
   codeSegments.forEach((segment, index) => {
     html = html.replace(`\u0000CODE${index}\u0000`, segment);
   });
@@ -233,19 +434,86 @@ export function inlineMarkdownToHtml(markdown: string) {
   return html;
 }
 
+function escapeTableCell(value: string) {
+  return value.replace(/\|/g, "\\|").replace(/\n+/g, " ").trim();
+}
+
+function normalizeTableRows(rows: string[][]) {
+  const width = Math.max(2, ...rows.map((row) => row.length));
+  return rows.map((row) => Array.from({ length: width }, (_, index) => escapeTableCell(row[index] ?? "")));
+}
+
+export function parseMarkdownTable(markdown: string) {
+  const lines = markdown
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length < 2 || !isTableRow(lines[0]) || !isTableSeparator(lines[1])) return null;
+
+  const rows = normalizeTableRows([splitTableRow(lines[0]), ...lines.slice(2).filter(isTableRow).map(splitTableRow)]);
+  if (rows.length === 0) return null;
+
+  const alignments = splitTableRow(lines[1]).map((cell) => {
+    const trimmed = cell.trim();
+    if (trimmed.startsWith(":") && trimmed.endsWith(":")) return "center";
+    if (trimmed.endsWith(":")) return "right";
+    if (trimmed.startsWith(":")) return "left";
+    return "";
+  });
+
+  return {
+    headers: rows[0],
+    rows: rows.slice(1),
+    alignments
+  };
+}
+
+export function serializeMarkdownTable(headers: string[], rows: string[][]) {
+  const normalizedRows = normalizeTableRows([headers, ...rows]);
+  const width = normalizedRows[0]?.length ?? 2;
+  const header = normalizedRows[0] ?? Array.from({ length: width }, () => "");
+  const bodyRows = normalizedRows.slice(1);
+  const separator = Array.from({ length: width }, () => "---");
+  const serializeRow = (row: string[]) => `| ${row.map(escapeTableCell).join(" | ")} |`;
+
+  return [serializeRow(header), serializeRow(separator), ...bodyRows.map(serializeRow)].join("\n");
+}
+
 export function htmlToInlineMarkdown(html: string) {
   const container = document.createElement("div");
   container.innerHTML = html;
 
+  const tableToMarkdown = (table: HTMLTableElement) => {
+    const headerCells = Array.from(table.querySelectorAll("thead tr:first-child th, thead tr:first-child td"));
+    const fallbackHeaderCells = Array.from(table.querySelectorAll("tr:first-child th, tr:first-child td"));
+    const headers = (headerCells.length > 0 ? headerCells : fallbackHeaderCells).map((cell) =>
+      Array.from(cell.childNodes).map(walk).join("").trim()
+    );
+    const bodyRows = Array.from(table.querySelectorAll("tbody tr"));
+    const fallbackRows = Array.from(table.querySelectorAll("tr")).slice(headerCells.length > 0 ? 0 : 1);
+    const rows = (bodyRows.length > 0 ? bodyRows : fallbackRows).map((row) =>
+      Array.from(row.querySelectorAll("th, td")).map((cell) => Array.from(cell.childNodes).map(walk).join("").trim())
+    );
+
+    return serializeMarkdownTable(headers, rows);
+  };
+
   const walk = (node: Node): string => {
-    if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? "";
+    if (node.nodeType === Node.TEXT_NODE) return (node.textContent ?? "").replace(/\u200B/g, "");
     if (!(node instanceof HTMLElement)) return "";
 
     const tag = node.tagName.toLowerCase();
     if (tag === "br") return "\n";
+    if (tag === "table") return tableToMarkdown(node as HTMLTableElement);
 
     const body = Array.from(node.childNodes).map(walk).join("");
     if (node.classList.contains("anchor-highlight")) return body;
+    if (tag === "a") {
+      const href = node.getAttribute("href")?.trim();
+      if (!href || !body) return body;
+      return `[${body.replace(/\]/g, "\\]")}](${href.replace(/\)/g, "%29")})`;
+    }
     if (tag === "strong" || tag === "b") return body ? `**${body}**` : "";
     if (tag === "em" || tag === "i") return body ? `*${body}*` : "";
     if (tag === "code") return body ? `\`${body.replace(/`/g, "'")}\`` : "";
@@ -257,6 +525,7 @@ export function htmlToInlineMarkdown(html: string) {
   return Array.from(container.childNodes)
     .map(walk)
     .join("")
+    .replace(/\u200B/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .trimEnd();
 }

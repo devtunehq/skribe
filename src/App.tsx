@@ -1,39 +1,57 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { diffAcceptRejectHunk, parseDiffFromFile } from "@pierre/diffs";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { parseDiffFromFile } from "@pierre/diffs";
 import { MultiFileDiff } from "@pierre/diffs/react";
 import {
   Bold,
   Check,
+  ChevronDown,
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
   Code2,
-  Clipboard,
   Copy,
   Download,
   FileText,
+  GripVertical,
   Heading1,
   Heading2,
   Heading3,
   Highlighter,
+  History,
   Italic,
-  Import,
+  Eye,
+  EyeOff,
+  Link as LinkIcon,
   List,
   ListOrdered,
   MessageSquare,
   Pilcrow,
   Quote,
   RefreshCw,
+  RotateCcw,
   Save,
+  Scissors,
+  Search,
   Send,
   Sparkles,
-  SplitSquareVertical,
+  Upload,
   X
 } from "lucide-react";
-import { fetchDocument, saveDocument, sendAgentMessage, subscribeToDocumentEvents } from "./api";
+import {
+  fetchAgentSkills,
+  fetchAgentRuntimes,
+  fetchDocument,
+  fetchRevisionHistory,
+  restoreDocumentRevision,
+  saveDocument,
+  sendAgentMessage,
+  subscribeToDocumentEvents,
+  updateAgentConfig
+} from "./api";
 import {
   applySuggestion,
   buildSelection,
+  deleteMarkdownBlock,
   extractOutline,
   makeId,
   nowIso,
@@ -42,18 +60,29 @@ import {
   wordCount,
   htmlToInlineMarkdown,
   inlineMarkdownToHtml,
+  markdownBlockIdFromIndex,
+  parseMarkdownTable,
   parseMarkdownBlocks,
+  moveMarkdownBlock,
+  serializeMarkdownBlocks,
   updateMarkdownBlock,
   updateMarkdownBlockShape
 } from "./document";
+import type { MarkdownBlockIdentity } from "./document";
 import type {
   AgentSession,
+  AgentRuntimeConfig,
+  AgentSkill,
+  AgentSkillSelection,
   Author,
   ChatMessage,
   ContextLedgerEvent,
   ContextLedgerEventType,
   DocumentProposal,
   DocumentState,
+  EditorLanguage,
+  FileInfo,
+  RevisionState,
   ProposalChangeDecision,
   ReviewThread,
   SelectionDraft,
@@ -63,11 +92,69 @@ import type { FileDiffMetadata } from "@pierre/diffs";
 
 type PanelMode = "threads" | "chat";
 type SaveState = "loading" | "saved" | "saving" | "error";
+type SupportedEditorLanguage = EditorLanguage;
+type BlockDropPlacement = "before" | "after";
+type FloatingToolbarState = {
+  left: number;
+  top: number;
+  placement: "above" | "below";
+};
+type LinkPopoverState = {
+  left: number;
+  top: number;
+};
+type SelectionContextMenuState = {
+  left: number;
+  top: number;
+};
+type LinkTargetState = {
+  blockId: string;
+  selectedText: string;
+  plainStart: number;
+  plainEnd: number;
+  markdownAtOpen: string;
+};
+type ClipboardPayload = {
+  plainText: string;
+  markdown?: string;
+};
+type SelectionEndpoint = {
+  blockId: string;
+  sourceIndex: number;
+};
+type SelectionDragState = {
+  x: number;
+  y: number;
+  pointerId: number;
+  endpoint: SelectionEndpoint;
+  draft: SelectionDraft | null;
+  isSelecting: boolean;
+};
+type HistorySnapshot = Pick<DocumentState, "markdown" | "review">;
 
 const authorLabels: Record<Author, string> = {
   human: "Human",
   agent: "Agent"
 };
+
+const editorLanguageOptions: Array<{ value: SupportedEditorLanguage; label: string }> = [
+  { value: "en-GB", label: "EN-GB" },
+  { value: "en-US", label: "EN-US" }
+];
+
+function fileNameFromPath(path?: string) {
+  return path?.split(/[\\/]/).filter(Boolean).at(-1) || "Untitled";
+}
+
+function documentSourceLabel(fileInfo?: FileInfo) {
+  if (!fileInfo) return "Local Markdown review workbench";
+  if (fileInfo.source === "external") return fileNameFromPath(fileInfo.displayPath || fileInfo.markdownPath);
+  return "Internal draft";
+}
+
+function safeDownloadName(value: string) {
+  return value.trim().replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "") || "skribe";
+}
 
 const maxContextLedgerEvents = 240;
 
@@ -82,24 +169,59 @@ interface ProposalChangeBlock {
   additions: string[];
 }
 
-function buildProposalDiff(proposal: DocumentProposal): FileDiffMetadata {
-  return parseDiffFromFile(
-    {
-      name: "draft.md",
-      contents: proposal.originalMarkdown,
-      lang: "markdown",
-      cacheKey: `${proposal.id}:original`
-    },
-    {
-      name: "draft.md",
-      contents: proposal.replacementMarkdown,
-      lang: "markdown",
-      cacheKey: `${proposal.id}:replacement`
-    }
-  );
+interface MarkdownBlockLineSpan {
+  id: string;
+  startLine: number;
+  endLine: number;
+  textStart: number;
+  textEnd: number;
 }
 
-function getProposalChangeBlocks(fileDiff: FileDiffMetadata): ProposalChangeBlock[] {
+interface BlockAnchorRange {
+  thread: ReviewThread;
+  start: number;
+  end: number;
+}
+
+interface InlineProposalChange extends ProposalChangeBlock {
+  proposalId: string;
+  decision?: ProposalChangeDecision;
+  anchorBlockId: string | null;
+}
+
+interface InlineProposalReview {
+  proposal: DocumentProposal;
+  changes: InlineProposalChange[];
+  decidedCount: number;
+}
+
+function buildProposalDiff(proposal: DocumentProposal): FileDiffMetadata | null {
+  if (proposal.originalMarkdown === proposal.replacementMarkdown) return null;
+
+  try {
+    return parseDiffFromFile(
+      {
+        name: "draft.md",
+        contents: proposal.originalMarkdown,
+        lang: "markdown",
+        cacheKey: `${proposal.id}:original`
+      },
+      {
+        name: "draft.md",
+        contents: proposal.replacementMarkdown,
+        lang: "markdown",
+        cacheKey: `${proposal.id}:replacement`
+      }
+    );
+  } catch (error) {
+    console.error("Unable to build proposal diff", error);
+    return null;
+  }
+}
+
+function getProposalChangeBlocks(fileDiff: FileDiffMetadata | null): ProposalChangeBlock[] {
+  if (!fileDiff) return [];
+
   let ordinal = 1;
   return fileDiff.hunks.flatMap((hunk, hunkIndex) =>
     hunk.hunkContent.flatMap((content, changeIndex) => {
@@ -120,23 +242,274 @@ function getProposalChangeBlocks(fileDiff: FileDiffMetadata): ProposalChangeBloc
   );
 }
 
+function numericCssValue(value: string, fallback = 0) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function computedFont(style: CSSStyleDeclaration) {
+  return [
+    style.fontStyle,
+    style.fontVariant,
+    style.fontWeight,
+    style.fontSize,
+    style.fontFamily
+  ].join(" ");
+}
+
+function isVisibleColor(value: string) {
+  return value !== "transparent" && value !== "rgba(0, 0, 0, 0)";
+}
+
+function wrapCanvasText(context: CanvasRenderingContext2D, text: string, maxWidth: number) {
+  const paragraphs = text.split(/\n/);
+  const lines: string[] = [];
+
+  paragraphs.forEach((paragraph, paragraphIndex) => {
+    const words = paragraph.trim().split(/\s+/).filter(Boolean);
+    if (words.length === 0) {
+      if (paragraphIndex < paragraphs.length - 1) lines.push("");
+      return;
+    }
+
+    let line = "";
+    words.forEach((word) => {
+      const nextLine = line ? `${line} ${word}` : word;
+      if (line && context.measureText(nextLine).width > maxWidth) {
+        lines.push(line);
+        line = word;
+        return;
+      }
+      line = nextLine;
+    });
+    lines.push(line);
+  });
+
+  return lines.length > 0 ? lines : [""];
+}
+
+async function downloadTableAsPng(table: HTMLTableElement, filename: string) {
+  const rect = table.getBoundingClientRect();
+  const width = Math.ceil(rect.width);
+  const height = Math.ceil(rect.height);
+  if (width <= 0 || height <= 0) throw new Error("Cannot export an empty table.");
+
+  const padding = 24;
+  const scale = Math.min(3, Math.max(2, window.devicePixelRatio || 2));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.ceil((width + padding * 2) * scale);
+  canvas.height = Math.ceil((height + padding * 2) * scale);
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Canvas export is unavailable.");
+
+  context.scale(scale, scale);
+
+  const tableStyle = window.getComputedStyle(table);
+  const tableX = padding;
+  const tableY = padding;
+  if (tableStyle.boxShadow !== "none") {
+    context.fillStyle = "rgba(56, 56, 56, 0.72)";
+    context.fillRect(tableX - 3, tableY + 3, width, height);
+  }
+  context.fillStyle = isVisibleColor(tableStyle.backgroundColor) ? tableStyle.backgroundColor : "#ffffff";
+  context.fillRect(tableX, tableY, width, height);
+
+  Array.from(table.rows).forEach((row) => {
+    Array.from(row.cells).forEach((cell) => {
+      const cellRect = cell.getBoundingClientRect();
+      const style = window.getComputedStyle(cell);
+      const x = tableX + cellRect.left - rect.left;
+      const y = tableY + cellRect.top - rect.top;
+      const cellWidth = cellRect.width;
+      const cellHeight = cellRect.height;
+
+      if (isVisibleColor(style.backgroundColor)) {
+        context.fillStyle = style.backgroundColor;
+        context.fillRect(x, y, cellWidth, cellHeight);
+      }
+
+      context.strokeStyle = style.borderTopColor || tableStyle.borderTopColor || "#383838";
+      context.lineWidth = Math.max(1, numericCssValue(style.borderTopWidth, 1));
+      context.strokeRect(x + 0.5, y + 0.5, Math.max(0, cellWidth - 1), Math.max(0, cellHeight - 1));
+
+      const paddingLeft = numericCssValue(style.paddingLeft, 10);
+      const paddingRight = numericCssValue(style.paddingRight, 10);
+      const paddingTop = numericCssValue(style.paddingTop, 8);
+      const paddingBottom = numericCssValue(style.paddingBottom, 8);
+      const lineHeight = numericCssValue(style.lineHeight, numericCssValue(style.fontSize, 16) * 1.35);
+      const textWidth = Math.max(1, cellWidth - paddingLeft - paddingRight);
+      context.font = computedFont(style);
+      const lines = wrapCanvasText(context, cell.innerText.replace(/\u200B/g, "").trim(), textWidth);
+      const textAlign = style.textAlign;
+
+      context.fillStyle = style.color || "#383838";
+      context.textBaseline = "top";
+
+      lines.forEach((line, index) => {
+        const textY = y + paddingTop + index * lineHeight;
+        if (textY + lineHeight > y + cellHeight - paddingBottom + 1) return;
+        const measuredWidth = context.measureText(line).width;
+        const textX =
+          textAlign === "right"
+            ? x + cellWidth - paddingRight - measuredWidth
+            : textAlign === "center"
+              ? x + paddingLeft + (textWidth - measuredWidth) / 2
+              : x + paddingLeft;
+        context.fillText(line, textX, textY);
+      });
+    });
+  });
+
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((output) => {
+      if (output) resolve(output);
+      else reject(new Error("Unable to create table image."));
+    }, "image/png");
+  });
+
+  const pngUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = pngUrl;
+  link.download = `${safeDownloadName(filename)}.png`;
+  link.click();
+  URL.revokeObjectURL(pngUrl);
+}
+
+function characterIndexForLine(markdown: string, lineNumber: number) {
+  if (lineNumber <= 1) return 0;
+
+  let currentLine = 1;
+  for (let index = 0; index < markdown.length; index += 1) {
+    if (markdown[index] !== "\n") continue;
+    currentLine += 1;
+    if (currentLine === lineNumber) return index + 1;
+  }
+
+  return markdown.length;
+}
+
+function closestIndex(indexes: number[], approximateIndex: number) {
+  if (indexes.length === 0) return null;
+  return indexes.reduce((best, index) =>
+    Math.abs(index - approximateIndex) < Math.abs(best - approximateIndex) ? index : best
+  );
+}
+
+function findExactOccurrenceNear(markdown: string, needle: string, approximateIndex: number) {
+  if (!needle) return null;
+
+  const indexes: number[] = [];
+  let index = markdown.indexOf(needle);
+  while (index !== -1) {
+    indexes.push(index);
+    index = markdown.indexOf(needle, index + Math.max(needle.length, 1));
+  }
+
+  return closestIndex(indexes, approximateIndex);
+}
+
+function sortChangesForReverseApply(changes: ProposalChangeBlock[]) {
+  return [...changes].sort(
+    (a, b) => b.deletionLineStart - a.deletionLineStart || b.hunkIndex - a.hunkIndex || b.changeIndex - a.changeIndex
+  );
+}
+
 function buildMarkdownFromProposalDecisions(
   proposal: DocumentProposal,
   decisions: Record<string, ProposalChangeDecision>
 ) {
-  const originalDiff = buildProposalDiff(proposal);
-  const changes = getProposalChangeBlocks(originalDiff);
-  if (changes.length === 0) return proposal.replacementMarkdown;
+  const fileDiff = buildProposalDiff(proposal);
+  if (!fileDiff) return proposal.replacementMarkdown;
 
-  let resolvedDiff = originalDiff;
-  changes.forEach((change) => {
-    resolvedDiff = diffAcceptRejectHunk(resolvedDiff, change.hunkIndex, {
-      type: decisions[change.key] === "accepted" ? "accept" : "reject",
-      changeIndex: change.changeIndex
-    });
-  });
+  const lines = [...fileDiff.deletionLines];
 
-  return resolvedDiff.additionLines.join("");
+  for (const change of sortChangesForReverseApply(getProposalChangeBlocks(fileDiff))) {
+    if (decisions[change.key] !== "accepted") continue;
+    lines.splice(change.deletionLineStart - 1, change.deletions.length, ...change.additions);
+  }
+
+  return lines.join("");
+}
+
+function parseMarkdownDiff(oldMarkdown: string, newMarkdown: string) {
+  if (oldMarkdown === newMarkdown) return null;
+
+  try {
+    return parseDiffFromFile(
+      {
+        name: "draft.md",
+        contents: oldMarkdown,
+        lang: "markdown"
+      },
+      {
+        name: "draft.md",
+        contents: newMarkdown,
+        lang: "markdown"
+      }
+    );
+  } catch {
+    return null;
+  }
+}
+
+function findManualInsertionIndex(markdown: string, sourceLines: string[], lineIndex: number) {
+  const approximateIndex = characterIndexForLine(markdown, lineIndex + 1);
+  const beforeContext = sourceLines.slice(Math.max(0, lineIndex - 4), lineIndex).join("");
+  const afterContext = sourceLines.slice(lineIndex, Math.min(sourceLines.length, lineIndex + 4)).join("");
+
+  if (beforeContext) {
+    const beforeIndex = findExactOccurrenceNear(markdown, beforeContext, approximateIndex);
+    if (beforeIndex !== null) return beforeIndex + beforeContext.length;
+  }
+
+  if (afterContext) {
+    const afterIndex = findExactOccurrenceNear(markdown, afterContext, approximateIndex);
+    if (afterIndex !== null) return afterIndex;
+  }
+
+  return null;
+}
+
+function rebaseManualMarkdownEdits(previousMarkdown: string, currentMarkdown: string, nextMarkdown: string) {
+  if (currentMarkdown === previousMarkdown) return nextMarkdown;
+
+  const manualDiff = parseMarkdownDiff(previousMarkdown, currentMarkdown);
+  if (!manualDiff) return null;
+
+  const changes = getProposalChangeBlocks(manualDiff);
+  const changedLineCount = changes.reduce((total, change) => total + change.deletions.length + change.additions.length, 0);
+  if (changedLineCount > Math.max(40, manualDiff.deletionLines.length * 0.15)) return null;
+
+  return sortChangesForReverseApply(changes).reduce<string | null>((markdown, change) => {
+    if (markdown === null) return null;
+
+    const source = change.deletions.join("");
+    const replacement = change.additions.join("");
+
+    if (!source) {
+      const insertIndex = findManualInsertionIndex(markdown, manualDiff.deletionLines, change.deletionLineStart - 1);
+      return insertIndex === null
+        ? null
+        : `${markdown.slice(0, insertIndex)}${replacement}${markdown.slice(insertIndex)}`;
+    }
+
+    const approximateIndex = characterIndexForLine(markdown, change.deletionLineStart);
+    const exactIndex = findExactOccurrenceNear(markdown, source, approximateIndex);
+    return exactIndex === null
+      ? null
+      : `${markdown.slice(0, exactIndex)}${replacement}${markdown.slice(exactIndex + source.length)}`;
+  }, nextMarkdown);
+}
+
+function applyProposalDecisionTransitions(
+  markdown: string,
+  proposal: DocumentProposal,
+  nextDecisions: Record<string, ProposalChangeDecision>
+) {
+  const previousMarkdown = buildMarkdownFromProposalDecisions(proposal, proposal.changeDecisions ?? {});
+  const nextMarkdown = buildMarkdownFromProposalDecisions(proposal, nextDecisions);
+
+  return rebaseManualMarkdownEdits(previousMarkdown, markdown, nextMarkdown) ?? nextMarkdown;
 }
 
 function resolveProposalStatus(
@@ -158,6 +531,188 @@ function lineRangeLabel(start: number, count: number) {
 
 function trimBlockText(lines: string[]) {
   return lines.join("").trim() || "(empty)";
+}
+
+function getMarkdownBlockLineSpans(markdown: string): MarkdownBlockLineSpan[] {
+  const normalizedMarkdown = markdown.replace(/\r\n/g, "\n");
+  const lines = normalizedMarkdown.split("\n");
+  const lineStarts: number[] = [];
+  let cursor = 0;
+  lines.forEach((line) => {
+    lineStarts.push(cursor);
+    cursor += line.length + 1;
+  });
+  const spans: MarkdownBlockLineSpan[] = [];
+  let paragraphStart: number | null = null;
+
+  const lineStart = (lineIndex: number) => lineStarts[lineIndex] ?? normalizedMarkdown.length;
+  const lineEnd = (lineIndex: number) => lineStart(lineIndex) + (lines[lineIndex]?.length ?? 0);
+  const textOffset = (lineIndex: number, text: string) => {
+    const index = lines[lineIndex]?.indexOf(text) ?? -1;
+    return lineStart(lineIndex) + Math.max(index, 0);
+  };
+  let blockIndex = 0;
+
+  const pushSpan = (
+    block: MarkdownBlockIdentity,
+    startLine: number,
+    endLine: number,
+    textStart: number,
+    textEnd: number
+  ) => {
+    spans.push({
+      id: markdownBlockIdFromIndex(blockIndex),
+      startLine,
+      endLine,
+      textStart,
+      textEnd
+    });
+    blockIndex += 1;
+  };
+
+  const flushParagraph = (endIndex: number) => {
+    if (paragraphStart === null) return;
+    pushSpan(
+      {
+        type: "paragraph",
+        text: lines.slice(paragraphStart, endIndex + 1).join("\n").trim()
+      },
+      paragraphStart + 1,
+      Math.max(paragraphStart + 1, endIndex + 1),
+      lineStart(paragraphStart),
+      lineEnd(endIndex)
+    );
+    paragraphStart = null;
+  };
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim();
+
+    if (!trimmed) {
+      flushParagraph(index - 1);
+      continue;
+    }
+
+    const codeFence = trimmed.match(/^```(\w+)?/);
+    if (codeFence) {
+      flushParagraph(index - 1);
+      const startIndex = index;
+      const language = codeFence[1] ?? "";
+      const codeLines: string[] = [];
+      index += 1;
+      while (index < lines.length && !lines[index].trim().startsWith("```")) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      pushSpan(
+        {
+          type: "code",
+          text: codeLines.join("\n"),
+          language
+        },
+        startIndex + 1,
+        Math.min(index + 1, lines.length),
+        lineStart(startIndex + 1),
+        codeLines.length > 0 ? lineEnd(index - 1) : lineStart(startIndex + 1)
+      );
+      continue;
+    }
+
+    const tableSeparator = (line: string) => {
+      const cells = line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+      return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+    };
+    const tableRow = (line: string) => line.trim().includes("|") && line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").length >= 2;
+    if (tableRow(lines[index] ?? "") && tableSeparator(lines[index + 1] ?? "")) {
+      flushParagraph(index - 1);
+      const startIndex = index;
+      const tableLines = [lines[index], lines[index + 1]];
+      index += 2;
+      while (index < lines.length && lines[index].trim() && tableRow(lines[index])) {
+        tableLines.push(lines[index]);
+        index += 1;
+      }
+      index -= 1;
+      pushSpan(
+        {
+          type: "table",
+          text: tableLines.join("\n")
+        },
+        startIndex + 1,
+        index + 1,
+        lineStart(startIndex),
+        lineEnd(index)
+      );
+      continue;
+    }
+
+    const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    const ordered = trimmed.match(/^(\d+)\.\s+(.+)$/);
+    const unordered = trimmed.match(/^[-*]\s+(.+)$/);
+    const quote = trimmed.match(/^>\s?(.+)$/);
+
+    if (heading || ordered || unordered || quote) {
+      flushParagraph(index - 1);
+      if (heading) {
+        const start = textOffset(index, heading[2]);
+        pushSpan({ type: "heading", level: heading[1].length, text: heading[2] }, index + 1, index + 1, start, start + heading[2].length);
+      } else if (ordered) {
+        const start = textOffset(index, ordered[2]);
+        pushSpan({ type: "ordered-list", marker: ordered[1], text: ordered[2] }, index + 1, index + 1, start, start + ordered[2].length);
+      } else if (unordered) {
+        const start = textOffset(index, unordered[1]);
+        pushSpan({ type: "unordered-list", text: unordered[1] }, index + 1, index + 1, start, start + unordered[1].length);
+      } else if (quote) {
+        const start = textOffset(index, quote[1]);
+        pushSpan({ type: "quote", text: quote[1] }, index + 1, index + 1, start, start + quote[1].length);
+      }
+      continue;
+    }
+
+    if (paragraphStart === null) paragraphStart = index;
+  }
+
+  flushParagraph(lines.length - 1);
+  return spans;
+}
+
+function findNearestBlockSpan(spans: MarkdownBlockLineSpan[], line: number) {
+  if (spans.length === 0) return null;
+  return (
+    spans.find((span) => line >= span.startLine && line <= span.endLine) ??
+    spans.find((span) => span.startLine > line) ??
+    spans.at(-1) ??
+    null
+  );
+}
+
+function buildInlineProposalReview(proposal: DocumentProposal, currentMarkdown: string): InlineProposalReview {
+  const changes = getProposalChangeBlocks(buildProposalDiff(proposal));
+  const decisions = proposal.changeDecisions ?? {};
+  const originalSpans = getMarkdownBlockLineSpans(proposal.originalMarkdown);
+  const replacementSpans = getMarkdownBlockLineSpans(proposal.replacementMarkdown);
+  const currentSpans = getMarkdownBlockLineSpans(currentMarkdown);
+  const currentBlockIds = new Set(currentSpans.map((span) => span.id));
+
+  return {
+    proposal,
+    decidedCount: changes.filter((change) => decisions[change.key]).length,
+    changes: changes.map((change) => {
+      const sourceSpans = change.deletions.length > 0 ? originalSpans : replacementSpans;
+      const sourceLine = change.deletions.length > 0 ? change.deletionLineStart : change.additionLineStart;
+      const sourceSpan = findNearestBlockSpan(sourceSpans, sourceLine);
+      const sourceIndex = sourceSpan ? sourceSpans.findIndex((span) => span.id === sourceSpan.id) : -1;
+      const fallbackSpan = sourceIndex >= 0 ? currentSpans[Math.min(sourceIndex, currentSpans.length - 1)] : currentSpans.at(0);
+      const anchorBlockId = sourceSpan && currentBlockIds.has(sourceSpan.id) ? sourceSpan.id : fallbackSpan?.id ?? null;
+
+      return {
+        ...change,
+        proposalId: proposal.id,
+        decision: decisions[change.key],
+        anchorBlockId
+      };
+    })
+  };
 }
 
 function clipText(text: string, maxLength = 260) {
@@ -205,49 +760,690 @@ function appendLedgerEvents(
   return merged.slice(-maxContextLedgerEvents);
 }
 
-function summarizeOpenProposal(proposal: DocumentProposal) {
-  const decisions = proposal.changeDecisions ?? {};
+function getThreadAnchorCandidates(thread: ReviewThread) {
+  const acceptedReplacements = [...thread.suggestions]
+    .filter((suggestion) => suggestion.status === "accepted" && suggestion.replacement.trim())
+    .reverse()
+    .map((suggestion) => suggestion.replacement.trim());
+  const otherReplacements = [...thread.suggestions]
+    .filter((suggestion) => suggestion.status !== "accepted" && suggestion.replacement.trim())
+    .reverse()
+    .map((suggestion) => suggestion.replacement.trim());
+  const candidates = [thread.anchor.exact, ...acceptedReplacements, ...otherReplacements]
+    .map((candidate) => candidate.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  return Array.from(new Set(candidates));
+}
+
+function findThreadAnchorInText(thread: ReviewThread, text: string) {
+  for (const candidate of getThreadAnchorCandidates(thread)) {
+    const index = text.indexOf(candidate);
+    if (index >= 0) {
+      return {
+        exact: candidate,
+        start: index,
+        end: index + candidate.length
+      };
+    }
+  }
+
+  return null;
+}
+
+function comparableText(value: string) {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+const fuzzyTokenStopWords = new Set([
+  "the",
+  "and",
+  "for",
+  "that",
+  "this",
+  "with",
+  "from",
+  "into",
+  "here",
+  "there",
+  "another",
+  "company",
+  "worth",
+  "watching",
+  "trying",
+  "become",
+  "becomes",
+  "because",
+  "between",
+  "without",
+  "where",
+  "which",
+  "while"
+]);
+
+function fuzzyTokens(value: string) {
+  return Array.from(
+    new Set(
+      renderedMarkdownSnippet(value)
+        .toLowerCase()
+        .match(/[a-z0-9]+(?:[._:-][a-z0-9]+)*/g)
+        ?.filter((token) => token.length > 2 && !fuzzyTokenStopWords.has(token)) ?? []
+    )
+  );
+}
+
+function isDistinctiveToken(token: string) {
+  return token.includes(".") || token.includes(":") || token.length >= 8;
+}
+
+function scoreFuzzyText(candidate: string, target: string) {
+  const candidateTokens = new Set(fuzzyTokens(candidate));
+  const targetTokens = new Set(fuzzyTokens(target));
+  if (candidateTokens.size === 0 || targetTokens.size === 0) {
+    return { score: 0, overlap: 0, sharedDistinctive: false };
+  }
+
+  const shared = Array.from(targetTokens).filter((token) => candidateTokens.has(token));
+  const overlap = shared.length;
+  const containment = overlap / Math.min(candidateTokens.size, targetTokens.size);
+  const coverage = overlap / targetTokens.size;
+
   return {
-    id: proposal.id,
-    title: proposal.title,
-    summary: proposal.summary,
-    status: proposal.status,
-    source: proposal.source,
-    threadId: proposal.threadId ?? null,
-    reviewedBlocks: Object.keys(decisions).length,
-    acceptedBlocks: Object.values(decisions).filter((decision) => decision === "accepted").length,
-    rejectedBlocks: Object.values(decisions).filter((decision) => decision === "rejected").length
+    score: Math.max(containment, coverage),
+    overlap,
+    sharedDistinctive: shared.some(isDistinctiveToken)
   };
+}
+
+function bestSuggestionTextScore(candidate: string, thread: ReviewThread, suggestion: Suggestion) {
+  return [suggestion.replacement, suggestion.original, thread.anchor.exact].reduce(
+    (best, target) => {
+      const score = scoreFuzzyText(candidate, target);
+      return score.score > best.score ? score : best;
+    },
+    { score: 0, overlap: 0, sharedDistinctive: false }
+  );
+}
+
+function isSafeFuzzySuggestionMatch(match: ReturnType<typeof scoreFuzzyText>) {
+  if (match.overlap >= 4 && match.score >= 0.28) return true;
+  return match.overlap >= 2 && match.sharedDistinctive && match.score >= 0.35;
+}
+
+function rangeMatchesThreadSuggestion(currentMarkdown: string, thread: ReviewThread, suggestion: Suggestion) {
+  const currentCandidates = [
+    comparableText(currentMarkdown),
+    comparableText(renderedMarkdownSnippet(currentMarkdown))
+  ].filter(Boolean);
+  const targetCandidates = [suggestion.original, thread.anchor.exact].map(comparableText).filter(Boolean);
+
+  return (
+    targetCandidates.some((target) => currentCandidates.includes(target)) ||
+    isSafeFuzzySuggestionMatch(bestSuggestionTextScore(currentMarkdown, thread, suggestion))
+  );
+}
+
+function lineStartIndex(markdown: string, lineNumber: number) {
+  return characterIndexForLine(markdown, lineNumber);
+}
+
+function replaceMarkdownRange(markdown: string, start: number, end: number, replacement: string) {
+  const before = markdown.slice(0, start);
+  const after = markdown.slice(end).replace(/^\n+/, "");
+  const normalizedReplacement = replacement.trimEnd();
+  const beforeBreak = before && !before.endsWith("\n") ? "\n\n" : "";
+  const afterBreak = after ? "\n\n" : "";
+
+  return `${before}${beforeBreak}${normalizedReplacement}${afterBreak}${after}`;
+}
+
+function findFuzzySuggestionWindow(markdown: string, thread: ReviewThread, suggestion: Suggestion) {
+  const blocks = parseMarkdownBlocks(markdown);
+  const spans = getMarkdownBlockLineSpans(markdown);
+  if (blocks.length === 0 || spans.length === 0) return null;
+
+  const replacementBlockCount = Math.max(1, parseMarkdownBlocks(suggestion.replacement).length);
+  const windowLengths = Array.from(
+    new Set(
+      [replacementBlockCount - 2, replacementBlockCount - 1, replacementBlockCount, replacementBlockCount + 1, replacementBlockCount + 2, 1, 2]
+        .map((length) => clamp(length, 1, blocks.length))
+        .filter(Boolean)
+    )
+  ).sort((a, b) => a - b);
+
+  let best:
+    | {
+        start: number;
+        end: number;
+        blockCount: number;
+        score: ReturnType<typeof scoreFuzzyText>;
+      }
+    | null = null;
+
+  for (const length of windowLengths) {
+    for (let index = 0; index <= blocks.length - length; index += 1) {
+      const windowBlocks = blocks.slice(index, index + length);
+      const windowMarkdown = serializeMarkdownBlocks(windowBlocks).trimEnd();
+      const score = bestSuggestionTextScore(windowMarkdown, thread, suggestion);
+      if (!isSafeFuzzySuggestionMatch(score)) continue;
+
+      const startSpan = spans.find((span) => span.id === windowBlocks[0].id);
+      const endSpan = spans.find((span) => span.id === windowBlocks.at(-1)?.id);
+      if (!startSpan || !endSpan) continue;
+
+      const start = lineStartIndex(markdown, startSpan.startLine);
+      const end = lineStartIndex(markdown, endSpan.endLine + 1);
+      if (
+        !best ||
+        score.score > best.score.score + 0.02 ||
+        (Math.abs(score.score - best.score.score) <= 0.02 &&
+          (length < best.blockCount || (length === best.blockCount && score.overlap > best.score.overlap)))
+      ) {
+        best = { start, end, blockCount: length, score };
+      }
+    }
+  }
+
+  return best;
+}
+
+function applyThreadSuggestionToMarkdown(markdown: string, thread: ReviewThread, suggestion: Suggestion) {
+  const replacement = suggestion.replacement;
+  if (!replacement.trim() || markdown.includes(replacement)) return markdown;
+
+  if (thread.anchor.kind === "markdown-range") {
+    const start = clamp(thread.anchor.start, 0, markdown.length);
+    const end = clamp(thread.anchor.end, start, markdown.length);
+    const currentMarkdown = markdown.slice(start, end);
+
+    if (currentMarkdown && rangeMatchesThreadSuggestion(currentMarkdown, thread, suggestion)) {
+      return `${markdown.slice(0, start)}${replacement}${markdown.slice(end)}`;
+    }
+  }
+
+  for (const candidate of Array.from(new Set([suggestion.original, thread.anchor.exact].filter(Boolean)))) {
+    const nextMarkdown = applySuggestion(markdown, candidate, replacement);
+    if (nextMarkdown !== markdown) return nextMarkdown;
+  }
+
+  const fuzzyWindow = findFuzzySuggestionWindow(markdown, thread, suggestion);
+  if (fuzzyWindow) {
+    return replaceMarkdownRange(markdown, fuzzyWindow.start, fuzzyWindow.end, replacement);
+  }
+
+  return markdown;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function normalizeLinkHref(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (/^(https?:|mailto:|tel:|#|\/)/i.test(trimmed)) return trimmed;
+  return `https://${trimmed}`;
+}
+
+function escapeMarkdownLinkLabel(value: string) {
+  return value.replace(/\\/g, "\\\\").replace(/\]/g, "\\]");
+}
+
+function escapeMarkdownLinkHref(value: string) {
+  return value.replace(/\s+/g, "%20").replace(/\)/g, "%29");
+}
+
+function visibleMarkdownCharacters(markdown: string) {
+  const characters: Array<{
+    sourceIndex: number;
+    linkStart?: number;
+    linkEnd?: number;
+    linkLabelStart?: number;
+    linkLabelEnd?: number;
+  }> = [];
+
+  for (let index = 0; index < markdown.length; index += 1) {
+    const linkMatch = markdown.slice(index).match(/^\[([^\]\n]+)\]\(([^)\s]+)\)/);
+    if (linkMatch) {
+      const label = linkMatch[1];
+      const labelStart = index + 1;
+      const labelEnd = labelStart + label.length;
+      const linkEnd = index + linkMatch[0].length;
+      for (let offset = 0; offset < label.length; offset += 1) {
+        characters.push({
+          sourceIndex: labelStart + offset,
+          linkStart: index,
+          linkEnd,
+          linkLabelStart: labelStart,
+          linkLabelEnd: labelEnd
+        });
+      }
+      index = linkEnd - 1;
+      continue;
+    }
+
+    const twoCharMarker = markdown.slice(index, index + 2);
+    if (twoCharMarker === "**" || twoCharMarker === "__" || twoCharMarker === "~~") {
+      index += 1;
+      continue;
+    }
+
+    const char = markdown[index];
+    if (char === "*" || char === "_" || char === "`") continue;
+    characters.push({ sourceIndex: index });
+  }
+
+  return characters;
+}
+
+function markdownRangeFromPlainRange(markdown: string, plainStart: number, plainEnd: number) {
+  const characters = visibleMarkdownCharacters(markdown);
+  if (plainStart < 0 || plainEnd <= plainStart || plainStart >= characters.length || plainEnd > characters.length) return null;
+
+  const selectedCharacters = characters.slice(plainStart, plainEnd);
+  let start = selectedCharacters[0].sourceIndex;
+  let end = (selectedCharacters.at(-1)?.sourceIndex ?? start) + 1;
+  const linkStart = selectedCharacters[0].linkStart;
+  const linkEnd = selectedCharacters[0].linkEnd;
+
+  if (
+    linkStart !== undefined &&
+    linkEnd !== undefined &&
+    selectedCharacters.every((character) => character.linkStart === linkStart && character.linkEnd === linkEnd)
+  ) {
+    const linkCharacters = characters.filter((character) => character.linkStart === linkStart && character.linkEnd === linkEnd);
+    if (
+      selectedCharacters.length === linkCharacters.length &&
+      selectedCharacters[0].sourceIndex === selectedCharacters[0].linkLabelStart &&
+      selectedCharacters.at(-1)?.sourceIndex === (selectedCharacters[0].linkLabelEnd ?? 0) - 1
+    ) {
+      start = linkStart;
+      end = linkEnd;
+    }
+  }
+
+  return { start, end };
+}
+
+function markdownOffsetFromPlainOffset(markdown: string, plainOffset: number, edge: "start" | "end") {
+  const characters = visibleMarkdownCharacters(markdown);
+  if (characters.length === 0) return 0;
+
+  if (edge === "start") {
+    if (plainOffset <= 0) return 0;
+    if (plainOffset >= characters.length) return markdown.length;
+    const character = characters[plainOffset];
+    return character.linkStart !== undefined && character.sourceIndex === character.linkLabelStart
+      ? character.linkStart
+      : character.sourceIndex;
+  }
+
+  if (plainOffset <= 0) return 0;
+  if (plainOffset >= characters.length) return markdown.length;
+  const character = characters[plainOffset - 1];
+  return character.linkEnd !== undefined && character.sourceIndex === (character.linkLabelEnd ?? 0) - 1
+    ? character.linkEnd
+    : character.sourceIndex + 1;
+}
+
+function closestEditableBlock(node: Node) {
+  const element = node instanceof Element ? node : node.parentNode instanceof Element ? node.parentNode : null;
+  return element?.closest<HTMLElement>("[data-block-id]") ?? null;
+}
+
+function plainOffsetInEditableBlock(blockNode: HTMLElement, container: Node, offset: number) {
+  const range = document.createRange();
+  range.selectNodeContents(blockNode);
+  range.setEnd(container, offset);
+  return range.toString().length;
+}
+
+function buildSelectionFromCanvasRange(markdown: string, range: Range): SelectionDraft | null {
+  const startBlockNode = closestEditableBlock(range.startContainer);
+  const endBlockNode = closestEditableBlock(range.endContainer);
+  const startBlockId = startBlockNode?.dataset.blockId;
+  const endBlockId = endBlockNode?.dataset.blockId;
+  if (!startBlockNode || !endBlockNode || !startBlockId || !endBlockId) return null;
+
+  const spans = getMarkdownBlockLineSpans(markdown);
+  const startSpan = spans.find((span) => span.id === startBlockId);
+  const endSpan = spans.find((span) => span.id === endBlockId);
+  const blocks = parseMarkdownBlocks(markdown);
+  const startBlock = blocks.find((block) => block.id === startBlockId);
+  const endBlock = blocks.find((block) => block.id === endBlockId);
+  if (!startSpan || !endSpan || !startBlock || !endBlock) return null;
+
+  const startPlainOffset = plainOffsetInEditableBlock(startBlockNode, range.startContainer, range.startOffset);
+  const endPlainOffset = plainOffsetInEditableBlock(endBlockNode, range.endContainer, range.endOffset);
+  const start = startSpan.textStart + markdownOffsetFromPlainOffset(startBlock.text, startPlainOffset, "start");
+  const end = endSpan.textStart + markdownOffsetFromPlainOffset(endBlock.text, endPlainOffset, "end");
+  if (end <= start) return null;
+
+  const exact = range.toString().replace(/\s+/g, " ").trim();
+  if (!exact) return null;
+
+  return {
+    kind: "markdown-range",
+    exact,
+    prefix: markdown.slice(Math.max(0, start - 120), start).replace(/\s+/g, " ").trim(),
+    suffix: markdown.slice(end, end + 120).replace(/\s+/g, " ").trim(),
+    start,
+    end
+  };
+}
+
+function buildSelectionFromMarkdownRange(markdown: string, startIndex: number, endIndex: number): SelectionDraft | null {
+  const start = clamp(Math.min(startIndex, endIndex), 0, markdown.length);
+  const end = clamp(Math.max(startIndex, endIndex), 0, markdown.length);
+  if (end <= start) return null;
+
+  const exact = renderedMarkdownSnippet(markdown.slice(start, end));
+  if (exact.length < 3) return null;
+
+  return {
+    kind: "markdown-range",
+    exact,
+    prefix: markdown.slice(Math.max(0, start - 120), start).replace(/\s+/g, " ").trim(),
+    suffix: markdown.slice(end, end + 120).replace(/\s+/g, " ").trim(),
+    start,
+    end
+  };
+}
+
+function resolveSelectionDraftRange(markdown: string, draft: SelectionDraft) {
+  const exact = comparableText(draft.exact);
+
+  if (draft.kind === "markdown-range") {
+    const start = clamp(draft.start, 0, markdown.length);
+    const end = clamp(draft.end, start, markdown.length);
+    const selected = comparableText(renderedMarkdownSnippet(markdown.slice(start, end)));
+    if (selected && (selected === exact || selected.includes(exact) || exact.includes(selected))) {
+      return { start, end };
+    }
+  }
+
+  const directIndex = markdown.indexOf(draft.exact);
+  if (directIndex >= 0) {
+    return { start: directIndex, end: directIndex + draft.exact.length };
+  }
+
+  const pattern = draft.exact
+    .trim()
+    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\s+/g, "\\s+");
+  if (!pattern) return null;
+
+  const match = markdown.match(new RegExp(pattern));
+  if (!match || match.index === undefined) return null;
+  return { start: match.index, end: match.index + match[0].length };
+}
+
+function deleteSelectionDraftFromMarkdown(markdown: string, draft: SelectionDraft) {
+  if (draft.kind !== "markdown-range") return null;
+
+  const range = resolveSelectionDraftRange(markdown, draft);
+  if (!range || range.end <= range.start) return null;
+
+  const blocks = parseMarkdownBlocks(markdown);
+  const spans = getMarkdownBlockLineSpans(markdown);
+  let changed = false;
+
+  const nextBlocks = blocks.flatMap((block) => {
+    const span = spans.find((item) => item.id === block.id);
+    if (!span || range.end <= span.textStart || range.start >= span.textEnd) return [block];
+
+    const start = clamp(range.start - span.textStart, 0, block.text.length);
+    const end = clamp(range.end - span.textStart, start, block.text.length);
+    if (end <= start) return [block];
+
+    changed = true;
+    const selectedEntireBlock = start === 0 && end >= block.text.length;
+    if (selectedEntireBlock) return [];
+
+    const text = `${block.text.slice(0, start)}${block.text.slice(end)}`;
+    return text.trim() ? [{ ...block, text }] : [];
+  });
+
+  if (!changed) return null;
+  const nextMarkdown = serializeMarkdownBlocks(nextBlocks);
+  return nextMarkdown === markdown ? null : nextMarkdown;
+}
+
+function renderedMarkdownSnippet(markdown: string) {
+  return markdown
+    .replace(/\[([^\]\n]+)\]\([^)]+\)/g, "$1")
+    .replace(/(^|\n)\s{0,3}#{1,6}\s+/g, " ")
+    .replace(/(^|\n)\s*(?:[-*]|\d+\.)\s+/g, " ")
+    .replace(/(^|\n)\s*>\s?/g, " ")
+    .replace(/[*_`~]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function markdownToClipboardText(markdown: string) {
+  return markdown
+    .replace(/\[([^\]\n]+)\]\([^)]+\)/g, "$1")
+    .split("\n")
+    .map((line) =>
+      line
+        .replace(/^\s{0,3}#{1,6}\s+/, "")
+        .replace(/^\s*(?:[-*]|\d+\.)\s+/, "")
+        .replace(/^\s*>\s?/, "")
+        .replace(/[*_`~]/g, "")
+        .trimEnd()
+    )
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function caretRangeFromPoint(x: number, y: number) {
+  const caretDocument = document as Document & {
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+  };
+  const range = caretDocument.caretRangeFromPoint?.(x, y);
+  if (range) return range;
+
+  const position = caretDocument.caretPositionFromPoint?.(x, y);
+  if (!position) return null;
+  const nextRange = document.createRange();
+  nextRange.setStart(position.offsetNode, position.offset);
+  nextRange.collapse(true);
+  return nextRange;
+}
+
+function applyMarkdownLinkToSelection(markdown: string, target: LinkTargetState, href: string) {
+  const range =
+    markdown === target.markdownAtOpen
+      ? markdownRangeFromPlainRange(markdown, target.plainStart, target.plainEnd)
+      : (() => {
+          const index = markdown.indexOf(target.selectedText);
+          return index >= 0 ? { start: index, end: index + target.selectedText.length } : null;
+        })();
+  if (!range) return null;
+
+  const label = escapeMarkdownLinkLabel(target.selectedText.replace(/\s+/g, " ").trim());
+  if (!label) return null;
+
+  return `${markdown.slice(0, range.start)}[${label}](${escapeMarkdownLinkHref(href)})${markdown.slice(range.end)}`;
+}
+
+function getNextInlineChangeKey(target: EventTarget | null) {
+  if (!(target instanceof Element)) return null;
+  const currentCard = target.closest<HTMLElement>("[data-inline-proposal-change]");
+  if (!currentCard) return null;
+
+  const cards = Array.from(document.querySelectorAll<HTMLElement>("[data-inline-proposal-change]"));
+  const currentIndex = cards.indexOf(currentCard);
+  return currentIndex >= 0 ? cards[currentIndex + 1]?.dataset.changeKey ?? null : null;
+}
+
+function scrollToInlineChange(changeKey: string | null) {
+  if (!changeKey) return;
+
+  window.setTimeout(() => {
+    const target = Array.from(document.querySelectorAll<HTMLElement>("[data-inline-proposal-change]")).find(
+      (card) => card.dataset.changeKey === changeKey
+    );
+    if (!target) return;
+
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.focus({ preventScroll: true });
+  }, 80);
+}
+
+function skillCommandId(value: string) {
+  return value.trim().toLowerCase().replace(/[^a-z0-9:_-]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+function skillLabel(skill: AgentSkill | AgentSkillSelection) {
+  return skill.name || skill.id;
+}
+
+function findSkillByCommand(skills: AgentSkill[], command: string) {
+  const normalized = skillCommandId(command);
+  return skills.find((skill) => skill.id === normalized || skillCommandId(skill.name) === normalized) ?? null;
+}
+
+function uniqueSkillIds(ids: string[]) {
+  return Array.from(new Set(ids.map(skillCommandId).filter(Boolean))).slice(0, 8);
+}
+
+function getActiveSlashCommand(value: string, cursor: number) {
+  const beforeCursor = value.slice(0, cursor);
+  const match = beforeCursor.match(/(^|\s)\/([a-zA-Z0-9:_-]*)$/);
+  if (!match) return null;
+  const start = cursor - match[0].length + match[1].length;
+  return {
+    start,
+    end: cursor,
+    query: match[2] ?? ""
+  };
+}
+
+function skillMatchesQuery(skill: AgentSkill, query: string) {
+  const normalized = query.toLowerCase();
+  return (
+    skill.id.includes(normalized) ||
+    skill.name.toLowerCase().includes(normalized) ||
+    skill.description.toLowerCase().includes(normalized)
+  );
+}
+
+function extractSkillIdsFromDraft(value: string, skills: AgentSkill[]) {
+  const ids: string[] = [];
+  for (const match of value.matchAll(/(^|\s)\/([a-zA-Z0-9:_-]+)/g)) {
+    const skill = findSkillByCommand(skills, match[2]);
+    if (skill) ids.push(skill.id);
+  }
+  return uniqueSkillIds(ids);
+}
+
+function stripKnownSkillCommands(value: string, skills: AgentSkill[]) {
+  return value
+    .replace(/(^|\s)\/([a-zA-Z0-9:_-]+)/g, (match, prefix, command) => {
+      return findSkillByCommand(skills, command) || command.toLowerCase() === "skills" ? prefix : match;
+    })
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function prepareAgentTurnDraft(value: string, selectedSkillIds: string[], skills: AgentSkill[]) {
+  const skillIds = uniqueSkillIds([...selectedSkillIds, ...extractSkillIdsFromDraft(value, skills)]);
+  const selectedSkills = skillIds
+    .map((id) => skills.find((skill) => skill.id === id))
+    .filter(Boolean)
+    .map((skill) => ({ id: skill!.id, name: skill!.name }));
+  const strippedBody = stripKnownSkillCommands(value, skills);
+  const skillList = selectedSkills.map((skill) => `/${skill.id}`).join(", ");
+  const body =
+    strippedBody ||
+    (selectedSkills.length > 0
+      ? `Apply ${skillList} to the current writing context. If edits are useful, return them as reviewable suggestions or document proposals.`
+      : "");
+  const summary = strippedBody
+    ? selectedSkills.length > 0
+      ? `${strippedBody} (${skillList})`
+      : strippedBody
+    : selectedSkills.length > 0
+      ? `Requested ${skillList} on the current writing context.`
+      : "";
+
+  return {
+    body,
+    displayBody: strippedBody,
+    summary,
+    skillIds,
+    skills: selectedSkills
+  };
+}
+
+function isOlderDocument(candidate: DocumentState, current: DocumentState | null) {
+  if (!current) return false;
+  const candidateTime = Date.parse(candidate.review?.updatedAt ?? "");
+  const currentTime = Date.parse(current.review?.updatedAt ?? "");
+  return Number.isFinite(candidateTime) && Number.isFinite(currentTime) && candidateTime < currentTime;
 }
 
 function App() {
   const [documentState, setDocumentState] = useState<DocumentState | null>(null);
+  const [revisionState, setRevisionState] = useState<RevisionState>({ revisions: [], currentRevisionId: null });
+  const [agentSkills, setAgentSkills] = useState<AgentSkill[]>([]);
+  const [agentRuntimeConfig, setAgentRuntimeConfig] = useState<AgentRuntimeConfig | null>(null);
+  const [agentModelDraft, setAgentModelDraft] = useState("");
   const [saveState, setSaveState] = useState<SaveState>("loading");
   const [panelMode, setPanelMode] = useState<PanelMode>("threads");
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [activeBlockId, setActiveBlockId] = useState<string | null>(null);
   const [isLeftRailCollapsed, setIsLeftRailCollapsed] = useState(false);
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
+  const [showResolvedThreads, setShowResolvedThreads] = useState(false);
+  const [isRestoringRevision, setIsRestoringRevision] = useState(false);
+  const [isRevisionHistoryOpen, setIsRevisionHistoryOpen] = useState(false);
   const [selectionDraft, setSelectionDraft] = useState<SelectionDraft | null>(null);
+  const [pendingSelectionDraft, setPendingSelectionDraft] = useState<SelectionDraft | null>(null);
   const [newComment, setNewComment] = useState("");
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
-  const [suggestionDrafts, setSuggestionDrafts] = useState<Record<string, string>>({});
+  const [newThreadSkillIds, setNewThreadSkillIds] = useState<string[]>([]);
+  const [threadSkillIds, setThreadSkillIds] = useState<Record<string, string[]>>({});
   const [chatDraft, setChatDraft] = useState("");
-  const [replyAuthor, setReplyAuthor] = useState<Author>("human");
-  const [chatAuthor, setChatAuthor] = useState<Author>("human");
+  const [chatSkillIds, setChatSkillIds] = useState<string[]>([]);
+  const [floatingToolbar, setFloatingToolbar] = useState<FloatingToolbarState | null>(null);
+  const [linkPopover, setLinkPopover] = useState<LinkPopoverState | null>(null);
+  const [selectionContextMenu, setSelectionContextMenu] = useState<SelectionContextMenuState | null>(null);
+  const [linkDraft, setLinkDraft] = useState("");
   const [lastCopied, setLastCopied] = useState<string | null>(null);
+  const [blockResetKeys, setBlockResetKeys] = useState<Record<string, number>>({});
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const linkInputRef = useRef<HTMLInputElement | null>(null);
   const blockRefs = useRef<Record<string, HTMLElement | null>>({});
+  const selectionRangeRef = useRef<Range | null>(null);
+  const selectionDragRef = useRef<SelectionDragState | null>(null);
+  const customSelectionActiveRef = useRef(false);
+  const ignoreNextCanvasSelectionEventRef = useRef(false);
+  const linkRangeRef = useRef<Range | null>(null);
+  const linkTargetRef = useRef<LinkTargetState | null>(null);
   const saveTimerRef = useRef<number | null>(null);
+  const liveEditTimerRef = useRef<number | null>(null);
+  const stateEpochRef = useRef(0);
   const stateRef = useRef<DocumentState | null>(null);
   const saveRef = useRef<SaveState>("loading");
+  const undoStackRef = useRef<HistorySnapshot[]>([]);
+  const redoStackRef = useRef<HistorySnapshot[]>([]);
+  const liveEditHistoryActiveRef = useRef(false);
+  const historyRestoreRef = useRef(false);
 
   useEffect(() => {
-    fetchDocument()
-      .then((loaded) => {
+    Promise.all([fetchDocument(), fetchRevisionHistory(), fetchAgentSkills(), fetchAgentRuntimes()])
+      .then(([loaded, revisions, skills, runtimeConfig]) => {
         stateRef.current = loaded;
         setDocumentState(loaded);
+        setRevisionState(revisions);
+        setAgentSkills(skills);
+        setAgentRuntimeConfig(runtimeConfig);
+        setAgentModelDraft(runtimeConfig.configuredModel === "auto" ? "" : runtimeConfig.configuredModel);
         setSaveState("saved");
       })
       .catch(() => setSaveState("error"));
@@ -258,47 +1454,686 @@ function App() {
   }, [saveState]);
 
   useEffect(() => {
+    const configuredModel = agentRuntimeConfig?.configuredModel ?? documentState?.agentSession?.configuredModel ?? "auto";
+    setAgentModelDraft(configuredModel === "auto" ? "" : configuredModel);
+  }, [agentRuntimeConfig?.configuredModel, documentState?.agentSession?.configuredModel]);
+
+  useEffect(() => {
+    if (!linkPopover) return;
+    window.requestAnimationFrame(() => {
+      linkInputRef.current?.focus();
+      linkInputRef.current?.select();
+    });
+  }, [linkPopover]);
+
+  useEffect(() => {
     return subscribeToDocumentEvents((remote) => {
+      if (isOlderDocument(remote, stateRef.current)) return;
+      const shouldSkipRender = shouldAvoidDocumentRenderWhileEditing(remote);
       stateRef.current = remote;
-      setDocumentState(remote);
+      if (!shouldSkipRender) setDocumentState(remote);
+      if (remote.agentSession) {
+        setAgentRuntimeConfig((current) =>
+          current
+            ? {
+                ...current,
+                configuredRuntime: remote.agentSession?.configuredRuntime ?? current.configuredRuntime,
+                resolvedRuntime: remote.agentSession?.runtime ?? current.resolvedRuntime,
+                configuredModel: remote.agentSession?.configuredModel ?? current.configuredModel,
+                resolvedModel: remote.agentSession?.model ?? current.resolvedModel
+              }
+            : current
+        );
+      }
       if (saveRef.current !== "saving") setSaveState("saved");
     });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (liveEditTimerRef.current) window.clearTimeout(liveEditTimerRef.current);
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    const reposition = () => {
+      const range = selectionRangeRef.current;
+      if (!range) return;
+      const position = getFloatingToolbarPosition(range);
+      if (position) setFloatingToolbar(position);
+    };
+
+    window.addEventListener("resize", reposition);
+    return () => window.removeEventListener("resize", reposition);
   }, []);
 
   const outline = useMemo(() => extractOutline(documentState?.markdown ?? ""), [documentState?.markdown]);
   const words = useMemo(() => wordCount(documentState?.markdown ?? ""), [documentState?.markdown]);
   const threads = documentState?.review.threads ?? [];
+  const visibleThreads = useMemo(
+    () => (showResolvedThreads ? threads : threads.filter((thread) => thread.status !== "resolved")),
+    [showResolvedThreads, threads]
+  );
   const proposals = documentState?.review.proposals ?? [];
+  const reviewableProposals = useMemo(
+    () =>
+      proposals
+        .filter((proposal) => proposal.status === "open" || proposal.status === "reviewed")
+        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)),
+    [proposals]
+  );
+  const activeInlineProposal = useMemo(() => {
+    if (!documentState) return null;
+    for (const proposal of reviewableProposals) {
+      const review = buildInlineProposalReview(proposal, documentState.markdown);
+      if (review.changes.some((change) => !change.decision)) return review;
+    }
+    return null;
+  }, [documentState, reviewableProposals]);
   const contextLedger = documentState?.review.contextLedger ?? [];
-  const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? threads[0] ?? null;
+  const activeThread = visibleThreads.find((thread) => thread.id === activeThreadId) ?? visibleThreads[0] ?? null;
   const openThreadCount = openThreads(threads).length;
+  const resolvedThreadCount = threads.filter((thread) => thread.status === "resolved").length;
   const agentSession = documentState?.agentSession;
+
+  function refreshRevisions() {
+    fetchRevisionHistory()
+      .then((revisions) => setRevisionState(revisions))
+      .catch(() => undefined);
+  }
+
+  async function saveAgentRuntimeConfig(nextConfig: { runtime: string; model: string }) {
+    if (agentSession?.status === "running") return;
+
+    setSaveState("saving");
+    try {
+      const updated = await updateAgentConfig(nextConfig);
+      stateRef.current = updated.document;
+      setDocumentState(updated.document);
+      setAgentRuntimeConfig(updated.config);
+      setAgentModelDraft(updated.config.configuredModel === "auto" ? "" : updated.config.configuredModel);
+      setSaveState("saved");
+    } catch {
+      setSaveState("error");
+    }
+  }
+
+  function currentConfiguredRuntime() {
+    return agentRuntimeConfig?.configuredRuntime ?? agentSession?.configuredRuntime ?? agentSession?.runtime ?? "auto";
+  }
+
+  function currentConfiguredModel() {
+    return agentRuntimeConfig?.configuredModel ?? agentSession?.configuredModel ?? agentSession?.model ?? "auto";
+  }
+
+  function updateAgentRuntime(runtime: string) {
+    void saveAgentRuntimeConfig({
+      runtime,
+      model: currentConfiguredModel()
+    });
+  }
+
+  function commitAgentModel(value: string) {
+    const model = value.trim() || "auto";
+    if (model === currentConfiguredModel()) return;
+    void saveAgentRuntimeConfig({
+      runtime: currentConfiguredRuntime(),
+      model
+    });
+  }
+
+  function snapshotFromState(state: DocumentState): HistorySnapshot {
+    return {
+      markdown: state.markdown,
+      review: structuredClone(state.review)
+    };
+  }
+
+  function comparableReviewPayload(review: DocumentState["review"]) {
+    const { updatedAt: _updatedAt, ...payload } = review;
+    return JSON.stringify(payload);
+  }
+
+  function snapshotsMatch(left: HistorySnapshot | null | undefined, right: HistorySnapshot | null | undefined) {
+    return Boolean(
+      left &&
+        right &&
+        left.markdown === right.markdown &&
+        comparableReviewPayload(left.review) === comparableReviewPayload(right.review)
+    );
+  }
+
+  function pushUndoSnapshot(state: DocumentState) {
+    const snapshot = snapshotFromState(state);
+    const last = undoStackRef.current.at(-1);
+    if (snapshotsMatch(last, snapshot)) return;
+
+    undoStackRef.current = [...undoStackRef.current, snapshot].slice(-100);
+    redoStackRef.current = [];
+  }
+
+  function pushRedoSnapshot(snapshot: HistorySnapshot) {
+    const last = redoStackRef.current.at(-1);
+    if (snapshotsMatch(last, snapshot)) return;
+
+    redoStackRef.current = [...redoStackRef.current, snapshot].slice(-100);
+  }
+
+  function popDistinctSnapshot(stack: HistorySnapshot[], current: HistorySnapshot) {
+    const nextStack = [...stack];
+    let target = nextStack.pop() ?? null;
+
+    while (target && snapshotsMatch(target, current)) {
+      target = nextStack.pop() ?? null;
+    }
+
+    return { target, stack: nextStack };
+  }
+
+  function beginLiveEditHistory() {
+    const current = stateRef.current;
+    if (!current || liveEditHistoryActiveRef.current || historyRestoreRef.current) return;
+    pushUndoSnapshot(current);
+    liveEditHistoryActiveRef.current = true;
+  }
+
+  function clearEditorInteractionState() {
+    window.getSelection()?.removeAllRanges();
+    selectionRangeRef.current = null;
+    customSelectionActiveRef.current = false;
+    setPendingSelectionDraft(null);
+    setFloatingToolbar(null);
+    setLinkPopover(null);
+    setSelectionContextMenu(null);
+  }
+
+  function restoreEditorHistory(direction: "undo" | "redo") {
+    const current = stateRef.current;
+    if (!current) return false;
+
+    const liveState = stateWithPendingLiveCanvasEdit(current);
+    const currentSnapshot = snapshotFromState(liveState);
+    const sourceStack = direction === "undo" ? undoStackRef.current : redoStackRef.current;
+    const { target, stack } = popDistinctSnapshot(sourceStack, currentSnapshot);
+    if (!target) return false;
+
+    if (direction === "undo") {
+      undoStackRef.current = stack;
+      pushRedoSnapshot(currentSnapshot);
+    } else {
+      redoStackRef.current = stack;
+      const undoLast = undoStackRef.current.at(-1);
+      if (!snapshotsMatch(undoLast, currentSnapshot)) {
+        undoStackRef.current = [...undoStackRef.current, currentSnapshot].slice(-100);
+      }
+    }
+
+    historyRestoreRef.current = true;
+    liveEditHistoryActiveRef.current = false;
+    const next: DocumentState = {
+      ...liveState,
+      markdown: target.markdown,
+      review: {
+        ...structuredClone(target.review),
+        updatedAt: nowIso()
+      }
+    };
+    setDocumentState(next);
+    queueDocumentSave(next, { renderSavedState: true });
+    historyRestoreRef.current = false;
+    clearEditorInteractionState();
+    return true;
+  }
+
+  function stateWithLiveCanvasEdit(state: DocumentState) {
+    if (!canvasRef.current) return state;
+    let markdown = state.markdown;
+    try {
+      markdown = serializeCanvasMarkdown(state.markdown);
+    } catch (error) {
+      console.error("Unable to serialize editor contents", error);
+      setSaveState("error");
+      return state;
+    }
+
+    if (markdown === state.markdown) return state;
+
+    return {
+      ...state,
+      markdown,
+      review: {
+        ...state.review,
+        updatedAt: nowIso()
+      }
+    };
+  }
+
+  function stateWithPendingLiveCanvasEdit(state: DocumentState) {
+    return liveEditHistoryActiveRef.current || liveEditTimerRef.current !== null ? stateWithLiveCanvasEdit(state) : state;
+  }
+
+  function serializeCanvasMarkdown(markdown: string) {
+    return serializeMarkdownBlocks(
+      parseMarkdownBlocks(markdown).flatMap((block) => {
+        const node = blockRefs.current[block.id];
+        if (!node) return [block];
+        const text = blockNodeToMarkdown(node, block.type);
+        return text.trim() ? [{ ...block, text }] : [];
+      })
+    );
+  }
+
+  function blockNodeToMarkdown(node: HTMLElement, blockType?: string) {
+    const html = blockType === "table" ? node.outerHTML : node.innerHTML;
+    return htmlToInlineMarkdown(html.replace(/\u00a0/g, " ").trimEnd());
+  }
+
+  function isCanvasFocused() {
+    return Boolean(canvasRef.current && document.activeElement && canvasRef.current.contains(document.activeElement));
+  }
+
+  function shouldAvoidDocumentRenderWhileEditing(remote: DocumentState) {
+    const current = stateRef.current;
+    return Boolean(isCanvasFocused() && current && remote.markdown === current.markdown);
+  }
+
+  function commitCanvasDom() {
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+
+    const current = stateRef.current;
+    if (!current) return;
+    const next = stateWithLiveCanvasEdit(current);
+    if (next === current) {
+      if (documentState && current.markdown !== documentState.markdown) setDocumentState(current);
+      liveEditHistoryActiveRef.current = false;
+      return;
+    }
+    commit(() => next);
+    liveEditHistoryActiveRef.current = false;
+  }
+
+  function scheduleLiveCanvasCommit() {
+    beginLiveEditHistory();
+    if (liveEditTimerRef.current) window.clearTimeout(liveEditTimerRef.current);
+    liveEditTimerRef.current = window.setTimeout(() => {
+      liveEditTimerRef.current = null;
+      saveLiveCanvasDomQuietly();
+      liveEditHistoryActiveRef.current = false;
+    }, 1200);
+  }
+
+  function saveLiveCanvasDomQuietly() {
+    const current = stateRef.current;
+    if (!current) return;
+    const next = stateWithLiveCanvasEdit(current);
+    if (next === current) return;
+    if (!liveEditHistoryActiveRef.current && !historyRestoreRef.current) pushUndoSnapshot(current);
+
+    queueDocumentSave(next, { renderSavedState: false });
+  }
 
   function commit(updater: (state: DocumentState) => DocumentState) {
     if (!stateRef.current) return null;
 
-    const next = updater(stateRef.current);
-    stateRef.current = next;
+    const current = stateRef.current;
+    let next: DocumentState;
+    try {
+      const base = stateWithPendingLiveCanvasEdit(current);
+      next = updater(base);
+      if (!historyRestoreRef.current && next.markdown !== base.markdown) {
+        pushUndoSnapshot(base);
+      } else if (
+        !historyRestoreRef.current &&
+        !liveEditHistoryActiveRef.current &&
+        base.markdown !== current.markdown
+      ) {
+        pushUndoSnapshot(current);
+      }
+    } catch (error) {
+      console.error("Unable to commit document update", error);
+      setSaveState("error");
+      return null;
+    }
+
     setDocumentState(next);
+    queueDocumentSave(next, { renderSavedState: true });
+    liveEditHistoryActiveRef.current = false;
+
+    return next;
+  }
+
+  function queueDocumentSave(next: DocumentState, { renderSavedState }: { renderSavedState: boolean }) {
+    stateEpochRef.current += 1;
+    const saveEpoch = stateEpochRef.current;
+    stateRef.current = next;
     setSaveState("saving");
 
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     saveTimerRef.current = window.setTimeout(() => {
       saveDocument(next)
         .then((saved) => {
-          stateRef.current = saved;
-          setDocumentState(saved);
+          if (saveEpoch !== stateEpochRef.current || isOlderDocument(saved, stateRef.current)) return;
+          const current = stateRef.current;
+          const merged = current
+            ? {
+                ...saved,
+                agentSession: current.agentSession ?? saved.agentSession
+              }
+            : saved;
+          stateRef.current = merged;
+          if (renderSavedState || !shouldAvoidDocumentRenderWhileEditing(merged)) setDocumentState(merged);
           setSaveState("saved");
+          refreshRevisions();
         })
-        .catch(() => setSaveState("error"));
+        .catch(() => {
+          if (saveEpoch === stateEpochRef.current) setSaveState("error");
+        });
     }, 350);
-
-    return next;
   }
 
-  function triggerAgent(source: "chat" | "thread", body: string, nextState: DocumentState | null, threadId?: string | null) {
+  function requestThreadAgentReply(threadId: string) {
+    const current = stateRef.current;
+    const thread = current?.review.threads.find((item) => item.id === threadId);
+    if (!current || !thread) return;
+
+    const latestHumanMessage = [...thread.messages].reverse().find((message) => message.author === "human")?.body;
+    const body = latestHumanMessage
+      ? `Reply to this anchored thread. Human note: ${latestHumanMessage}`
+      : `Reply to this anchored thread about: ${thread.anchor.exact}`;
+    triggerAgent("thread", body, current, threadId);
+  }
+
+  function getFloatingToolbarPosition(range: Range): FloatingToolbarState | null {
+    const rects = Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0);
+    const rect = rects[0] ?? range.getBoundingClientRect();
+    if (!rect || rect.width === 0 || rect.height === 0) return null;
+
+    const toolbarWidth = 430;
+    const toolbarHeight = 42;
+    const margin = 10;
+    const placement = rect.top > toolbarHeight + margin * 2 ? "above" : "below";
+    const top =
+      placement === "above"
+        ? Math.max(margin, rect.top - toolbarHeight - margin)
+        : Math.min(window.innerHeight - toolbarHeight - margin, rect.bottom + margin);
+
+    return {
+      left: clamp(rect.left + rect.width / 2, margin + toolbarWidth / 2, window.innerWidth - margin - toolbarWidth / 2),
+      top,
+      placement
+    };
+  }
+
+  function getLinkPopoverPosition(range: Range): LinkPopoverState | null {
+    const rects = Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0);
+    const rect = rects[0] ?? range.getBoundingClientRect();
+    if (!rect || rect.width === 0 || rect.height === 0) return null;
+
+    const popoverWidth = 340;
+    const popoverHeight = 46;
+    const margin = 10;
+    const hasRoomBelow = rect.bottom + popoverHeight + margin < window.innerHeight;
+
+    return {
+      left: clamp(rect.left + rect.width / 2, margin + popoverWidth / 2, window.innerWidth - margin - popoverWidth / 2),
+      top: hasRoomBelow ? rect.bottom + margin : Math.max(margin, rect.top - popoverHeight - margin)
+    };
+  }
+
+  function updateFloatingToolbarPosition() {
+    const range = selectionRangeRef.current;
+    if (!range || !canvasRef.current) return;
+
+    try {
+      if (!canvasRef.current.contains(range.startContainer) || !canvasRef.current.contains(range.endContainer)) return;
+      const position = getFloatingToolbarPosition(range);
+      if (position) setFloatingToolbar(position);
+    } catch {
+      selectionRangeRef.current = null;
+      setFloatingToolbar(null);
+    }
+  }
+
+  function clearCanvasSelectionState() {
+    selectionRangeRef.current = null;
+    selectionDragRef.current = null;
+    customSelectionActiveRef.current = false;
+    setPendingSelectionDraft(null);
+    setFloatingToolbar(null);
+    setLinkPopover(null);
+    setSelectionContextMenu(null);
+    linkRangeRef.current = null;
+    linkTargetRef.current = null;
+  }
+
+  function isProposalReviewTarget(target: EventTarget | null) {
+    return (
+      target instanceof Element &&
+      Boolean(target.closest(".inline-proposal-review-bar, .inline-proposal-change"))
+    );
+  }
+
+  function markdownForSelection() {
+    return stateRef.current?.markdown ?? documentState?.markdown ?? "";
+  }
+
+  function editableBlockFromPoint(clientX: number, clientY: number) {
+    const element = document.elementFromPoint(clientX, clientY);
+    const direct = element ? closestEditableBlock(element) : null;
+    if (direct) return direct;
+
+    const shell = element instanceof Element ? element.closest<HTMLElement>("[data-block-shell]") : null;
+    const shellBlock = shell?.querySelector<HTMLElement>("[data-block-id]");
+    if (shellBlock) return shellBlock;
+
+    const blocks = Array.from(canvasRef.current?.querySelectorAll<HTMLElement>("[data-block-id]") ?? []);
+    if (blocks.length === 0) return null;
+
+    const verticallyAligned = blocks.find((block) => {
+      const rect = block.getBoundingClientRect();
+      return clientY >= rect.top - 12 && clientY <= rect.bottom + 12;
+    });
+    if (verticallyAligned) return verticallyAligned;
+
+    const nearest = blocks.reduce<{ block: HTMLElement; distance: number } | null>((current, block) => {
+      const rect = block.getBoundingClientRect();
+      const distance = clientY < rect.top ? rect.top - clientY : clientY - rect.bottom;
+      return !current || distance < current.distance ? { block, distance } : current;
+    }, null);
+
+    return nearest && nearest.distance < 80 ? nearest.block : null;
+  }
+
+  function selectionEndpointFromBlockEdge(blockNode: HTMLElement, clientX: number, clientY: number): SelectionEndpoint | null {
+    const markdown = markdownForSelection();
+    const blockId = blockNode.dataset.blockId;
+    if (!blockId || !markdown) return null;
+
+    const block = parseMarkdownBlocks(markdown).find((item) => item.id === blockId);
+    const span = getMarkdownBlockLineSpans(markdown).find((item) => item.id === blockId);
+    if (!block || !span) return null;
+
+    const rect = blockNode.getBoundingClientRect();
+    const useStart =
+      clientY < rect.top ||
+      (clientY <= rect.bottom && clientY < rect.top + rect.height / 2 && clientX < rect.left + rect.width * 0.7);
+    const plainOffset = useStart ? 0 : visibleMarkdownCharacters(block.text).length;
+    const edge = useStart ? "start" : "end";
+
+    return {
+      blockId,
+      sourceIndex: span.textStart + markdownOffsetFromPlainOffset(block.text, plainOffset, edge)
+    };
+  }
+
+  function handleCanvasSelectionEvent(event: React.SyntheticEvent<HTMLElement>) {
+    if (ignoreNextCanvasSelectionEventRef.current) {
+      ignoreNextCanvasSelectionEventRef.current = false;
+      return;
+    }
+    if (isProposalReviewTarget(event.target)) {
+      clearCanvasSelectionState();
+      return;
+    }
+    rememberCanvasSelection();
+  }
+
+  function getSelectionEndpointFromPoint(clientX: number, clientY: number): SelectionEndpoint | null {
+    const markdown = markdownForSelection();
+    if (!markdown) return null;
+
+    const range = caretRangeFromPoint(clientX, clientY);
+    if (!range) {
+      const blockNode = editableBlockFromPoint(clientX, clientY);
+      return blockNode ? selectionEndpointFromBlockEdge(blockNode, clientX, clientY) : null;
+    }
+
+    const blockNode = closestEditableBlock(range.startContainer);
+    const blockId = blockNode?.dataset.blockId;
+    if (!blockNode || !blockId) {
+      const fallbackBlock = editableBlockFromPoint(clientX, clientY);
+      return fallbackBlock ? selectionEndpointFromBlockEdge(fallbackBlock, clientX, clientY) : null;
+    }
+
+    const block = parseMarkdownBlocks(markdown).find((item) => item.id === blockId);
+    const span = getMarkdownBlockLineSpans(markdown).find((item) => item.id === blockId);
+    if (!block || !span) return null;
+
+    const plainOffset = plainOffsetInEditableBlock(blockNode, range.startContainer, range.startOffset);
+    return {
+      blockId,
+      sourceIndex: span.textStart + markdownOffsetFromPlainOffset(block.text, plainOffset, "start")
+    };
+  }
+
+  function updateCrossBlockDragSelection(event: React.PointerEvent<HTMLElement>) {
+    const drag = selectionDragRef.current;
+    if (!drag) return null;
+
+    const moved = Math.hypot(event.clientX - drag.x, event.clientY - drag.y);
+    if (moved < 6) return drag.draft;
+
+    const endpoint = getSelectionEndpointFromPoint(event.clientX, event.clientY);
+    if (!endpoint || endpoint.sourceIndex === drag.endpoint.sourceIndex) return drag.draft;
+    if (endpoint.blockId === drag.endpoint.blockId) {
+      if (drag.isSelecting) {
+        drag.draft = null;
+        drag.isSelecting = false;
+        customSelectionActiveRef.current = false;
+        setPendingSelectionDraft(null);
+      }
+      return null;
+    }
+
+    const markdown = markdownForSelection();
+    const draft = buildSelectionFromMarkdownRange(markdown, drag.endpoint.sourceIndex, endpoint.sourceIndex);
+    if (!draft) return drag.draft;
+
+    drag.draft = draft;
+    drag.isSelecting = true;
+    customSelectionActiveRef.current = true;
+    selectionRangeRef.current = null;
+    setPendingSelectionDraft(draft);
+    setFloatingToolbar(null);
+    setLinkPopover(null);
+    window.getSelection()?.removeAllRanges();
+
+    try {
+      event.currentTarget.setPointerCapture(drag.pointerId);
+    } catch {
+      // Pointer capture can fail after the browser has already released the pointer.
+    }
+
+    event.preventDefault();
+    return draft;
+  }
+
+  function floatingToolbarPositionFromPoint(clientX: number, clientY: number): FloatingToolbarState {
+    const above = clientY > 70;
+    return {
+      left: clamp(clientX, 90, window.innerWidth - 90),
+      top: above ? clientY - 52 : clientY + 18,
+      placement: above ? "above" : "below"
+    };
+  }
+
+  function handleCanvasPointerDown(event: React.PointerEvent<HTMLElement>) {
+    if (event.button !== 0 || isProposalReviewTarget(event.target)) return;
+
+    setSelectionContextMenu(null);
+    customSelectionActiveRef.current = false;
+    setPendingSelectionDraft(null);
+    const endpoint = getSelectionEndpointFromPoint(event.clientX, event.clientY);
+    selectionDragRef.current = endpoint
+      ? {
+          x: event.clientX,
+          y: event.clientY,
+          pointerId: event.pointerId,
+          endpoint,
+          draft: null,
+          isSelecting: false
+        }
+      : null;
+  }
+
+  function handleCanvasPointerMove(event: React.PointerEvent<HTMLElement>) {
+    updateCrossBlockDragSelection(event);
+  }
+
+  function handleCanvasPointerUp(event: React.PointerEvent<HTMLElement>) {
+    const drag = selectionDragRef.current;
+    const draft = drag ? updateCrossBlockDragSelection(event) ?? drag.draft : null;
+    selectionDragRef.current = null;
+    if (drag) {
+      try {
+        event.currentTarget.releasePointerCapture(drag.pointerId);
+      } catch {
+        // It is fine if capture was never acquired.
+      }
+    }
+    if (!drag || event.button !== 0) return;
+
+    const moved = Math.hypot(event.clientX - drag.x, event.clientY - drag.y);
+    if (moved < 6) return;
+    if (!draft) return;
+
+    ignoreNextCanvasSelectionEventRef.current = true;
+    selectionRangeRef.current = null;
+    event.currentTarget.focus({ preventScroll: true });
+    setPendingSelectionDraft(draft);
+    setFloatingToolbar(floatingToolbarPositionFromPoint(event.clientX, event.clientY));
+    setLinkPopover(null);
+  }
+
+  function handleCanvasPointerCancel(event: React.PointerEvent<HTMLElement>) {
+    const drag = selectionDragRef.current;
+    selectionDragRef.current = null;
+    if (drag?.isSelecting) {
+      customSelectionActiveRef.current = false;
+      setPendingSelectionDraft(null);
+    }
+    if (!drag) return;
+
+    try {
+      event.currentTarget.releasePointerCapture(drag.pointerId);
+    } catch {
+      // It is fine if capture was never acquired.
+    }
+  }
+
+  function triggerAgent(
+    source: "chat" | "thread",
+    body: string,
+    nextState: DocumentState | null,
+    threadId?: string | null,
+    skills: AgentSkillSelection[] = []
+  ) {
     if (!nextState) return;
-    sendAgentMessage({ source, body, threadId, document: nextState })
+    sendAgentMessage({ source, body, threadId, document: nextState, skills })
       .then((remote) => {
         stateRef.current = remote;
         setDocumentState(remote);
@@ -307,24 +2142,286 @@ function App() {
       .catch(() => setSaveState("error"));
   }
 
-  function handleSelection() {
+  function rememberCanvasSelection() {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || !canvasRef.current) {
+      selectionRangeRef.current = null;
+      if (customSelectionActiveRef.current) return;
+      setPendingSelectionDraft(null);
+      setFloatingToolbar(null);
+      return;
+    }
+
+    const range = selection.getRangeAt(0);
+    if (!canvasRef.current.contains(range.commonAncestorContainer)) return;
+    if (selection.isCollapsed) {
+      selectionRangeRef.current = null;
+      if (customSelectionActiveRef.current) return;
+      setPendingSelectionDraft(null);
+      setFloatingToolbar(null);
+      return;
+    }
+
+    const nextRange = range.cloneRange();
+    selectionRangeRef.current = nextRange;
+    customSelectionActiveRef.current = false;
+    setPendingSelectionDraft(null);
+    setFloatingToolbar(getFloatingToolbarPosition(nextRange));
+  }
+
+  function restoreCanvasSelection() {
+    if (!selectionRangeRef.current || !canvasRef.current) return false;
+
+    try {
+      const range = selectionRangeRef.current;
+      if (!canvasRef.current.contains(range.startContainer) || !canvasRef.current.contains(range.endContainer)) {
+        selectionRangeRef.current = null;
+        return false;
+      }
+
+      const selection = window.getSelection();
+      if (!selection) return false;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const position = getFloatingToolbarPosition(range);
+      if (position) setFloatingToolbar(position);
+      return true;
+    } catch {
+      selectionRangeRef.current = null;
+      setFloatingToolbar(null);
+      return false;
+    }
+  }
+
+  function focusCanvasBlock(blockId: string) {
+    setActiveBlockId((current) => (current === blockId ? current : blockId));
+  }
+
+  function getEditableBlockForRange(range: Range) {
+    const startBlock = closestEditableBlock(range.startContainer);
+    const endBlock = closestEditableBlock(range.endContainer);
+    return startBlock && startBlock === endBlock ? startBlock : null;
+  }
+
+  function scrollToThreadAnchor(threadId: string) {
+    const directTarget = canvasRef.current?.querySelector<HTMLElement>(`[data-thread-id="${threadId}"]`);
+    if (directTarget) {
+      directTarget.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+      directTarget.classList.add("is-scroll-target");
+      window.setTimeout(() => directTarget.classList.remove("is-scroll-target"), 1300);
+      return;
+    }
+
+    const current = stateRef.current;
+    const thread = current?.review.threads.find((item) => item.id === threadId);
+    if (!current || !thread) return;
+
+    const candidates = getThreadAnchorCandidates(thread);
+    const targetBlock = parseMarkdownBlocks(current.markdown).find((block) =>
+      candidates.some((candidate) => block.text.includes(candidate))
+    );
+    const blockNode = targetBlock ? blockRefs.current[targetBlock.id] : null;
+    if (!blockNode) return;
+
+    blockNode.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+    blockNode.classList.add("is-scroll-target");
+    window.setTimeout(() => blockNode.classList.remove("is-scroll-target"), 1300);
+  }
+
+  function activateThread(threadId: string, options: { scroll?: boolean; openPanel?: boolean } = {}) {
+    setActiveThreadId(threadId);
+    if (options.openPanel) setPanelMode("threads");
+    if (options.scroll) {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => scrollToThreadAnchor(threadId));
+      });
+    }
+  }
+
+  function startCommentFromSelection() {
     if (!documentState || !canvasRef.current) return;
+    if (pendingSelectionDraft) {
+      setSelectionDraft(pendingSelectionDraft);
+      setPendingSelectionDraft(null);
+      customSelectionActiveRef.current = false;
+      setPanelMode("threads");
+      setFloatingToolbar(null);
+      return;
+    }
+
+    restoreCanvasSelection();
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
 
     const range = selection.getRangeAt(0);
-    if (!canvasRef.current.contains(range.commonAncestorContainer)) return;
+    if (!canvasRef.current.contains(range.startContainer) || !canvasRef.current.contains(range.endContainer)) return;
 
     const selectedText = selection.toString().replace(/\s+/g, " ").trim();
     if (selectedText.length < 3) return;
 
-    const nextSelection = buildSelection(documentState.markdown, selectedText);
+    const markdown = markdownForSelection();
+    const nextSelection = buildSelectionFromCanvasRange(markdown, range) ?? buildSelection(markdown, selectedText);
     setSelectionDraft(nextSelection);
     setPanelMode("threads");
+    setFloatingToolbar(null);
+  }
+
+  function deletePendingMarkdownSelection() {
+    const draft = pendingSelectionDraft;
+    if (!draft) return false;
+
+    let didDelete = false;
+    commit((state) => {
+      const markdown = deleteSelectionDraftFromMarkdown(state.markdown, draft);
+      if (!markdown) return state;
+      didDelete = true;
+      return {
+        ...state,
+        markdown,
+        review: {
+          ...state.review,
+          updatedAt: nowIso()
+        }
+      };
+    });
+
+    if (!didDelete) return false;
+
+    clearEditorInteractionState();
+    return true;
+  }
+
+  function showTransientToast(label: string) {
+    setLastCopied(label);
+    window.setTimeout(() => setLastCopied(null), 1400);
+  }
+
+  function pendingSelectionClipboardPayload(): ClipboardPayload | null {
+    const draft = pendingSelectionDraft;
+    if (!draft) return null;
+
+    const markdown = markdownForSelection();
+    const range = resolveSelectionDraftRange(markdown, draft);
+    if (!range || range.end <= range.start) {
+      return draft.exact ? { plainText: draft.exact } : null;
+    }
+
+    const selectedMarkdown = markdown.slice(range.start, range.end);
+    const plainText = markdownToClipboardText(selectedMarkdown) || draft.exact;
+    return plainText ? { plainText, markdown: selectedMarkdown } : null;
+  }
+
+  function nativeSelectionClipboardPayload(): ClipboardPayload | null {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0 || !canvasRef.current) return null;
+
+    const range = selection.getRangeAt(0);
+    if (!canvasRef.current.contains(range.commonAncestorContainer)) return null;
+
+    const plainText = selection.toString();
+    return plainText.trim() ? { plainText } : null;
+  }
+
+  function activeSelectionClipboardPayload(): ClipboardPayload | null {
+    return pendingSelectionClipboardPayload() ?? nativeSelectionClipboardPayload();
+  }
+
+  function setClipboardEventPayload(clipboardData: DataTransfer, payload: ClipboardPayload) {
+    clipboardData.setData("text/plain", payload.plainText);
+    if (payload.markdown) clipboardData.setData("text/markdown", payload.markdown);
+  }
+
+  async function writeClipboardPayload(payload: ClipboardPayload, label: string) {
+    try {
+      await navigator.clipboard.writeText(payload.plainText);
+      showTransientToast(label);
+      return true;
+    } catch {
+      const textArea = document.createElement("textarea");
+      textArea.value = payload.plainText;
+      textArea.setAttribute("readonly", "");
+      textArea.style.position = "fixed";
+      textArea.style.left = "-9999px";
+      textArea.style.top = "0";
+      document.body.appendChild(textArea);
+      textArea.select();
+      const copied = document.execCommand("copy");
+      document.body.removeChild(textArea);
+      showTransientToast(copied ? label : "Copy failed");
+      return copied;
+    }
+  }
+
+  async function copyPendingSelectionToClipboard(label = "Selection copied") {
+    const payload = pendingSelectionClipboardPayload();
+    if (!payload) return false;
+    setSelectionContextMenu(null);
+    return writeClipboardPayload(payload, label);
+  }
+
+  async function cutPendingSelectionToClipboard() {
+    const copied = await copyPendingSelectionToClipboard("Selection cut");
+    if (!copied) return false;
+    return deletePendingMarkdownSelection();
+  }
+
+  function handleCanvasCopy(event: React.ClipboardEvent<HTMLElement>) {
+    if (!pendingSelectionDraft) return;
+
+    const payload = activeSelectionClipboardPayload();
+    if (!payload) return;
+
+    event.preventDefault();
+    setClipboardEventPayload(event.clipboardData, payload);
+    showTransientToast("Selection copied");
+  }
+
+  function handleCanvasCut(event: React.ClipboardEvent<HTMLElement>) {
+    if (!pendingSelectionDraft) return;
+
+    const payload = activeSelectionClipboardPayload();
+    if (!payload) return;
+
+    event.preventDefault();
+    setClipboardEventPayload(event.clipboardData, payload);
+    deletePendingMarkdownSelection();
+    showTransientToast("Selection cut");
+  }
+
+  function handleCanvasContextMenu(event: React.MouseEvent<HTMLElement>) {
+    if (!pendingSelectionDraft || !pendingSelectionClipboardPayload()) return;
+
+    event.preventDefault();
+    setSelectionContextMenu({
+      left: clamp(event.clientX, 8, window.innerWidth - 180),
+      top: clamp(event.clientY, 8, window.innerHeight - 92)
+    });
+  }
+
+  function handleCanvasKeyDown(event: React.KeyboardEvent<HTMLElement>) {
+    if (event.defaultPrevented || !pendingSelectionDraft) return;
+
+    const key = event.key.toLowerCase();
+    const isCommand = event.metaKey || event.ctrlKey;
+    if (isCommand && !event.shiftKey && key === "c") {
+      event.preventDefault();
+      void copyPendingSelectionToClipboard();
+      return;
+    }
+    if (isCommand && !event.shiftKey && key === "x") {
+      event.preventDefault();
+      void cutPendingSelectionToClipboard();
+      return;
+    }
+    if (event.key === "Backspace" || event.key === "Delete") {
+      event.preventDefault();
+      deletePendingMarkdownSelection();
+    }
   }
 
   function addThread() {
-    if (!selectionDraft || !newComment.trim()) return;
+    const prepared = prepareAgentTurnDraft(newComment, newThreadSkillIds, agentSkills);
+    if (!selectionDraft || !prepared.body) return;
 
     const createdAt = nowIso();
     const thread: ReviewThread = {
@@ -335,8 +2432,9 @@ function App() {
         {
           id: makeId("msg"),
           author: "human",
-          body: newComment.trim(),
-          createdAt
+          body: prepared.displayBody,
+          createdAt,
+          skills: prepared.skills
         }
       ],
       suggestions: [],
@@ -346,7 +2444,7 @@ function App() {
     const ledgerEvent = createLedgerEvent({
       type: "thread_created",
       actor: "human",
-      summary: `Created anchored thread on "${selectionDraft.exact}" with note: ${newComment.trim()}`,
+      summary: `Created anchored thread on "${selectionDraft.exact}" with note: ${prepared.summary}`,
       createdAt,
       threadId: thread.id,
       metadata: {
@@ -365,25 +2463,29 @@ function App() {
         updatedAt: createdAt
       }
     }));
-    triggerAgent("thread", newComment.trim(), nextState, thread.id);
+    triggerAgent("thread", prepared.body, nextState, thread.id, prepared.skills);
 
     setActiveThreadId(thread.id);
     setSelectionDraft(null);
+    setPendingSelectionDraft(null);
     setNewComment("");
+    setNewThreadSkillIds([]);
+    selectionRangeRef.current = null;
+    setFloatingToolbar(null);
     window.getSelection()?.removeAllRanges();
   }
 
   function addThreadMessage(threadId: string) {
-    const body = replyDrafts[threadId]?.trim();
-    if (!body) return;
+    const prepared = prepareAgentTurnDraft(replyDrafts[threadId] ?? "", threadSkillIds[threadId] ?? [], agentSkills);
+    if (!prepared.body) return;
 
     const createdAt = nowIso();
     const nextState = commit((state) => {
       const thread = state.review.threads.find((item) => item.id === threadId);
       const ledgerEvent = createLedgerEvent({
         type: "thread_message",
-        actor: replyAuthor,
-        summary: `${authorLabels[replyAuthor]} replied to thread${thread ? ` on "${thread.anchor.exact}"` : ""}: ${body}`,
+        actor: "human",
+        summary: `Human replied to thread${thread ? ` on "${thread.anchor.exact}"` : ""}: ${prepared.summary}`,
         createdAt,
         threadId
       });
@@ -399,9 +2501,10 @@ function App() {
                     ...thread.messages,
                     {
                       id: makeId("msg"),
-                      author: replyAuthor,
-                      body,
-                      createdAt
+                      author: "human",
+                      body: prepared.displayBody,
+                      createdAt,
+                      skills: prepared.skills
                     }
                   ],
                   updatedAt: createdAt
@@ -413,54 +2516,10 @@ function App() {
         }
       };
     });
-    if (replyAuthor === "human") triggerAgent("thread", body, nextState, threadId);
+    triggerAgent("thread", prepared.body, nextState, threadId, prepared.skills);
 
     setReplyDrafts((drafts) => ({ ...drafts, [threadId]: "" }));
-  }
-
-  function addSuggestion(thread: ReviewThread) {
-    const replacement = suggestionDrafts[thread.id]?.trim();
-    if (!replacement) return;
-
-    const createdAt = nowIso();
-    const suggestion: Suggestion = {
-      id: makeId("sug"),
-      threadId: thread.id,
-      type: "replace",
-      original: thread.anchor.exact,
-      replacement,
-      status: "open",
-      author: "agent",
-      createdAt
-    };
-
-    commit((state) => ({
-      ...state,
-      review: {
-        ...state.review,
-        threads: state.review.threads.map((item) =>
-          item.id === thread.id
-            ? {
-                ...item,
-                suggestions: [...item.suggestions, suggestion],
-                updatedAt: createdAt
-              }
-            : item
-        ),
-        contextLedger: appendLedgerEvents(state.review.contextLedger, [
-          createLedgerEvent({
-            type: "thread_suggestion_created",
-            actor: "agent",
-            summary: `Saved manual agent replacement suggestion for "${thread.anchor.exact}": ${replacement}`,
-            createdAt,
-            threadId: thread.id
-          })
-        ]),
-        updatedAt: createdAt
-      }
-    }));
-
-    setSuggestionDrafts((drafts) => ({ ...drafts, [thread.id]: "" }));
+    setThreadSkillIds((drafts) => ({ ...drafts, [threadId]: [] }));
   }
 
   function updateThreadStatus(threadId: string, status: "open" | "resolved") {
@@ -495,8 +2554,8 @@ function App() {
       const thread = state.review.threads.find((item) => item.id === threadId);
       const suggestion = thread?.suggestions.find((item) => item.id === suggestionId);
       const markdown =
-        status === "accepted" && suggestion
-          ? applySuggestion(state.markdown, suggestion.original, suggestion.replacement)
+        status === "accepted" && thread && suggestion
+          ? applyThreadSuggestionToMarkdown(state.markdown, thread, suggestion)
           : state.markdown;
 
       return {
@@ -545,14 +2604,10 @@ function App() {
           : proposal && status === "rejected"
             ? Object.fromEntries(getProposalChangeBlocks(buildProposalDiff(proposal)).map((change) => [change.key, "rejected" as const]))
             : {};
+      const markdown = proposal ? applyProposalDecisionTransitions(state.markdown, proposal, decisions) : state.markdown;
       return {
         ...state,
-        markdown:
-          status === "accepted" && proposal
-            ? proposal.replacementMarkdown
-            : status === "rejected" && proposal
-              ? buildMarkdownFromProposalDecisions(proposal, decisions)
-              : state.markdown,
+        markdown,
         review: {
           ...state.review,
           proposals: state.review.proposals.map((item) =>
@@ -595,7 +2650,9 @@ function App() {
       };
       const changes = getProposalChangeBlocks(buildProposalDiff(proposal));
       const status = resolveProposalStatus(changes, nextDecisions);
-      const markdown = buildMarkdownFromProposalDecisions(proposal, nextDecisions);
+      const markdown = changes.some((item) => item.key === changeKey)
+        ? applyProposalDecisionTransitions(state.markdown, proposal, nextDecisions)
+        : state.markdown;
 
       return {
         ...state,
@@ -631,10 +2688,11 @@ function App() {
     if (!proposal || !body) return;
 
     const messageBody = [
-      `Please revise change ${change.ordinal} in proposal "${proposal.title}".`,
-      `Instruction: ${body}`,
+      `Please respond to this revision comment by updating change ${change.ordinal} in proposal "${proposal.title}".`,
+      `Human revision comment: ${body}`,
       `Original block:\n${trimBlockText(change.deletions)}`,
       `Proposed block:\n${trimBlockText(change.additions)}`,
+      "Do not update the document directly.",
       "Return a new documentProposals entry with a revised full replacementMarkdown so I can review it as a diff."
     ].join("\n\n");
     const createdAt = nowIso();
@@ -664,19 +2722,25 @@ function App() {
       }
     }));
 
-    setPanelMode("chat");
     triggerAgent("chat", messageBody, nextState);
   }
 
-  function addChatMessage() {
-    const body = chatDraft.trim();
-    if (!body) return;
+  function requestProposalRewrite(proposalId: string) {
+    const proposal = stateRef.current?.review.proposals.find((item) => item.id === proposalId);
+    if (!proposal) return;
 
+    const messageBody = [
+      `Please rewrite proposal "${proposal.title}".`,
+      "Keep the same editorial intent, but produce a cleaner and stronger proposed version.",
+      `Existing proposal summary: ${proposal.summary}`,
+      "Do not update the document directly.",
+      "Return a new documentProposals entry with a revised full replacementMarkdown so I can review it inline."
+    ].join("\n\n");
     const createdAt = nowIso();
     const message: ChatMessage = {
       id: makeId("chat"),
-      author: chatAuthor,
-      body,
+      author: "human",
+      body: messageBody,
       createdAt
     };
 
@@ -687,22 +2751,66 @@ function App() {
         chat: [...state.review.chat, message],
         contextLedger: appendLedgerEvents(state.review.contextLedger, [
           createLedgerEvent({
+            type: "proposal_revision_requested",
+            actor: "human",
+            summary: `Requested one-click rewrite for proposal "${proposal.title}".`,
+            createdAt,
+            proposalId
+          })
+        ]),
+        updatedAt: createdAt
+      }
+    }));
+
+    triggerAgent("chat", messageBody, nextState);
+  }
+
+  function addChatMessage() {
+    const prepared = prepareAgentTurnDraft(chatDraft, chatSkillIds, agentSkills);
+    if (!prepared.body) return;
+
+    const createdAt = nowIso();
+    const message: ChatMessage = {
+      id: makeId("chat"),
+      author: "human",
+      body: prepared.displayBody,
+      createdAt,
+      skills: prepared.skills
+    };
+
+    const nextState = commit((state) => ({
+      ...state,
+      review: {
+        ...state.review,
+        chat: [...state.review.chat, message],
+        contextLedger: appendLedgerEvents(state.review.contextLedger, [
+          createLedgerEvent({
             type: "chat_message",
-            actor: chatAuthor,
-            summary: `${authorLabels[chatAuthor]} chat message: ${body}`,
+            actor: "human",
+            summary: `Human chat message: ${prepared.summary}`,
             createdAt
           })
         ]),
         updatedAt: createdAt
       }
     }));
-    if (chatAuthor === "human") triggerAgent("chat", body, nextState);
+    triggerAgent("chat", prepared.body, nextState, undefined, prepared.skills);
 
     setChatDraft("");
+    setChatSkillIds([]);
   }
 
   function updateCanvasBlock(blockId: string, html: string) {
-    const text = htmlToInlineMarkdown(html);
+    const currentBlock = stateRef.current ? parseMarkdownBlocks(stateRef.current.markdown).find((block) => block.id === blockId) : null;
+    const registeredNode = blockRefs.current[blockId] ?? null;
+    const text = registeredNode ? blockNodeToMarkdown(registeredNode, currentBlock?.type) : htmlToInlineMarkdown(html);
+    const textBlocks = text.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
+    if (currentBlock && textBlocks.length > 1 && textBlocks[0] === currentBlock.text.trim()) {
+      setBlockResetKeys((keys) => ({
+        ...keys,
+        [blockId]: (keys[blockId] ?? 0) + 1
+      }));
+    }
     commit((state) => ({
       ...state,
       markdown: updateMarkdownBlock(state.markdown, blockId, text),
@@ -713,13 +2821,39 @@ function App() {
     }));
   }
 
+  function moveCanvasBlock(blockId: string, targetBlockId: string, placement: BlockDropPlacement) {
+    if (blockId === targetBlockId) return;
+    commit((state) => ({
+      ...state,
+      markdown: moveMarkdownBlock(state.markdown, blockId, targetBlockId, placement),
+      review: {
+        ...state.review,
+        updatedAt: nowIso()
+      }
+    }));
+  }
+
+  function deleteCanvasBlock(blockId: string) {
+    if (!stateRef.current || !parseMarkdownBlocks(stateRef.current.markdown).some((item) => item.id === blockId)) return;
+    commit((state) => ({
+      ...state,
+      markdown: deleteMarkdownBlock(state.markdown, blockId),
+      review: {
+        ...state.review,
+        updatedAt: nowIso()
+      }
+    }));
+    if (activeBlockId === blockId) setActiveBlockId(null);
+  }
+
   function registerBlockRef(blockId: string, node: HTMLElement | null) {
     blockRefs.current[blockId] = node;
   }
 
   function updateBlockShape(blockId: string, patch: Parameters<typeof updateMarkdownBlockShape>[2]) {
     const node = blockRefs.current[blockId];
-    const currentText = node ? htmlToInlineMarkdown(node.innerHTML) : null;
+    const currentBlock = stateRef.current ? parseMarkdownBlocks(stateRef.current.markdown).find((block) => block.id === blockId) : null;
+    const currentText = node ? blockNodeToMarkdown(node, currentBlock?.type) : null;
 
     commit((state) => {
       const markdownWithLatestText = currentText
@@ -742,10 +2876,13 @@ function App() {
   }
 
   function applyInlineCommand(command: "bold" | "italic" | "strikeThrough") {
+    restoreCanvasSelection();
     document.execCommand(command);
+    rememberCanvasSelection();
   }
 
   function applyInlineCode() {
+    restoreCanvasSelection();
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
     const range = selection.getRangeAt(0);
@@ -759,13 +2896,185 @@ function App() {
     const nextRange = document.createRange();
     nextRange.selectNodeContents(code);
     selection.addRange(nextRange);
+    rememberCanvasSelection();
+  }
+
+  function insertEditorBreak(paragraphBreak: boolean) {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return false;
+
+    const range = selection.getRangeAt(0);
+    if (!canvasRef.current?.contains(range.commonAncestorContainer)) return false;
+
+    range.deleteContents();
+    const fragment = document.createDocumentFragment();
+    fragment.appendChild(document.createElement("br"));
+    if (paragraphBreak) fragment.appendChild(document.createElement("br"));
+
+    const marker = document.createTextNode("\u200B");
+    fragment.appendChild(marker);
+    range.insertNode(fragment);
+
+    const nextRange = document.createRange();
+    nextRange.setStart(marker, marker.textContent?.length ?? 0);
+    nextRange.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(nextRange);
+    return true;
+  }
+
+  function openLinkPopover() {
+    restoreCanvasSelection();
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0 || !canvasRef.current) return;
+
+    const range = selection.getRangeAt(0);
+    if (!canvasRef.current.contains(range.commonAncestorContainer)) return;
+    const editableBlock = getEditableBlockForRange(range);
+    const blockId = editableBlock?.dataset.blockId;
+    if (!editableBlock || !blockId) return;
+
+    const startElement =
+      range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
+    const existingHref = startElement?.closest("a")?.getAttribute("href") ?? "";
+    const position = getLinkPopoverPosition(range);
+    if (!position) return;
+
+    const selectedText = range.toString();
+    const beforeSelection = range.cloneRange();
+    beforeSelection.selectNodeContents(editableBlock);
+    beforeSelection.setEnd(range.startContainer, range.startOffset);
+    const plainStart = beforeSelection.toString().length;
+    const savedRange = range.cloneRange();
+    selectionRangeRef.current = savedRange.cloneRange();
+    linkRangeRef.current = savedRange;
+    linkTargetRef.current = {
+      blockId,
+      selectedText,
+      plainStart,
+      plainEnd: plainStart + selectedText.length,
+      markdownAtOpen: blockNodeToMarkdown(
+        editableBlock,
+        stateRef.current ? parseMarkdownBlocks(stateRef.current.markdown).find((block) => block.id === blockId)?.type : undefined
+      )
+    };
+    setLinkDraft(existingHref || "https://");
+    setLinkPopover(position);
+    setFloatingToolbar(null);
+  }
+
+  function applyLink() {
+    const href = normalizeLinkHref(linkDraft);
+    const target = linkTargetRef.current;
+    const currentState = stateRef.current;
+    if (href && target && currentState) {
+      const block = parseMarkdownBlocks(currentState.markdown).find((item) => item.id === target.blockId);
+      const linkedText = block ? applyMarkdownLinkToSelection(block.text, target, href) : null;
+      if (block && linkedText && linkedText !== block.text) {
+        commit((state) => ({
+          ...state,
+          markdown: updateMarkdownBlock(state.markdown, target.blockId, linkedText),
+          review: {
+            ...state.review,
+            updatedAt: nowIso()
+          }
+        }));
+
+        window.getSelection()?.removeAllRanges();
+        selectionRangeRef.current = null;
+        linkRangeRef.current = null;
+        linkTargetRef.current = null;
+        setFloatingToolbar(null);
+        setLinkPopover(null);
+        setLinkDraft("");
+        return;
+      }
+    }
+
+    const range = linkRangeRef.current?.cloneRange() ?? selectionRangeRef.current?.cloneRange();
+    if (!href || !range || !canvasRef.current) return;
+
+    try {
+      if (!canvasRef.current.contains(range.commonAncestorContainer) || range.collapsed) return;
+
+      const editableBlock = getEditableBlockForRange(range);
+      const blockId = editableBlock?.dataset.blockId;
+      if (!editableBlock || !blockId) return;
+
+      const selectedText = range.toString();
+      if (!selectedText.trim()) return;
+
+      const anchor = document.createElement("a");
+      anchor.setAttribute("href", href);
+      anchor.setAttribute("target", "_blank");
+      anchor.setAttribute("rel", "noreferrer");
+      anchor.textContent = selectedText;
+
+      range.deleteContents();
+      range.insertNode(anchor);
+
+      updateCanvasBlock(blockId, editableBlock.innerHTML);
+
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      const nextRange = document.createRange();
+      nextRange.setStartAfter(anchor);
+      nextRange.collapse(true);
+      selection?.addRange(nextRange);
+
+      selectionRangeRef.current = null;
+      linkRangeRef.current = null;
+      linkTargetRef.current = null;
+      setFloatingToolbar(null);
+      setLinkPopover(null);
+      setLinkDraft("");
+    } catch {
+      selectionRangeRef.current = null;
+      linkRangeRef.current = null;
+      linkTargetRef.current = null;
+    }
   }
 
   function handleEditorShortcut(event: React.KeyboardEvent<HTMLElement>, blockId: string) {
     const isCommand = event.metaKey || event.ctrlKey;
+    const key = event.key.toLowerCase();
+    if (isCommand && !event.shiftKey && key === "z" && restoreEditorHistory("undo")) {
+      event.preventDefault();
+      return;
+    }
+    if (isCommand && ((event.shiftKey && key === "z") || key === "y") && restoreEditorHistory("redo")) {
+      event.preventDefault();
+      return;
+    }
+
+    if (isCommand && !event.shiftKey && key === "c" && pendingSelectionDraft) {
+      event.preventDefault();
+      void copyPendingSelectionToClipboard();
+      return;
+    }
+    if (isCommand && !event.shiftKey && key === "x" && pendingSelectionDraft) {
+      event.preventDefault();
+      void cutPendingSelectionToClipboard();
+      return;
+    }
+
+    if ((event.key === "Backspace" || event.key === "Delete") && pendingSelectionDraft) {
+      event.preventDefault();
+      deletePendingMarkdownSelection();
+      return;
+    }
+
+    if (event.key === "Enter" && !event.metaKey && !event.ctrlKey && !event.altKey && !event.nativeEvent.isComposing) {
+      const currentBlock = stateRef.current ? parseMarkdownBlocks(stateRef.current.markdown).find((block) => block.id === blockId) : null;
+      event.preventDefault();
+      setActiveBlockId(blockId);
+      insertEditorBreak(currentBlock?.type !== "code" && !event.shiftKey);
+      rememberCanvasSelection();
+      return;
+    }
+
     if (!isCommand) return;
 
-    const key = event.key.toLowerCase();
     if (key === "b") {
       event.preventDefault();
       applyInlineCommand("bold");
@@ -779,6 +3088,11 @@ function App() {
     if (key === "`") {
       event.preventDefault();
       applyInlineCode();
+      return;
+    }
+    if (key === "k") {
+      event.preventDefault();
+      openLinkPopover();
       return;
     }
     if (event.altKey && ["0", "1", "2", "3"].includes(key)) {
@@ -814,10 +3128,22 @@ function App() {
     }));
   }
 
+  function updateEditorLanguage(editorLanguage: SupportedEditorLanguage) {
+    commit((state) => ({
+      ...state,
+      review: {
+        ...state.review,
+        settings: {
+          ...state.review.settings,
+          editorLanguage
+        },
+        updatedAt: nowIso()
+      }
+    }));
+  }
+
   async function copyText(text: string, label: string) {
-    await navigator.clipboard.writeText(text);
-    setLastCopied(label);
-    window.setTimeout(() => setLastCopied(null), 1400);
+    await writeClipboardPayload({ plainText: text }, label);
   }
 
   function exportMarkdown() {
@@ -826,10 +3152,15 @@ function App() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `${documentState.review.title || "draft"}.md`.replace(/[^\w.-]+/g, "-");
+    link.download = `${safeDownloadName(documentState.review.title || "draft")}.md`;
     link.click();
     URL.revokeObjectURL(url);
   }
+
+  const notifyTableImageExported = useCallback((status: "success" | "error") => {
+    setLastCopied(status === "success" ? "Table image downloaded" : "Table image export failed");
+    window.setTimeout(() => setLastCopied(null), 1600);
+  }, []);
 
   async function importMarkdown(file: File) {
     const markdown = await file.text();
@@ -867,48 +3198,35 @@ function App() {
     }));
   }
 
-  function buildAgentPacket() {
-    if (!documentState) return "";
-    const relevantLedger = contextLedger.filter(
-      (event) =>
-        (activeThreadId && event.threadId === activeThreadId) ||
-        event.type.startsWith("proposal") ||
-        event.type === "thread_suggestion_decision"
-    );
-    const decisionLedger = contextLedger.filter(
-      (event) =>
-        event.type === "proposal_decision" ||
-        event.type === "proposal_change_decision" ||
-        event.type === "thread_suggestion_decision" ||
-        event.type === "thread_status"
-    );
-    return JSON.stringify(
-      {
-        task: "Preview of the context packet Skribe sends to the agent for chat/thread turns.",
-        document: {
-          id: documentState.id ?? "default",
-          title: documentState.review.title,
-          words,
-          draftPath: documentState.fileInfo?.draftPath,
-          reviewPath: documentState.fileInfo?.reviewPath
-        },
-        activeThread,
-        openThreads: openThreads(documentState.review.threads),
-        resolvedThreadCount: documentState.review.threads.filter((thread) => thread.status === "resolved").length,
-        openProposals: documentState.review.proposals
-          .filter((proposal) => proposal.status === "open" || proposal.status === "reviewed")
-          .map(summarizeOpenProposal),
-        recentChat: documentState.review.chat.slice(-20),
-        contextMemory: {
-          recentLedger: contextLedger.slice(-50),
-          relevantLedger: relevantLedger.slice(-35),
-          decisionLedger: decisionLedger.slice(-50)
-        },
-        currentMarkdown: documentState.markdown
-      },
-      null,
-      2
-    );
+  async function restoreRevision(revisionId: string) {
+    if (!revisionId) return;
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    stateEpochRef.current += 1;
+    const restoreEpoch = stateEpochRef.current;
+
+    setIsRestoringRevision(true);
+    setSaveState("saving");
+    try {
+      const restored = await restoreDocumentRevision(revisionId);
+      if (restoreEpoch !== stateEpochRef.current) return;
+      stateRef.current = restored.document;
+      setDocumentState(restored.document);
+      setRevisionState(restored.revisions);
+      setActiveThreadId(null);
+      setSelectionDraft(null);
+      setPendingSelectionDraft(null);
+      selectionRangeRef.current = null;
+      setFloatingToolbar(null);
+      window.getSelection()?.removeAllRanges();
+      setSaveState("saved");
+    } catch {
+      setSaveState("error");
+    } finally {
+      setIsRestoringRevision(false);
+    }
   }
 
   if (!documentState) {
@@ -920,18 +3238,36 @@ function App() {
     );
   }
 
+  const editorLanguage = documentState.review.settings?.editorLanguage ?? "en-GB";
+  const configuredRuntime = currentConfiguredRuntime();
+  const resolvedRuntime =
+    agentRuntimeConfig?.resolvedRuntime ?? (configuredRuntime === "auto" ? agentSession?.runtime ?? null : configuredRuntime);
+  const configuredModel = currentConfiguredModel();
+  const runtimeOptions = agentRuntimeConfig?.runtimes ?? [];
+  const selectedRuntimeStatus = runtimeOptions.find((runtime) => runtime.id === resolvedRuntime) ?? null;
+  const modelOptions = selectedRuntimeStatus?.models ?? [];
+  const agentConfigDisabled = agentSession?.status === "running" || !agentRuntimeConfig;
+  const agentRuntimeTitle = selectedRuntimeStatus
+    ? `${selectedRuntimeStatus.label}${selectedRuntimeStatus.version ? ` ${selectedRuntimeStatus.version}` : ""}${
+        selectedRuntimeStatus.notes.length > 0 ? `: ${selectedRuntimeStatus.notes.join(" ")}` : ""
+      }`
+    : "Agent runtime";
+
   return (
     <main
       className={`app-shell ${isLeftRailCollapsed ? "left-collapsed" : ""} ${
         isRightPanelCollapsed ? "right-collapsed" : ""
       }`}
+      lang={editorLanguage}
     >
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark">S</div>
           <div>
             <strong>Skribe</strong>
-            <span>Local Markdown review workbench</span>
+            <span title={documentState.fileInfo?.displayPath || documentState.fileInfo?.markdownPath}>
+              {documentSourceLabel(documentState.fileInfo)}
+            </span>
           </div>
         </div>
 
@@ -939,23 +3275,90 @@ function App() {
           className="title-input"
           value={documentState.review.title}
           onChange={(event) => updateTitle(event.target.value)}
+          lang={editorLanguage}
+          spellCheck
           aria-label="Document title"
         />
 
         <div className="topbar-actions">
+          <label className="language-select-shell" title="Editor spelling language">
+            <select
+              value={editorLanguage}
+              onChange={(event) => updateEditorLanguage(event.target.value as SupportedEditorLanguage)}
+              aria-label="Editor spelling language"
+            >
+              {editorLanguageOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="agent-runtime-select-shell" title={agentRuntimeTitle}>
+            <select
+              value={configuredRuntime}
+              onChange={(event) => updateAgentRuntime(event.target.value)}
+              disabled={agentConfigDisabled}
+              aria-label="Agent runtime"
+            >
+              <option value="auto">Auto{resolvedRuntime ? ` (${resolvedRuntime})` : ""}</option>
+              {runtimeOptions.map((runtime) => (
+                <option key={runtime.id} value={runtime.id} disabled={!runtime.available}>
+                  {runtime.label}{runtime.available ? "" : " unavailable"}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label
+            className="agent-model-shell"
+            title={
+              selectedRuntimeStatus?.supportsManualModel
+                ? "Agent model. Leave empty for the selected CLI default."
+                : "Selected runtime does not expose model selection."
+            }
+          >
+            <input
+              value={agentModelDraft}
+              list="agent-model-options"
+              placeholder={configuredModel === "auto" ? "auto model" : configuredModel}
+              disabled={agentConfigDisabled || Boolean(selectedRuntimeStatus && !selectedRuntimeStatus.supportsManualModel)}
+              onChange={(event) => setAgentModelDraft(event.target.value)}
+              onBlur={(event) => commitAgentModel(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                commitAgentModel(event.currentTarget.value);
+                event.currentTarget.blur();
+              }}
+              aria-label="Agent model"
+            />
+            <datalist id="agent-model-options">
+              <option value="auto" />
+              {modelOptions.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label}
+                </option>
+              ))}
+            </datalist>
+          </label>
           <span className={`save-pill is-${saveState}`}>
             {saveState === "saving" ? <RefreshCw size={14} /> : <Save size={14} />}
             {saveState}
           </span>
           {agentSession ? (
-            <span className={`agent-pill is-${agentSession.status}`}>
+            <span
+              className={`agent-pill is-${agentSession.status}`}
+              title={`Runtime: ${resolvedRuntime || agentSession.runtime || "auto"}${
+                agentSession.model ? ` · Model: ${agentSession.model}` : " · Model: auto"
+              }`}
+            >
               <Sparkles size={14} />
               {agentSession.status}
               {agentSession.queueDepth > 0 ? ` · ${agentSession.queueDepth}` : ""}
             </span>
           ) : null}
           <button className="icon-button" onClick={() => fileInputRef.current?.click()} title="Import Markdown">
-            <Import size={17} />
+            <Upload size={17} />
           </button>
           <button className="icon-button" onClick={() => copyText(documentState.markdown, "Markdown copied")} title="Copy Markdown">
             <Copy size={17} />
@@ -1016,33 +3419,32 @@ function App() {
             </nav>
           </div>
 
-          <div className="rail-section file-paths">
-            <div className="rail-heading">
-              <SplitSquareVertical size={15} />
-              Local files
-            </div>
-            <button onClick={() => copyText(documentState.fileInfo?.draftPath ?? "", "Draft path copied")}>
-              draft.md
+          <div className="rail-section rail-section-compact">
+            <button
+              className="rail-heading rail-toggle-heading"
+              onClick={() => setIsRevisionHistoryOpen((value) => !value)}
+              title={isRevisionHistoryOpen ? "Collapse revision history" : "Expand revision history"}
+            >
+              <span>
+                <History size={15} />
+                Revisions
+              </span>
+              <span className="rail-heading-count">{revisionState.revisions.length}</span>
+              {isRevisionHistoryOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
             </button>
-            <button onClick={() => copyText(documentState.fileInfo?.reviewPath ?? "", "Review path copied")}>
-              review.json
-            </button>
-            <button onClick={() => copyText(documentState.fileInfo?.sessionPath ?? "", "Session path copied")}>
-              session.json
-            </button>
-            <button onClick={() => copyText(documentState.fileInfo?.eventsPath ?? "", "Events path copied")}>
-              events.jsonl
-            </button>
+            <RevisionHistoryPanel
+              revisionState={revisionState}
+              isOpen={isRevisionHistoryOpen}
+              isRestoring={isRestoringRevision}
+              onRestore={restoreRevision}
+            />
           </div>
+
           </div>
         </aside>
 
         <section className="center-pane">
           <div className="canvas-toolbar">
-            <div className="canvas-mode-label">
-              <FileText size={15} />
-              Editable canvas
-            </div>
             <div className="format-toolbar" aria-label="Formatting toolbar">
               <button title="Paragraph (Ctrl/Cmd+Alt+0)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "paragraph", level: undefined }); }}>
                 <Pilcrow size={16} />
@@ -1066,6 +3468,9 @@ function App() {
               <button title="Inline code (Ctrl/Cmd+`)" onMouseDown={(event) => { event.preventDefault(); applyInlineCode(); }}>
                 <Code2 size={16} />
               </button>
+              <button title="Insert link (Ctrl/Cmd+K)" onMouseDown={(event) => { event.preventDefault(); openLinkPopover(); }}>
+                <LinkIcon size={16} />
+              </button>
               <span className="toolbar-divider" />
               <button title="Bulleted list (Ctrl/Cmd+Shift+8)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "unordered-list" }); }}>
                 <List size={16} />
@@ -1076,26 +3481,61 @@ function App() {
               <button title="Quote" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "quote" }); }}>
                 <Quote size={16} />
               </button>
-            </div>
-            <div className="toolbar-hint">
-              <Highlighter size={15} />
-              Highlight to comment. Click text to edit.
+              <span className="toolbar-divider" />
+              <button title="Comment on selected text" onMouseDown={(event) => { event.preventDefault(); startCommentFromSelection(); }}>
+                <MessageSquare size={16} />
+              </button>
             </div>
           </div>
 
-          <article ref={canvasRef} className="markdown-canvas" onMouseUp={handleSelection}>
+          <article
+            ref={canvasRef}
+            className="markdown-canvas"
+            lang={editorLanguage}
+            tabIndex={-1}
+            onPointerDown={handleCanvasPointerDown}
+            onPointerMove={handleCanvasPointerMove}
+            onPointerUp={handleCanvasPointerUp}
+            onPointerCancel={handleCanvasPointerCancel}
+            onKeyDown={handleCanvasKeyDown}
+            onMouseUp={handleCanvasSelectionEvent}
+            onKeyUp={handleCanvasSelectionEvent}
+            onCopy={handleCanvasCopy}
+            onCut={handleCanvasCut}
+            onContextMenu={handleCanvasContextMenu}
+            onScroll={updateFloatingToolbarPosition}
+          >
+            <InlineProposalReviewBar
+              review={activeInlineProposal}
+              proposalCount={reviewableProposals.length}
+              onProposalStatus={updateProposalStatus}
+              onRequestProposalRewrite={requestProposalRewrite}
+            />
             <EditableMarkdownCanvas
               markdown={documentState.markdown}
+              editorLanguage={editorLanguage}
               threads={threads}
+              inlineProposal={activeInlineProposal}
+              selectionPreview={selectionDraft ?? pendingSelectionDraft}
+              blockResetKeys={blockResetKeys}
+              activeBlockId={activeBlockId}
               activeThreadId={activeThread?.id ?? null}
               onActivateThread={(threadId) => {
-                setActiveThreadId(threadId);
+                activateThread(threadId);
                 setPanelMode("threads");
               }}
               onUpdateBlock={updateCanvasBlock}
               onRegisterBlock={registerBlockRef}
-              onFocusBlock={setActiveBlockId}
+              onFocusBlock={focusCanvasBlock}
+              onRememberSelection={rememberCanvasSelection}
               onShortcut={handleEditorShortcut}
+              onCommitDocument={commitCanvasDom}
+              onDocumentInput={scheduleLiveCanvasCommit}
+              onMoveBlock={moveCanvasBlock}
+              onDeleteBlock={deleteCanvasBlock}
+              onProposalChangeDecision={updateProposalChangeDecision}
+              onRequestProposalRevision={requestProposalRevision}
+              onTableImageExported={notifyTableImageExported}
             />
           </article>
         </section>
@@ -1122,28 +3562,36 @@ function App() {
 
           {panelMode === "threads" ? (
             <ThreadPanel
-              threads={threads}
+              markdown={documentState.markdown}
+              threads={visibleThreads}
               activeThread={activeThread}
-              activeThreadId={activeThreadId}
+              activeThreadId={activeThread?.id ?? activeThreadId}
               selectionDraft={selectionDraft}
               newComment={newComment}
               replyDrafts={replyDrafts}
-              suggestionDrafts={suggestionDrafts}
-              replyAuthor={replyAuthor}
-              onSetReplyAuthor={setReplyAuthor}
+              agentSkills={agentSkills}
+              newThreadSkillIds={newThreadSkillIds}
+              threadSkillIds={threadSkillIds}
+              showResolvedThreads={showResolvedThreads}
+              resolvedThreadCount={resolvedThreadCount}
               onSetNewComment={setNewComment}
+              onSetNewThreadSkillIds={setNewThreadSkillIds}
               onAddThread={addThread}
               onClearSelection={() => {
                 setSelectionDraft(null);
+                setPendingSelectionDraft(null);
+                selectionRangeRef.current = null;
+                setFloatingToolbar(null);
                 window.getSelection()?.removeAllRanges();
               }}
-              onActivateThread={setActiveThreadId}
+              onActivateThread={(threadId) => activateThread(threadId, { scroll: true })}
               onSetReplyDrafts={setReplyDrafts}
-              onSetSuggestionDrafts={setSuggestionDrafts}
+              onSetThreadSkillIds={setThreadSkillIds}
               onAddMessage={addThreadMessage}
-              onAddSuggestion={addSuggestion}
+              onRequestAgentReply={requestThreadAgentReply}
               onSetStatus={updateThreadStatus}
               onSuggestionStatus={updateSuggestionStatus}
+              onToggleResolvedThreads={() => setShowResolvedThreads((value) => !value)}
               agentSession={agentSession}
             />
           ) : (
@@ -1153,47 +3601,668 @@ function App() {
               contextLedger={contextLedger}
               agentSession={agentSession}
               chatDraft={chatDraft}
-              chatAuthor={chatAuthor}
+              agentSkills={agentSkills}
+              selectedSkillIds={chatSkillIds}
               onSetChatDraft={setChatDraft}
-              onSetChatAuthor={setChatAuthor}
+              onSetSelectedSkillIds={setChatSkillIds}
               onSend={addChatMessage}
               onProposalStatus={updateProposalStatus}
               onProposalChangeDecision={updateProposalChangeDecision}
               onRequestProposalRevision={requestProposalRevision}
-              onCopyAgentPacket={() => copyText(buildAgentPacket(), "Agent packet copied")}
             />
           )}
           </div>
         </aside>
       </section>
 
+      {floatingToolbar ? (
+        <FloatingFormatToolbar
+          position={floatingToolbar}
+          activeBlockId={activeBlockId}
+          onParagraph={() => updateActiveBlockShape({ type: "paragraph", level: undefined })}
+          onHeading={(level) => updateActiveBlockShape({ type: "heading", level })}
+          onBold={() => applyInlineCommand("bold")}
+          onItalic={() => applyInlineCommand("italic")}
+          onInlineCode={applyInlineCode}
+          onLink={openLinkPopover}
+          onComment={startCommentFromSelection}
+        />
+      ) : null}
+
+      {linkPopover ? (
+        <LinkPopover
+          position={linkPopover}
+          value={linkDraft}
+          inputRef={linkInputRef}
+          onChange={setLinkDraft}
+          onApply={applyLink}
+          onCancel={() => {
+            linkRangeRef.current = null;
+            linkTargetRef.current = null;
+            setLinkPopover(null);
+            setLinkDraft("");
+          }}
+        />
+      ) : null}
+
+      {selectionContextMenu ? (
+        <div
+          className="selection-context-menu"
+          style={{ left: selectionContextMenu.left, top: selectionContextMenu.top }}
+          role="menu"
+          onMouseDown={(event) => event.preventDefault()}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setSelectionContextMenu(null);
+              void copyPendingSelectionToClipboard();
+            }}
+          >
+            <Copy size={14} />
+            Copy
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setSelectionContextMenu(null);
+              void cutPendingSelectionToClipboard();
+            }}
+          >
+            <Scissors size={14} />
+            Cut
+          </button>
+        </div>
+      ) : null}
+
       {lastCopied ? <div className="toast">{lastCopied}</div> : null}
     </main>
   );
 }
 
+function formatRevisionTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function RevisionHistoryPanel({
+  revisionState,
+  isOpen,
+  isRestoring,
+  onRestore
+}: {
+  revisionState: RevisionState;
+  isOpen: boolean;
+  isRestoring: boolean;
+  onRestore: (revisionId: string) => void;
+}) {
+  const revisions = revisionState.revisions.slice(0, 14);
+  const currentRevision =
+    revisionState.revisions.find((revision) => revision.id === revisionState.currentRevisionId) ?? revisionState.revisions[0] ?? null;
+
+  if (revisions.length === 0) {
+    return <p className="empty-note">Revision snapshots appear after the first save.</p>;
+  }
+
+  return (
+    <>
+      <div className="doc-revision-summary">
+        <span>{revisions.length} saved</span>
+        {currentRevision ? <time>Current {formatRevisionTime(currentRevision.createdAt)}</time> : null}
+      </div>
+      {isOpen ? (
+        <ol className="doc-revision-list">
+          {revisions.map((revision) => {
+            const isCurrent = revision.id === revisionState.currentRevisionId;
+            return (
+              <li key={revision.id} className={`doc-revision-item ${isCurrent ? "is-current" : ""}`}>
+                <span className="doc-revision-dot" />
+                <div className="doc-revision-main" title={`${revision.reason}: ${revision.title}`}>
+                  <time>{formatRevisionTime(revision.createdAt)}</time>
+                  <strong>{revision.reason}</strong>
+                  <small>{revision.words.toLocaleString()} words · {revision.hash.slice(0, 7)}</small>
+                </div>
+                {isCurrent ? (
+                  <span className="doc-revision-current">Current</span>
+                ) : (
+                  <button
+                    className="secondary-button small doc-revision-restore"
+                    disabled={isRestoring}
+                    onClick={() => onRestore(revision.id)}
+                    title="Restore this document revision"
+                  >
+                    <RotateCcw size={12} />
+                    Restore
+                  </button>
+                )}
+              </li>
+            );
+          })}
+        </ol>
+      ) : null}
+    </>
+  );
+}
+
+function MessageSkillChips({ skills }: { skills?: AgentSkillSelection[] }) {
+  if (!skills || skills.length === 0) return null;
+  return (
+    <div className="message-skill-row">
+      {skills.map((skill) => (
+        <span key={skill.id}>/{skill.id}</span>
+      ))}
+    </div>
+  );
+}
+
+function SkillComposer({
+  value,
+  onChange,
+  selectedSkillIds,
+  onSelectedSkillIdsChange,
+  skills,
+  placeholder,
+  rows,
+  submitLabel,
+  submitIcon,
+  onSubmit
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  selectedSkillIds: string[];
+  onSelectedSkillIdsChange: (skillIds: string[]) => void;
+  skills: AgentSkill[];
+  placeholder: string;
+  rows: number;
+  submitLabel: string;
+  submitIcon: React.ReactNode;
+  onSubmit: () => void;
+}) {
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [cursor, setCursor] = useState(0);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [isPickerOpen, setIsPickerOpen] = useState(false);
+  const [skillSearch, setSkillSearch] = useState("");
+  const slashCommand = getActiveSlashCommand(value, cursor);
+  const query = slashCommand?.query ?? "";
+  const selectedSkills = selectedSkillIds
+    .map((id) => skills.find((skill) => skill.id === id))
+    .filter(Boolean) as AgentSkill[];
+  const matchingSkills = slashCommand ? skills.filter((skill) => skillMatchesQuery(skill, query)).slice(0, 7) : [];
+  const showBrowseOption = slashCommand && "skills".startsWith(query.toLowerCase());
+  const autocompleteOptions = [
+    ...(showBrowseOption ? [{ kind: "browse" as const, id: "__skills", label: "/skills", description: "Browse every available skill" }] : []),
+    ...matchingSkills.map((skill) => ({ kind: "skill" as const, skill }))
+  ];
+  const filteredPickerSkills = skills.filter((skill) => skillMatchesQuery(skill, skillSearch)).slice(0, 80);
+
+  function updateCursor(node: HTMLTextAreaElement) {
+    setCursor(node.selectionStart ?? node.value.length);
+  }
+
+  function removeSlashCommand() {
+    if (!slashCommand) return;
+    const nextValue = `${value.slice(0, slashCommand.start)}${value.slice(slashCommand.end)}`.replace(/[ \t]{2,}/g, " ");
+    onChange(nextValue);
+    window.requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(slashCommand.start, slashCommand.start);
+      setCursor(slashCommand.start);
+    });
+  }
+
+  function addSkill(skill: AgentSkill) {
+    onSelectedSkillIdsChange(uniqueSkillIds([...selectedSkillIds, skill.id]));
+    removeSlashCommand();
+    setActiveIndex(0);
+  }
+
+  function removeSkill(skillId: string) {
+    onSelectedSkillIdsChange(selectedSkillIds.filter((id) => id !== skillId));
+  }
+
+  function openSkillsPicker() {
+    setIsPickerOpen(true);
+    removeSlashCommand();
+  }
+
+  function chooseAutocomplete(index: number) {
+    const option = autocompleteOptions[index];
+    if (!option) return;
+    if (option.kind === "browse") openSkillsPicker();
+    else addSkill(option.skill);
+  }
+
+  return (
+    <div className="skill-composer">
+      {selectedSkills.length > 0 ? (
+        <div className="skill-chip-row" aria-label="Selected agent skills">
+          {selectedSkills.map((skill) => (
+            <button key={skill.id} className="skill-chip" onClick={() => removeSkill(skill.id)} title={`Remove ${skillLabel(skill)}`}>
+              /{skill.id}
+              <X size={12} />
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="skill-textarea-shell">
+        <textarea
+          ref={textareaRef}
+          value={value}
+          onChange={(event) => {
+            onChange(event.target.value);
+            updateCursor(event.target);
+            setActiveIndex(0);
+          }}
+          onClick={(event) => updateCursor(event.currentTarget)}
+          onKeyUp={(event) => updateCursor(event.currentTarget)}
+          onKeyDown={(event) => {
+            if (autocompleteOptions.length > 0 && slashCommand) {
+              if (event.key === "ArrowDown") {
+                event.preventDefault();
+                setActiveIndex((index) => (index + 1) % autocompleteOptions.length);
+                return;
+              }
+              if (event.key === "ArrowUp") {
+                event.preventDefault();
+                setActiveIndex((index) => (index - 1 + autocompleteOptions.length) % autocompleteOptions.length);
+                return;
+              }
+              if (event.key === "Enter" || event.key === "Tab") {
+                event.preventDefault();
+                chooseAutocomplete(activeIndex);
+                return;
+              }
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setCursor(0);
+                return;
+              }
+            }
+            if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+              event.preventDefault();
+              onSubmit();
+            }
+          }}
+          rows={rows}
+          placeholder={placeholder}
+        />
+
+        {autocompleteOptions.length > 0 && slashCommand ? (
+          <div className="skill-autocomplete" role="listbox">
+            {autocompleteOptions.map((option, index) =>
+              option.kind === "browse" ? (
+                <button
+                  key={option.id}
+                  className={index === activeIndex ? "is-active" : ""}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={openSkillsPicker}
+                >
+                  <Sparkles size={14} />
+                  <span>
+                    <strong>{option.label}</strong>
+                    <small>{option.description}</small>
+                  </span>
+                </button>
+              ) : (
+                <button
+                  key={option.skill.id}
+                  className={index === activeIndex ? "is-active" : ""}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => addSkill(option.skill)}
+                >
+                  <Sparkles size={14} />
+                  <span>
+                    <strong>/{option.skill.id}</strong>
+                    <small>{option.skill.description || option.skill.source}</small>
+                  </span>
+                </button>
+              )
+            )}
+          </div>
+        ) : null}
+      </div>
+
+      {isPickerOpen ? (
+        <div className="skill-picker-panel">
+          <div className="skill-picker-header">
+            <strong>Agent skills</strong>
+            <span>{skills.length}</span>
+            <button className="icon-button mini" onClick={() => setIsPickerOpen(false)} title="Close skills">
+              <X size={12} />
+            </button>
+          </div>
+          <label className="skill-search">
+            <Search size={14} />
+            <input
+              value={skillSearch}
+              onChange={(event) => setSkillSearch(event.target.value)}
+              placeholder="Search skills"
+              aria-label="Search skills"
+            />
+          </label>
+          <div className="skill-picker-list">
+            {filteredPickerSkills.length === 0 ? (
+              <p className="empty-note">No skills match that search.</p>
+            ) : (
+              filteredPickerSkills.map((skill) => {
+                const selected = selectedSkillIds.includes(skill.id);
+                return (
+                  <button
+                    key={skill.id}
+                    className={selected ? "is-selected" : ""}
+                    onClick={() => (selected ? removeSkill(skill.id) : onSelectedSkillIdsChange(uniqueSkillIds([...selectedSkillIds, skill.id])))}
+                  >
+                    <span>
+                      <strong>/{skill.id}</strong>
+                      <small>{skill.description || skill.source}</small>
+                    </span>
+                    <em>{skill.source}</em>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      <div className="skill-composer-actions">
+        <button className="secondary-button small" onClick={() => setIsPickerOpen((open) => !open)} title="Browse agent skills">
+          <Sparkles size={14} />
+          Skills
+        </button>
+        <button className="primary-button" onClick={onSubmit}>
+          {submitIcon}
+          {submitLabel}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 interface MarkdownCanvasProps {
   markdown: string;
+  editorLanguage: SupportedEditorLanguage;
   threads: ReviewThread[];
+  inlineProposal: InlineProposalReview | null;
+  selectionPreview: SelectionDraft | null;
+  blockResetKeys: Record<string, number>;
+  activeBlockId: string | null;
   activeThreadId: string | null;
   onActivateThread: (threadId: string) => void;
   onUpdateBlock: (blockId: string, text: string) => void;
   onRegisterBlock: (blockId: string, node: HTMLElement | null) => void;
   onFocusBlock: (blockId: string) => void;
+  onRememberSelection: () => void;
   onShortcut: (event: React.KeyboardEvent<HTMLElement>, blockId: string) => void;
+  onCommitDocument: () => void;
+  onDocumentInput: () => void;
+  onMoveBlock: (blockId: string, targetBlockId: string, placement: BlockDropPlacement) => void;
+  onDeleteBlock: (blockId: string) => void;
+  onProposalChangeDecision: (proposalId: string, changeKey: string, decision: ProposalChangeDecision) => void;
+  onRequestProposalRevision: (proposalId: string, change: ProposalChangeBlock, instruction: string) => void;
+  onTableImageExported: (status: "success" | "error") => void;
+}
+
+function FloatingFormatToolbar({
+  position,
+  activeBlockId,
+  onParagraph,
+  onHeading,
+  onBold,
+  onItalic,
+  onInlineCode,
+  onLink,
+  onComment
+}: {
+  position: FloatingToolbarState;
+  activeBlockId: string | null;
+  onParagraph: () => void;
+  onHeading: (level: 1 | 2 | 3) => void;
+  onBold: () => void;
+  onItalic: () => void;
+  onInlineCode: () => void;
+  onLink: () => void;
+  onComment: () => void;
+}) {
+  const keepSelection = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+  };
+
+  return (
+    <div
+      className={`floating-format-toolbar is-${position.placement}`}
+      style={{ left: position.left, top: position.top }}
+      role="toolbar"
+      aria-label="Selection formatting toolbar"
+    >
+      <button title="Paragraph" disabled={!activeBlockId} onMouseDown={keepSelection} onClick={onParagraph}>
+        <Pilcrow size={15} />
+      </button>
+      <button title="Heading 1" disabled={!activeBlockId} onMouseDown={keepSelection} onClick={() => onHeading(1)}>
+        <Heading1 size={15} />
+      </button>
+      <button title="Heading 2" disabled={!activeBlockId} onMouseDown={keepSelection} onClick={() => onHeading(2)}>
+        <Heading2 size={15} />
+      </button>
+      <button title="Heading 3" disabled={!activeBlockId} onMouseDown={keepSelection} onClick={() => onHeading(3)}>
+        <Heading3 size={15} />
+      </button>
+      <span className="toolbar-divider" />
+      <button title="Bold" onMouseDown={keepSelection} onClick={onBold}>
+        <Bold size={15} />
+      </button>
+      <button title="Italic" onMouseDown={keepSelection} onClick={onItalic}>
+        <Italic size={15} />
+      </button>
+      <button title="Inline code" onMouseDown={keepSelection} onClick={onInlineCode}>
+        <Code2 size={15} />
+      </button>
+      <button title="Insert link" onMouseDown={keepSelection} onClick={onLink}>
+        <LinkIcon size={15} />
+      </button>
+      <span className="toolbar-divider" />
+      <button title="Comment on selected text" onMouseDown={keepSelection} onClick={onComment}>
+        <MessageSquare size={15} />
+      </button>
+    </div>
+  );
+}
+
+function LinkPopover({
+  position,
+  value,
+  inputRef,
+  onChange,
+  onApply,
+  onCancel
+}: {
+  position: LinkPopoverState;
+  value: string;
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  onChange: (value: string) => void;
+  onApply: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="link-popover" style={{ left: position.left, top: position.top }} role="dialog" aria-label="Insert link">
+      <input
+        ref={inputRef}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            onApply();
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onCancel();
+          }
+        }}
+        placeholder="https://example.com"
+        aria-label="Link URL"
+      />
+      <button
+        type="button"
+        className="primary-button small"
+        onMouseDown={(event) => {
+          event.preventDefault();
+          onApply();
+        }}
+        disabled={!value.trim()}
+      >
+        Apply
+      </button>
+      <button
+        type="button"
+        className="ghost-button small"
+        onMouseDown={(event) => {
+          event.preventDefault();
+          onCancel();
+        }}
+      >
+        <X size={14} />
+      </button>
+    </div>
+  );
 }
 
 function EditableMarkdownCanvas({
   markdown,
+  editorLanguage,
   threads,
+  inlineProposal,
+  selectionPreview,
+  blockResetKeys,
+  activeBlockId,
   activeThreadId,
   onActivateThread,
   onUpdateBlock,
   onRegisterBlock,
   onFocusBlock,
-  onShortcut
+  onRememberSelection,
+  onShortcut,
+  onCommitDocument,
+  onDocumentInput,
+  onMoveBlock,
+  onDeleteBlock,
+  onProposalChangeDecision,
+  onRequestProposalRevision,
+  onTableImageExported
 }: MarkdownCanvasProps) {
+  const [draggingBlockId, setDraggingBlockId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ blockId: string; placement: BlockDropPlacement } | null>(null);
   const blocks = useMemo(() => parseMarkdownBlocks(markdown), [markdown]);
+  const blockSpans = useMemo(() => getMarkdownBlockLineSpans(markdown), [markdown]);
+  const selectionPreviewThread = useMemo<ReviewThread | null>(
+    () =>
+      selectionPreview
+        ? {
+            id: "selection-preview",
+            status: "open",
+            anchor: selectionPreview,
+            messages: [],
+            suggestions: [],
+            createdAt: "",
+            updatedAt: ""
+          }
+        : null,
+    [selectionPreview]
+  );
+  const canvasThreads = useMemo(
+    () => (selectionPreviewThread ? [...threads, selectionPreviewThread] : threads),
+    [threads, selectionPreviewThread]
+  );
+  const canvasActiveThreadId = selectionPreviewThread?.id ?? activeThreadId;
+  const inlineChangesByBlock = useMemo(() => {
+    const byBlock = new Map<string, InlineProposalChange[]>();
+    inlineProposal?.changes.forEach((change) => {
+      if (change.decision) return;
+      if (!change.anchorBlockId) return;
+      const existing = byBlock.get(change.anchorBlockId) ?? [];
+      existing.push(change);
+      byBlock.set(change.anchorBlockId, existing);
+    });
+    return byBlock;
+  }, [inlineProposal]);
+  const unanchoredInlineChanges = useMemo(
+    () => inlineProposal?.changes.filter((change) => !change.anchorBlockId && !change.decision) ?? [],
+    [inlineProposal]
+  );
+
+  function clearBlockDragState() {
+    setDraggingBlockId(null);
+    setDropTarget(null);
+  }
+
+  function updateDropTarget(event: React.DragEvent<HTMLElement>, targetBlockId: string) {
+    if (!draggingBlockId || draggingBlockId === targetBlockId) return;
+
+    event.preventDefault();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const placement: BlockDropPlacement = event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+    event.dataTransfer.dropEffect = "move";
+    setDropTarget((current) =>
+      current?.blockId === targetBlockId && current.placement === placement ? current : { blockId: targetBlockId, placement }
+    );
+  }
+
+  function dropBlock(event: React.DragEvent<HTMLElement>, targetBlockId: string) {
+    if (!draggingBlockId || draggingBlockId === targetBlockId || !dropTarget) return;
+
+    event.preventDefault();
+    onMoveBlock(draggingBlockId, targetBlockId, dropTarget.placement);
+    clearBlockDragState();
+  }
+
+  function currentBlockIdFromSelection() {
+    const selection = window.getSelection();
+    const node = selection?.focusNode ?? selection?.anchorNode;
+    return node ? closestEditableBlock(node)?.dataset.blockId ?? null : null;
+  }
+
+  function focusCurrentSelectionBlock(target?: EventTarget | null) {
+    const targetBlock =
+      target instanceof Node ? closestEditableBlock(target)?.dataset.blockId ?? null : currentBlockIdFromSelection();
+    const blockId = targetBlock ?? currentBlockIdFromSelection();
+    if (blockId) onFocusBlock(blockId);
+    return blockId;
+  }
+
+  function handleDocumentKeyDown(event: React.KeyboardEvent<HTMLElement>) {
+    if (event.defaultPrevented) return;
+    const blockId = currentBlockIdFromSelection();
+    if (blockId) onShortcut(event, blockId);
+  }
+
+  function handleDocumentKeyUp(event: React.KeyboardEvent<HTMLElement>) {
+    focusCurrentSelectionBlock(event.target);
+    onRememberSelection();
+  }
+
+  function handleDocumentMouseUp(event: React.MouseEvent<HTMLElement>) {
+    focusCurrentSelectionBlock(event.target);
+    onRememberSelection();
+  }
+
+  function handleDocumentBlur(event: React.FocusEvent<HTMLElement>) {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    onCommitDocument();
+  }
+
+  function handleDocumentInput() {
+    onDocumentInput();
+  }
 
   if (blocks.length === 0) {
     return <p className="editable-empty">Start writing...</p>;
@@ -1201,64 +4270,215 @@ function EditableMarkdownCanvas({
 
   return (
     <>
-      {blocks.map((block) => (
-        <EditableBlock
-          key={block.id}
-          block={block}
-          threads={threads}
-          activeThreadId={activeThreadId}
-          onActivateThread={onActivateThread}
-          onUpdateBlock={onUpdateBlock}
-          onRegisterBlock={onRegisterBlock}
-          onFocusBlock={onFocusBlock}
-          onShortcut={onShortcut}
+      {unanchoredInlineChanges.map((change) => (
+        <InlineProposalChangeCard
+          key={`${change.proposalId}:${change.key}`}
+          change={change}
+          onProposalChangeDecision={onProposalChangeDecision}
+          onRequestProposalRevision={onRequestProposalRevision}
         />
       ))}
+      <div
+        className="editable-document"
+        lang={editorLanguage}
+        onBlur={handleDocumentBlur}
+        onInput={handleDocumentInput}
+        onKeyDown={handleDocumentKeyDown}
+        onKeyUp={handleDocumentKeyUp}
+        onMouseUp={handleDocumentMouseUp}
+      >
+        {blocks.map((block) => {
+          const blockSpan = blockSpans.find((span) => span.id === block.id) ?? null;
+          const blockAnchorRanges =
+            blockSpan === null
+              ? []
+              : canvasThreads
+                  .filter(
+                    (thread) =>
+                      (thread.status === "open" || thread.id === canvasActiveThreadId) &&
+                      thread.anchor.kind === "markdown-range" &&
+                      thread.anchor.end > blockSpan.textStart &&
+                      thread.anchor.start < blockSpan.textEnd
+                  )
+                  .map((thread) => ({
+                    thread,
+                    start: clamp(thread.anchor.start - blockSpan.textStart, 0, block.text.length),
+                    end: clamp(thread.anchor.end - blockSpan.textStart, 0, block.text.length)
+                  }))
+                  .filter((range) => range.end > range.start);
+
+          return (
+            <React.Fragment key={block.id}>
+              <EditableBlockShell
+                blockId={block.id}
+                isActive={activeBlockId === block.id}
+                isDragging={draggingBlockId === block.id}
+                dropPlacement={dropTarget?.blockId === block.id ? dropTarget.placement : null}
+                onDragStart={(event) => {
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData("text/plain", block.id);
+                  setDraggingBlockId(block.id);
+                }}
+                onDragOver={(event) => updateDropTarget(event, block.id)}
+                onDragLeave={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                    setDropTarget((current) => (current?.blockId === block.id ? null : current));
+                  }
+                }}
+                onDrop={(event) => dropBlock(event, block.id)}
+                onDragEnd={clearBlockDragState}
+                onDelete={() => onDeleteBlock(block.id)}
+              >
+                <EditableBlock
+                  key={`${block.id}:${blockResetKeys[block.id] ?? 0}`}
+                  block={block}
+                  anchorRanges={blockAnchorRanges}
+                  editorLanguage={editorLanguage}
+                  threads={canvasThreads}
+                  activeThreadId={canvasActiveThreadId}
+                  onActivateThread={onActivateThread}
+                  onUpdateBlock={onUpdateBlock}
+                  onRegisterBlock={onRegisterBlock}
+                  onFocusBlock={onFocusBlock}
+                  onRememberSelection={onRememberSelection}
+                  onShortcut={onShortcut}
+                  onTableImageExported={onTableImageExported}
+                />
+              </EditableBlockShell>
+              {(inlineChangesByBlock.get(block.id) ?? []).map((change) => (
+                <InlineProposalChangeCard
+                  key={`${change.proposalId}:${change.key}`}
+                  change={change}
+                  onProposalChangeDecision={onProposalChangeDecision}
+                  onRequestProposalRevision={onRequestProposalRevision}
+                />
+              ))}
+            </React.Fragment>
+          );
+        })}
+      </div>
     </>
   );
 }
 
-function EditableBlock({
-  block,
-  threads,
-  activeThreadId,
-  onActivateThread,
-  onUpdateBlock,
-  onRegisterBlock,
-  onFocusBlock,
-  onShortcut
+function EditableBlockShell({
+  blockId,
+  isActive,
+  isDragging,
+  dropPlacement,
+  onDragStart,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  onDragEnd,
+  onDelete,
+  children
 }: {
+  blockId: string;
+  isActive: boolean;
+  isDragging: boolean;
+  dropPlacement: BlockDropPlacement | null;
+  onDragStart: (event: React.DragEvent<HTMLButtonElement>) => void;
+  onDragOver: (event: React.DragEvent<HTMLDivElement>) => void;
+  onDragLeave: (event: React.DragEvent<HTMLDivElement>) => void;
+  onDrop: (event: React.DragEvent<HTMLDivElement>) => void;
+  onDragEnd: () => void;
+  onDelete: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className={`editable-block-shell ${isActive ? "is-active" : ""} ${isDragging ? "is-dragging" : ""} ${
+        dropPlacement ? `is-drop-${dropPlacement}` : ""
+      }`}
+      data-block-shell={blockId}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      <div className="editable-block-controls" aria-label="Block controls" contentEditable={false}>
+        <button
+          type="button"
+          className="block-delete-button"
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={onDelete}
+          title="Delete block"
+          aria-label="Delete block"
+        >
+          <X size={13} />
+        </button>
+        <button
+          type="button"
+          className="block-drag-handle"
+          draggable
+          onDragStart={onDragStart}
+          onDragEnd={onDragEnd}
+          title="Drag to move block"
+          aria-label="Drag to move block"
+        >
+          <GripVertical size={14} />
+        </button>
+      </div>
+      <div className="editable-block-content">{children}</div>
+    </div>
+  );
+}
+
+interface EditableBlockProps {
   block: ReturnType<typeof parseMarkdownBlocks>[number];
+  anchorRanges: BlockAnchorRange[];
+  editorLanguage: SupportedEditorLanguage;
   threads: ReviewThread[];
   activeThreadId: string | null;
   onActivateThread: (threadId: string) => void;
   onUpdateBlock: (blockId: string, text: string) => void;
   onRegisterBlock: (blockId: string, node: HTMLElement | null) => void;
   onFocusBlock: (blockId: string) => void;
+  onRememberSelection: () => void;
   onShortcut: (event: React.KeyboardEvent<HTMLElement>, blockId: string) => void;
-}) {
-  const editableRef = useRef<HTMLElement | null>(null);
+  onTableImageExported: (status: "success" | "error") => void;
+}
 
-  function commitBlock() {
-    const html = editableRef.current?.innerHTML.replace(/\u00a0/g, " ").trimEnd() ?? "";
-    if (htmlToInlineMarkdown(html) !== block.text) onUpdateBlock(block.id, html);
-  }
+const EditableBlock = React.memo(function EditableBlock({
+  block,
+  anchorRanges,
+  editorLanguage,
+  threads,
+  activeThreadId,
+  onActivateThread,
+  onUpdateBlock,
+  onRegisterBlock,
+  onFocusBlock,
+  onRememberSelection,
+  onShortcut,
+  onTableImageExported
+}: EditableBlockProps) {
+  const editableRef = useRef<HTMLElement | null>(null);
 
   const editableProps: any = {
     ref: (node: HTMLElement | null) => {
       editableRef.current = node;
       onRegisterBlock(block.id, node);
     },
+    "data-block-id": block.id,
+    onMouseUp: () => {
+      onRememberSelection();
+      onFocusBlock(block.id);
+    },
+    onKeyUp: () => {
+      onRememberSelection();
+      onFocusBlock(block.id);
+    },
+    onSelect: onRememberSelection,
+    onKeyDown: (event: React.KeyboardEvent<HTMLElement>) => onShortcut(event, block.id),
     contentEditable: true,
     suppressContentEditableWarning: true,
     spellCheck: true,
-    onFocus: () => onFocusBlock(block.id),
-    onKeyDown: (event: React.KeyboardEvent<HTMLElement>) => onShortcut(event, block.id),
-    onBlur: commitBlock,
+    lang: editorLanguage,
     className: "editable-text"
   };
 
-  const children = renderHighlightedText(block.text, threads, activeThreadId, onActivateThread);
+  const children = renderHighlightedText(block.text, threads, activeThreadId, onActivateThread, anchorRanges);
 
   if (block.type === "heading") {
     const tag = `h${Math.min(block.level ?? 2, 3)}` as "h1" | "h2" | "h3";
@@ -1298,32 +4518,166 @@ function EditableBlock({
     );
   }
 
+  if (block.type === "table") {
+    return <EditableTableBlock block={block} editableProps={editableProps} onTableImageExported={onTableImageExported} />;
+  }
+
   return (
     <p {...editableProps} id={block.id}>
       {children}
     </p>
   );
+}, areEditableBlockPropsEqual);
+
+function EditableTableBlock({
+  block,
+  editableProps,
+  onTableImageExported
+}: {
+  block: ReturnType<typeof parseMarkdownBlocks>[number];
+  editableProps: React.HTMLAttributes<HTMLElement> & { ref: (node: HTMLElement | null) => void; "data-block-id": string };
+  onTableImageExported: (status: "success" | "error") => void;
+}) {
+  const tableRef = useRef<HTMLTableElement | null>(null);
+  const table = parseMarkdownTable(block.text);
+  if (!table) {
+    return (
+      <p {...editableProps} id={block.id}>
+        <span>{block.text}</span>
+      </p>
+    );
+  }
+
+  const columnCount = Math.max(table.headers.length, ...table.rows.map((row) => row.length), 2);
+  const headers = Array.from({ length: columnCount }, (_, index) => table.headers[index] ?? "");
+  const rows = table.rows.length > 0 ? table.rows : [Array.from({ length: columnCount }, () => "")];
+  const cellStyle = (index: number): React.CSSProperties => {
+    const textAlign = table.alignments[index];
+    return textAlign ? { textAlign: textAlign as React.CSSProperties["textAlign"] } : {};
+  };
+  const registerTable = (node: HTMLTableElement | null) => {
+    tableRef.current = node;
+    editableProps.ref(node);
+  };
+  const exportTableImage = async () => {
+    if (!tableRef.current) return;
+    try {
+      await downloadTableAsPng(tableRef.current, `skribe-table-${block.id}`);
+      onTableImageExported("success");
+    } catch (error) {
+      console.error("Unable to download table image", error);
+      onTableImageExported("error");
+    }
+  };
+
+  return (
+    <div className="editable-table-shell">
+      <button
+        type="button"
+        className="table-image-download"
+        contentEditable={false}
+        onMouseDown={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        }}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          void exportTableImage();
+        }}
+        title="Download table as image"
+        aria-label="Download table as image"
+      >
+        <Download size={14} />
+      </button>
+      <table {...editableProps} ref={registerTable} id={block.id} className="editable-text editable-table">
+        <thead>
+          <tr>
+            {headers.map((cell, index) => (
+              <th key={`header-${index}`} style={cellStyle(index)} dangerouslySetInnerHTML={{ __html: inlineMarkdownToHtml(cell) }} />
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, rowIndex) => (
+            <tr key={`row-${rowIndex}`}>
+              {Array.from({ length: columnCount }, (_, index) => (
+                <td
+                  key={`cell-${rowIndex}-${index}`}
+                  style={cellStyle(index)}
+                  dangerouslySetInnerHTML={{ __html: inlineMarkdownToHtml(row[index] ?? "") }}
+                />
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function areEditableBlockPropsEqual(previous: EditableBlockProps, next: EditableBlockProps) {
+  return (
+    previous.activeThreadId === next.activeThreadId &&
+    previous.editorLanguage === next.editorLanguage &&
+    anchorRangesRenderKey(previous.anchorRanges) === anchorRangesRenderKey(next.anchorRanges) &&
+    previous.block.id === next.block.id &&
+    previous.block.type === next.block.type &&
+    previous.block.text === next.block.text &&
+    previous.block.level === next.block.level &&
+    previous.block.marker === next.block.marker &&
+    previous.block.language === next.block.language &&
+    previous.onTableImageExported === next.onTableImageExported &&
+    threadsRenderKey(previous.threads) === threadsRenderKey(next.threads)
+  );
+}
+
+function anchorRangesRenderKey(ranges: BlockAnchorRange[]) {
+  return ranges.map((range) => `${range.thread.id}:${range.start}:${range.end}`).join("|");
+}
+
+function threadsRenderKey(threads: ReviewThread[]) {
+  return threads
+    .map((thread) =>
+      [
+        thread.id,
+        thread.status,
+        thread.anchor.exact,
+        thread.anchor.kind ?? "",
+        thread.anchor.start,
+        thread.anchor.end,
+        thread.suggestions.map((suggestion) => `${suggestion.id}:${suggestion.status}:${suggestion.replacement}`).join("~")
+      ].join(":")
+    )
+    .join("|");
 }
 
 function renderHighlightedText(
   text: string,
   threads: ReviewThread[],
   activeThreadId: string | null,
-  onActivateThread: (threadId: string) => void
+  onActivateThread: (threadId: string) => void,
+  anchorRanges: BlockAnchorRange[] = []
 ) {
-  const ranges = threads
-    .filter((thread) => thread.status === "open" && thread.anchor.exact)
+  const exactRanges = threads
+    .filter(
+      (thread) =>
+        thread.anchor.kind !== "markdown-range" &&
+        (thread.status === "open" || thread.id === activeThreadId) &&
+        thread.anchor.exact
+    )
     .map((thread) => {
-      const index = text.indexOf(thread.anchor.exact);
-      return index >= 0
+      const match = findThreadAnchorInText(thread, text);
+      return match
         ? {
             thread,
-            start: index,
-            end: index + thread.anchor.exact.length
+            start: match.start,
+            end: match.end
           }
         : null;
     })
-    .filter(Boolean)
+    .filter(Boolean) as Array<{ thread: ReviewThread; start: number; end: number }>;
+  const ranges = [...anchorRanges, ...exactRanges]
     .sort((a, b) => a!.start - b!.start) as Array<{ thread: ReviewThread; start: number; end: number }>;
 
   if (ranges.length === 0) {
@@ -1332,7 +4686,7 @@ function renderHighlightedText(
 
   const nodes: React.ReactNode[] = [];
   let cursor = 0;
-  ranges.forEach((range, index) => {
+  ranges.forEach((range) => {
     if (range.start < cursor) return;
     if (range.start > cursor) {
       nodes.push(
@@ -1343,9 +4697,12 @@ function renderHighlightedText(
     nodes.push(
       <span
         key={range.thread.id}
+        data-thread-id={range.thread.id}
         className={`anchor-highlight ${isActive ? "is-active" : ""}`}
-        onMouseDown={(event) => {
-          event.preventDefault();
+        onClick={() => {
+          if (range.thread.id === "selection-preview") return;
+          const selection = window.getSelection();
+          if (selection && !selection.isCollapsed) return;
           onActivateThread(range.thread.id);
         }}
         dangerouslySetInnerHTML={{ __html: inlineMarkdownToHtml(text.slice(range.start, range.end)) }}
@@ -1362,49 +4719,59 @@ function renderHighlightedText(
 }
 
 interface ThreadPanelProps {
+  markdown: string;
   threads: ReviewThread[];
   activeThread: ReviewThread | null;
   activeThreadId: string | null;
   selectionDraft: SelectionDraft | null;
   newComment: string;
   replyDrafts: Record<string, string>;
-  suggestionDrafts: Record<string, string>;
-  replyAuthor: Author;
-  onSetReplyAuthor: (author: Author) => void;
+  agentSkills: AgentSkill[];
+  newThreadSkillIds: string[];
+  threadSkillIds: Record<string, string[]>;
+  showResolvedThreads: boolean;
+  resolvedThreadCount: number;
   onSetNewComment: (value: string) => void;
+  onSetNewThreadSkillIds: (value: string[]) => void;
   onAddThread: () => void;
   onClearSelection: () => void;
   onActivateThread: (threadId: string) => void;
   onSetReplyDrafts: React.Dispatch<React.SetStateAction<Record<string, string>>>;
-  onSetSuggestionDrafts: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+  onSetThreadSkillIds: React.Dispatch<React.SetStateAction<Record<string, string[]>>>;
   onAddMessage: (threadId: string) => void;
-  onAddSuggestion: (thread: ReviewThread) => void;
+  onRequestAgentReply: (threadId: string) => void;
   onSetStatus: (threadId: string, status: "open" | "resolved") => void;
   onSuggestionStatus: (threadId: string, suggestionId: string, status: "accepted" | "rejected") => void;
+  onToggleResolvedThreads: () => void;
   agentSession?: AgentSession;
 }
 
 function ThreadPanel(props: ThreadPanelProps) {
   const {
     threads,
+    markdown,
     activeThread,
     activeThreadId,
     selectionDraft,
     newComment,
     replyDrafts,
-    suggestionDrafts,
-    replyAuthor,
-    onSetReplyAuthor,
+    agentSkills,
+    newThreadSkillIds,
+    threadSkillIds,
+    showResolvedThreads,
+    resolvedThreadCount,
     onSetNewComment,
+    onSetNewThreadSkillIds,
     onAddThread,
     onClearSelection,
     onActivateThread,
     onSetReplyDrafts,
-    onSetSuggestionDrafts,
+    onSetThreadSkillIds,
     onAddMessage,
-    onAddSuggestion,
+    onRequestAgentReply,
     onSetStatus,
     onSuggestionStatus,
+    onToggleResolvedThreads,
     agentSession
   } = props;
   const workingThreadId = agentSession?.activeTurn?.source === "thread" ? agentSession.activeTurn.threadId : null;
@@ -1420,17 +4787,19 @@ function ThreadPanel(props: ThreadPanelProps) {
             New anchored thread
           </div>
           <blockquote>{selectionDraft.exact}</blockquote>
-          <textarea
+          <SkillComposer
             value={newComment}
-            onChange={(event) => onSetNewComment(event.target.value)}
+            onChange={onSetNewComment}
+            selectedSkillIds={newThreadSkillIds}
+            onSelectedSkillIdsChange={onSetNewThreadSkillIds}
+            skills={agentSkills}
             placeholder="Leave a note for the agent..."
             rows={4}
+            submitLabel="Add thread"
+            submitIcon={<MessageSquare size={15} />}
+            onSubmit={onAddThread}
           />
           <div className="button-row">
-            <button className="primary-button" onClick={onAddThread}>
-              <MessageSquare size={15} />
-              Add thread
-            </button>
             <button className="ghost-button" onClick={onClearSelection}>
               <X size={15} />
               Clear
@@ -1439,9 +4808,28 @@ function ThreadPanel(props: ThreadPanelProps) {
         </section>
       ) : null}
 
+      <div className="thread-list-toolbar">
+        <span>
+          {threads.length} visible · {resolvedThreadCount} resolved
+        </span>
+        <button
+          className="ghost-button small"
+          onClick={onToggleResolvedThreads}
+          disabled={resolvedThreadCount === 0}
+          title={showResolvedThreads ? "Hide resolved threads" : "Show resolved threads"}
+        >
+          {showResolvedThreads ? <EyeOff size={13} /> : <Eye size={13} />}
+          {showResolvedThreads ? "Hide resolved" : "Show resolved"}
+        </button>
+      </div>
+
       <section className="thread-list">
         {threads.length === 0 ? (
-          <p className="empty-note">Highlight text in the canvas to start the first review thread.</p>
+          <p className="empty-note">
+            {resolvedThreadCount > 0 && !showResolvedThreads
+              ? "All resolved threads are hidden."
+              : "Select text in the canvas, then use the comment button in the toolbar."}
+          </p>
         ) : (
           threads.map((thread, index) => (
             <button
@@ -1470,26 +4858,53 @@ function ThreadPanel(props: ThreadPanelProps) {
         <section className="thread-detail">
           <div className="thread-detail-header">
             <span>{activeThread.status}</span>
-            <button
-              className="ghost-button small"
-              onClick={() => onSetStatus(activeThread.id, activeThread.status === "open" ? "resolved" : "open")}
-            >
-              {activeThread.status === "open" ? "Resolve" : "Reopen"}
-            </button>
+            <div className="thread-actions">
+              <button
+                className="secondary-button small"
+                disabled={isAgentWorkingForActiveThread}
+                onClick={() => onRequestAgentReply(activeThread.id)}
+              >
+                <Sparkles size={14} />
+                Ask agent
+              </button>
+              <button
+                className="ghost-button small"
+                onClick={() => onSetStatus(activeThread.id, activeThread.status === "open" ? "resolved" : "open")}
+              >
+                {activeThread.status === "open" ? "Resolve" : "Reopen"}
+              </button>
+            </div>
           </div>
-          <blockquote>{activeThread.anchor.exact}</blockquote>
+          <button className="thread-anchor-preview" onClick={() => onActivateThread(activeThread.id)}>
+            {activeThread.anchor.exact}
+          </button>
 
           <div className="message-stack">
             {activeThread.messages.map((message) => (
-              <article key={message.id} className={`message-bubble is-${message.author}`}>
+              <article
+                key={message.id}
+                className={`message-bubble is-${message.author} ${
+                  message.author === "agent" && message.body.startsWith("Agent run failed:") ? "is-error" : ""
+                }`}
+              >
                 <div>
                   <strong>{authorLabels[message.author]}</strong>
                   <time>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
                 </div>
-                <p>{message.body}</p>
+                {message.body ? <p>{message.body}</p> : null}
+                <MessageSkillChips skills={message.skills} />
               </article>
             ))}
             {isAgentWorkingForActiveThread ? <AgentTypingIndicator label="Agent is drafting a thread reply" /> : null}
+            {agentSession?.status === "error" && agentSession.lastError ? (
+              <article className="message-bubble is-error">
+                <div>
+                  <strong>Agent error</strong>
+                  <span>Retry available</span>
+                </div>
+                <p>{agentSession.lastError}</p>
+              </article>
+            ) : null}
           </div>
 
           {activeThread.suggestions.length > 0 ? (
@@ -1512,6 +4927,13 @@ function ThreadPanel(props: ThreadPanelProps) {
                         Reject
                       </button>
                     </div>
+                  ) : suggestion.status === "accepted" && !markdown.includes(suggestion.replacement) ? (
+                    <div className="button-row">
+                      <button className="secondary-button" onClick={() => onSuggestionStatus(activeThread.id, suggestion.id, "accepted")}>
+                        <Check size={15} />
+                        Apply to doc
+                      </button>
+                    </div>
                   ) : null}
                 </article>
               ))}
@@ -1519,53 +4941,179 @@ function ThreadPanel(props: ThreadPanelProps) {
           ) : null}
 
           <div className="composer">
-            <div className="composer-toolbar">
-              <label>
-                Author
-                <select value={replyAuthor} onChange={(event) => onSetReplyAuthor(event.target.value as Author)}>
-                  <option value="human">Human</option>
-                  <option value="agent">Agent</option>
-                </select>
-              </label>
-            </div>
-            <textarea
+            <SkillComposer
               value={replyDrafts[activeThread.id] ?? ""}
-              onChange={(event) =>
+              onChange={(value) =>
                 onSetReplyDrafts((drafts) => ({
                   ...drafts,
-                  [activeThread.id]: event.target.value
+                  [activeThread.id]: value
                 }))
               }
+              selectedSkillIds={threadSkillIds[activeThread.id] ?? []}
+              onSelectedSkillIdsChange={(skillIds) =>
+                onSetThreadSkillIds((drafts) => ({
+                  ...drafts,
+                  [activeThread.id]: skillIds
+                }))
+              }
+              skills={agentSkills}
               rows={3}
               placeholder="Reply in this thread..."
+              submitLabel="Reply"
+              submitIcon={<Send size={15} />}
+              onSubmit={() => onAddMessage(activeThread.id)}
             />
-            <button className="primary-button" onClick={() => onAddMessage(activeThread.id)}>
-              <Send size={15} />
-              Reply
-            </button>
           </div>
 
-          <div className="composer suggestion-composer">
-            <label>Agent replacement suggestion</label>
-            <textarea
-              value={suggestionDrafts[activeThread.id] ?? ""}
-              onChange={(event) =>
-                onSetSuggestionDrafts((drafts) => ({
-                  ...drafts,
-                  [activeThread.id]: event.target.value
-                }))
-              }
-              rows={5}
-              placeholder="Draft replacement text for the selected passage..."
-            />
-            <button className="secondary-button" onClick={() => onAddSuggestion(activeThread)}>
-              <Sparkles size={15} />
-              Save suggestion
-            </button>
-          </div>
         </section>
       ) : null}
     </div>
+  );
+}
+
+function InlineProposalReviewBar({
+  review,
+  proposalCount,
+  onProposalStatus,
+  onRequestProposalRewrite
+}: {
+  review: InlineProposalReview | null;
+  proposalCount: number;
+  onProposalStatus: (proposalId: string, status: "accepted" | "rejected") => void;
+  onRequestProposalRewrite: (proposalId: string) => void;
+}) {
+  if (!review) return null;
+
+  return (
+    <section className="inline-proposal-review-bar" aria-label="Active agent proposal">
+      <div>
+        <span>Agent proposal</span>
+        <strong>{review.proposal.title}</strong>
+        <small>
+          {review.decidedCount}/{review.changes.length} changes reviewed
+          {proposalCount > 1 ? ` · ${proposalCount - 1} more in Chat` : ""}
+        </small>
+      </div>
+      <p>{review.proposal.summary}</p>
+      <div className="button-row compact">
+        <button className="secondary-button" onClick={() => onRequestProposalRewrite(review.proposal.id)}>
+          <RefreshCw size={15} />
+          Rewrite proposal
+        </button>
+        <button className="primary-button" onClick={() => onProposalStatus(review.proposal.id, "accepted")}>
+          <Check size={15} />
+          Accept all
+        </button>
+        <button className="ghost-button" onClick={() => onProposalStatus(review.proposal.id, "rejected")}>
+          <X size={15} />
+          Decline all
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function InlineProposalChangeCard({
+  change,
+  onProposalChangeDecision,
+  onRequestProposalRevision
+}: {
+  change: InlineProposalChange;
+  onProposalChangeDecision: (proposalId: string, changeKey: string, decision: ProposalChangeDecision) => void;
+  onRequestProposalRevision: (proposalId: string, change: ProposalChangeBlock, instruction: string) => void;
+}) {
+  const [isCommentOpen, setIsCommentOpen] = useState(false);
+  const [revisionDraft, setRevisionDraft] = useState("");
+  const decisionLabel = change.decision === "accepted" ? "accepted" : change.decision === "rejected" ? "declined" : "pending";
+  const rewriteInstruction =
+    "Rewrite this proposed change from scratch. Keep the underlying editorial intent, preserve the author's voice, and return a cleaner alternative rather than a minor polish.";
+
+  return (
+    <section
+      className={`inline-proposal-change is-${change.decision ?? "pending"}`}
+      data-inline-proposal-change
+      data-change-key={change.key}
+      contentEditable={false}
+      tabIndex={-1}
+    >
+      <div className="inline-proposal-change-header">
+        <div>
+          <strong>Change {change.ordinal}</strong>
+          <span>{decisionLabel}</span>
+        </div>
+        <small>
+          -{lineRangeLabel(change.deletionLineStart, change.deletions.length)} · +
+          {lineRangeLabel(change.additionLineStart, change.additions.length)}
+        </small>
+      </div>
+      <div className="inline-proposal-body">
+        <div>
+          <span>Current</span>
+          <p>{trimBlockText(change.deletions)}</p>
+        </div>
+        <div>
+          <span>Proposed</span>
+          <p>{trimBlockText(change.additions)}</p>
+        </div>
+      </div>
+      <div className="button-row compact">
+        <button
+          className={change.decision === "accepted" ? "primary-button" : "secondary-button"}
+          onClick={(event) => {
+            const nextChangeKey = getNextInlineChangeKey(event.currentTarget);
+            onProposalChangeDecision(change.proposalId, change.key, "accepted");
+            scrollToInlineChange(nextChangeKey);
+          }}
+        >
+          <Check size={15} />
+          Accept
+        </button>
+        <button
+          className={change.decision === "rejected" ? "ghost-button is-active" : "ghost-button"}
+          onClick={(event) => {
+            const nextChangeKey = getNextInlineChangeKey(event.currentTarget);
+            onProposalChangeDecision(change.proposalId, change.key, "rejected");
+            scrollToInlineChange(nextChangeKey);
+          }}
+        >
+          <X size={15} />
+          Decline
+        </button>
+        <button
+          className="secondary-button"
+          onClick={() => onRequestProposalRevision(change.proposalId, change, rewriteInstruction)}
+        >
+          <RefreshCw size={15} />
+          Rewrite
+        </button>
+        <button className="ghost-button" onClick={() => setIsCommentOpen((value) => !value)}>
+          <MessageSquare size={15} />
+          Comment
+        </button>
+      </div>
+      {isCommentOpen ? (
+        <div className="revision-composer revision-comment-composer">
+          <textarea
+            value={revisionDraft}
+            onChange={(event) => setRevisionDraft(event.target.value)}
+            rows={3}
+            placeholder="Send a revision comment to the agent..."
+          />
+          <button
+            className="primary-button"
+            onClick={() => {
+              onRequestProposalRevision(change.proposalId, change, revisionDraft);
+              setRevisionDraft("");
+              setIsCommentOpen(false);
+            }}
+            disabled={!revisionDraft.trim()}
+          >
+            <Send size={15} />
+            Send comment
+          </button>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -1575,14 +5123,14 @@ interface ChatPanelProps {
   contextLedger: ContextLedgerEvent[];
   agentSession?: AgentSession;
   chatDraft: string;
-  chatAuthor: Author;
+  agentSkills: AgentSkill[];
+  selectedSkillIds: string[];
   onSetChatDraft: (value: string) => void;
-  onSetChatAuthor: (author: Author) => void;
+  onSetSelectedSkillIds: (value: string[]) => void;
   onSend: () => void;
   onProposalStatus: (proposalId: string, status: "accepted" | "rejected") => void;
   onProposalChangeDecision: (proposalId: string, changeKey: string, decision: ProposalChangeDecision) => void;
   onRequestProposalRevision: (proposalId: string, change: ProposalChangeBlock, instruction: string) => void;
-  onCopyAgentPacket: () => void;
 }
 
 function ChatPanel({
@@ -1591,17 +5139,19 @@ function ChatPanel({
   contextLedger,
   agentSession,
   chatDraft,
-  chatAuthor,
+  agentSkills,
+  selectedSkillIds,
   onSetChatDraft,
-  onSetChatAuthor,
+  onSetSelectedSkillIds,
   onSend,
   onProposalStatus,
   onProposalChangeDecision,
-  onRequestProposalRevision,
-  onCopyAgentPacket
+  onRequestProposalRevision
 }: ChatPanelProps) {
   const isAgentWorkingInChat = agentSession?.status === "running" && agentSession.activeTurn?.source === "chat";
-  const openProposals = proposals.filter((proposal) => proposal.status === "open" || proposal.status === "reviewed");
+  const openProposals = proposals
+    .filter((proposal) => proposal.status === "open" || proposal.status === "reviewed")
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
   const recentLedger = contextLedger.slice(-5).reverse();
   const decisionCount = contextLedger.filter(
     (event) =>
@@ -1611,13 +5161,6 @@ function ChatPanel({
   ).length;
   return (
     <div className="panel-body chat-panel">
-      <div className="chat-actions">
-        <button className="secondary-button" onClick={onCopyAgentPacket}>
-          <Clipboard size={15} />
-          Copy context packet
-        </button>
-      </div>
-
       <div className="message-stack chat-stack">
         <section className="memory-card">
           <div className="memory-card-header">
@@ -1655,12 +5198,18 @@ function ChatPanel({
           <p className="empty-note">Use chat for article-level discussion. Anchored edits belong in Threads.</p>
         ) : (
           messages.map((message) => (
-            <article key={message.id} className={`message-bubble is-${message.author}`}>
+            <article
+              key={message.id}
+              className={`message-bubble is-${message.author} ${
+                message.author === "agent" && message.body.startsWith("Agent run failed:") ? "is-error" : ""
+              }`}
+            >
               <div>
                 <strong>{authorLabels[message.author]}</strong>
                 <time>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
               </div>
-              <p>{message.body}</p>
+              {message.body ? <p>{message.body}</p> : null}
+              <MessageSkillChips skills={message.skills} />
             </article>
           ))
         )}
@@ -1668,25 +5217,18 @@ function ChatPanel({
       </div>
 
       <div className="composer chat-composer">
-        <div className="composer-toolbar">
-          <label>
-            Author
-            <select value={chatAuthor} onChange={(event) => onSetChatAuthor(event.target.value as Author)}>
-              <option value="human">Human</option>
-              <option value="agent">Agent</option>
-            </select>
-          </label>
-        </div>
-        <textarea
+        <SkillComposer
           value={chatDraft}
-          onChange={(event) => onSetChatDraft(event.target.value)}
+          onChange={onSetChatDraft}
+          selectedSkillIds={selectedSkillIds}
+          onSelectedSkillIdsChange={onSetSelectedSkillIds}
+          skills={agentSkills}
           rows={5}
           placeholder="Discuss the draft, ask for a pass, or leave agent instructions..."
+          submitLabel="Send"
+          submitIcon={<Send size={15} />}
+          onSubmit={onSend}
         />
-        <button className="primary-button" onClick={onSend}>
-          <Send size={15} />
-          Send
-        </button>
       </div>
     </div>
   );
@@ -1712,6 +5254,7 @@ function DocumentProposalCard({
   const changes = useMemo(() => getProposalChangeBlocks(proposalDiff), [proposalDiff]);
   const decisions = proposal.changeDecisions ?? {};
   const decidedCount = changes.filter((change) => decisions[change.key]).length;
+  const pendingChanges = changes.filter((change) => !decisions[change.key]);
 
   return (
     <article className="document-proposal-card">
@@ -1724,38 +5267,44 @@ function DocumentProposalCard({
       </div>
       <p>{proposal.summary}</p>
 
-      <div className="proposal-diff-shell">
-        <MultiFileDiff
-          oldFile={{
-            name: "draft.md",
-            contents: proposal.originalMarkdown,
-            lang: "markdown",
-            cacheKey: `${proposal.id}:old`
-          }}
-          newFile={{
-            name: "draft.md",
-            contents: proposal.replacementMarkdown,
-            lang: "markdown",
-            cacheKey: `${proposal.id}:new`
-          }}
-          options={{
-            diffStyle: "unified",
-            disableFileHeader: true,
-            hunkSeparators: "line-info-basic",
-            lineDiffType: "word-alt",
-            overflow: "wrap",
-            theme: "pierre-light",
-            themeType: "light"
-          }}
-          disableWorkerPool
-        />
-      </div>
+      {proposalDiff ? (
+        <div className="proposal-diff-shell">
+          <MultiFileDiff
+            oldFile={{
+              name: "draft.md",
+              contents: proposal.originalMarkdown,
+              lang: "markdown",
+              cacheKey: `${proposal.id}:old`
+            }}
+            newFile={{
+              name: "draft.md",
+              contents: proposal.replacementMarkdown,
+              lang: "markdown",
+              cacheKey: `${proposal.id}:new`
+            }}
+            options={{
+              diffStyle: "unified",
+              disableFileHeader: true,
+              hunkSeparators: "line-info-basic",
+              lineDiffType: "word-alt",
+              overflow: "wrap",
+              theme: "pierre-light",
+              themeType: "light"
+            }}
+            disableWorkerPool
+          />
+        </div>
+      ) : (
+        <p className="empty-note">No diff preview is available for this proposal.</p>
+      )}
 
-      {changes.length > 0 ? (
+      {pendingChanges.length > 0 ? (
         <div className="proposal-change-list">
-          {changes.map((change) => {
+          {pendingChanges.map((change) => {
             const decision = decisions[change.key];
             const revisionDraft = revisionDrafts[change.key] ?? "";
+            const rewriteInstruction =
+              "Rewrite this proposed change from scratch. Keep the underlying editorial intent, preserve the author's voice, and return a cleaner alternative rather than a minor polish.";
             return (
               <section key={change.key} className={`proposal-change-block is-${decision ?? "pending"}`}>
                 <div className="change-block-header">
@@ -1791,15 +5340,22 @@ function DocumentProposalCard({
                     Decline
                   </button>
                   <button
+                    className="secondary-button"
+                    onClick={() => onRequestProposalRevision(proposal.id, change, rewriteInstruction)}
+                  >
+                    <RefreshCw size={15} />
+                    Rewrite
+                  </button>
+                  <button
                     className="ghost-button"
                     onClick={() => setOpenRevisionKey(openRevisionKey === change.key ? null : change.key)}
                   >
-                    <RefreshCw size={15} />
-                    Revise
+                    <MessageSquare size={15} />
+                    Comment
                   </button>
                 </div>
                 {openRevisionKey === change.key ? (
-                  <div className="revision-composer">
+                  <div className="revision-composer revision-comment-composer">
                     <textarea
                       value={revisionDraft}
                       onChange={(event) =>
@@ -1809,7 +5365,7 @@ function DocumentProposalCard({
                         }))
                       }
                       rows={3}
-                      placeholder="Tell the agent what to change about this block..."
+                      placeholder="Send a revision comment to the agent..."
                     />
                     <button
                       className="primary-button"
@@ -1818,9 +5374,10 @@ function DocumentProposalCard({
                         setOpenRevisionKey(null);
                         setRevisionDrafts((drafts) => ({ ...drafts, [change.key]: "" }));
                       }}
+                      disabled={!revisionDraft.trim()}
                     >
                       <Send size={15} />
-                      Request revision
+                      Send comment
                     </button>
                   </div>
                 ) : null}
