@@ -1,9 +1,59 @@
-import type { AgentMessageRequest, AgentRuntimeConfig, AgentSkill, DocumentState, RevisionState } from "./types";
+import type {
+  AgentMessageRequest,
+  AgentRuntimeConfig,
+  AgentSkill,
+  AppSettings,
+  DocumentState,
+  RevisionState,
+  SettingsResponse,
+  ToneInterviewRequest,
+  ToneInterviewResponse,
+  ToneGenerateRequest,
+  ToneGenerateResponse
+} from "./types";
 
 export async function fetchDocument(): Promise<DocumentState> {
   const response = await fetch("/api/document", { cache: "no-store" });
   if (!response.ok) throw new Error(`Unable to load document: ${response.status}`);
   return response.json();
+}
+
+export async function fetchAppSettings(): Promise<SettingsResponse> {
+  const response = await fetch("/api/settings", { cache: "no-store" });
+  if (!response.ok) throw new Error(`Unable to load settings: ${response.status}`);
+  return response.json();
+}
+
+export async function updateAppSettings(settings: AppSettings): Promise<SettingsResponse> {
+  const response = await fetch("/api/settings", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ settings })
+  });
+  if (!response.ok) throw new Error(`Unable to update settings: ${response.status}`);
+  return response.json();
+}
+
+export async function generateToneOfVoice(request: ToneGenerateRequest): Promise<ToneGenerateResponse> {
+  const response = await fetch("/api/tone/generate", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(request)
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error || `Unable to generate tone of voice: ${response.status}`);
+  return payload;
+}
+
+export async function sendToneInterviewMessage(request: ToneInterviewRequest): Promise<ToneInterviewResponse> {
+  const response = await fetch("/api/tone/interview", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(request)
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error || `Unable to run tone interview: ${response.status}`);
+  return payload;
 }
 
 export async function saveDocument(state: DocumentState): Promise<DocumentState> {
@@ -53,7 +103,8 @@ export async function fetchAgentRuntimes(): Promise<AgentRuntimeConfig> {
 export async function updateAgentConfig(config: {
   runtime: string;
   model: string;
-}): Promise<{ document: DocumentState; config: AgentRuntimeConfig }> {
+  effort: string;
+}): Promise<{ document: DocumentState; config: AgentRuntimeConfig; settings?: AppSettings }> {
   const response = await fetch("/api/agent/config", {
     method: "PUT",
     headers: { "content-type": "application/json" },

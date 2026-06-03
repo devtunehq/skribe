@@ -12,6 +12,10 @@ export type ProposalChangeDecision = "accepted" | "rejected";
 
 export type EditorLanguage = "en-GB" | "en-US";
 
+export type ProposalModeDefault = "conservative" | "bold";
+
+export type ToneSetupMode = "manual" | "interview" | "links" | "archetype";
+
 export type ContextLedgerEventType =
   | "chat_message"
   | "thread_created"
@@ -103,6 +107,68 @@ export interface ReviewSettings {
   editorLanguage: EditorLanguage;
 }
 
+export interface AppSettings {
+  version: number;
+  toneOfVoice: string;
+  toneOfVoiceSetupComplete: boolean;
+  editorLanguage: EditorLanguage;
+  agentRuntime: string;
+  agentModel: string;
+  agentEffort: string;
+  defaultSkills: string[];
+  autoReplyToComments: boolean;
+  showResolvedThreads: boolean;
+  panelState: {
+    leftCollapsed: boolean;
+    rightCollapsed: boolean;
+  };
+  proposalModeDefault: ProposalModeDefault;
+  updatedAt?: string;
+}
+
+export interface SettingsResponse {
+  settings: AppSettings;
+  storage?: {
+    configDir: string;
+    dataDir: string;
+    settingsPath: string;
+  };
+}
+
+export interface ToneGenerateRequest {
+  mode: ToneSetupMode;
+  manualText?: string;
+  interviewAnswers?: string[];
+  urls?: string[];
+  archetypeId?: string;
+  editorLanguage?: EditorLanguage;
+}
+
+export interface ToneGenerateResponse {
+  toneOfVoice: string;
+  sourceCount: number;
+  warnings: string[];
+}
+
+export interface ToneInterviewMessage {
+  role: Author;
+  body: string;
+}
+
+export interface ToneInterviewRequest {
+  messages: ToneInterviewMessage[];
+  editorLanguage?: EditorLanguage;
+  currentTone?: string;
+  forceGenerate?: boolean;
+}
+
+export interface ToneInterviewResponse {
+  status: "asking" | "ready";
+  reply: string;
+  toneOfVoice: string;
+  warnings: string[];
+}
+
 export interface ReviewState {
   version: number;
   title: string;
@@ -120,6 +186,8 @@ export interface AgentSession {
   configuredRuntime?: string;
   model?: string | null;
   configuredModel?: string;
+  effort?: string | null;
+  configuredEffort?: string;
   status: "idle" | "running" | "error";
   turnCount: number;
   queueDepth: number;
@@ -199,6 +267,14 @@ export interface AgentRuntimeModel {
   id: string;
   label: string;
   source?: string;
+  description?: string;
+}
+
+export interface AgentRuntimeEffort {
+  id: string;
+  label: string;
+  source?: string;
+  description?: string;
 }
 
 export interface AgentRuntimeStatus {
@@ -212,6 +288,9 @@ export interface AgentRuntimeStatus {
   supportsManualModel: boolean;
   models: AgentRuntimeModel[];
   defaultModel: string | null;
+  supportsEffort: boolean;
+  effortLevels: AgentRuntimeEffort[];
+  defaultEffort: string | null;
   notes: string[];
 }
 
@@ -220,6 +299,8 @@ export interface AgentRuntimeConfig {
   resolvedRuntime: string | null;
   configuredModel: string;
   resolvedModel: string | null;
+  configuredEffort: string;
+  resolvedEffort: string | null;
   runtimes: AgentRuntimeStatus[];
 }
 

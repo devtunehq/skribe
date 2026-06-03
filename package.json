@@ -1,7 +1,16 @@
 {
   "name": "skribe",
   "version": "0.1.0",
-  "private": true,
+  "description": "Local-first Markdown writing and review workbench with AI chat, comments, and reviewable diffs.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/devtunehq/skribe.git"
+  },
+  "bugs": {
+    "url": "https://github.com/devtunehq/skribe/issues"
+  },
+  "homepage": "https://github.com/devtunehq/skribe#readme",
   "type": "module",
   "bin": {
     "skribe": "./bin/skribe.mjs"
@@ -10,6 +19,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
     "serve": "node server/index.mjs",
+    "test": "node --test",
     "typecheck": "tsc -b"
   },
   "dependencies": {

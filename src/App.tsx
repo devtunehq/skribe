@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { parseDiffFromFile } from "@pierre/diffs";
 import { MultiFileDiff } from "@pierre/diffs/react";
 import {
+  BookOpen,
   Bold,
   Check,
   ChevronDown,
@@ -12,6 +13,7 @@ import {
   Copy,
   Download,
   FileText,
+  Globe,
   GripVertical,
   Heading1,
   Heading2,
@@ -25,6 +27,7 @@ import {
   List,
   ListOrdered,
   MessageSquare,
+  PenLine,
   Pilcrow,
   Quote,
   RefreshCw,
@@ -33,20 +36,25 @@ import {
   Scissors,
   Search,
   Send,
+  Settings,
   Sparkles,
   Upload,
   X
 } from "lucide-react";
 import {
+  fetchAppSettings,
   fetchAgentSkills,
   fetchAgentRuntimes,
   fetchDocument,
   fetchRevisionHistory,
+  generateToneOfVoice,
   restoreDocumentRevision,
   saveDocument,
   sendAgentMessage,
+  sendToneInterviewMessage,
   subscribeToDocumentEvents,
-  updateAgentConfig
+  updateAgentConfig,
+  updateAppSettings
 } from "./api";
 import {
   applySuggestion,
@@ -60,11 +68,15 @@ import {
   wordCount,
   htmlToInlineMarkdown,
   inlineMarkdownToHtml,
+  looksLikeMarkdownPaste,
   markdownBlockIdFromIndex,
+  normalizeMarkdownPaste,
   parseMarkdownTable,
   parseMarkdownBlocks,
   moveMarkdownBlock,
   serializeMarkdownBlocks,
+  shouldPasteAsMarkdownBlocks,
+  spliceMarkdownPaste,
   updateMarkdownBlock,
   updateMarkdownBlockShape
 } from "./document";
@@ -74,6 +86,7 @@ import type {
   AgentRuntimeConfig,
   AgentSkill,
   AgentSkillSelection,
+  AppSettings,
   Author,
   ChatMessage,
   ContextLedgerEvent,
@@ -86,13 +99,16 @@ import type {
   ProposalChangeDecision,
   ReviewThread,
   SelectionDraft,
-  Suggestion
+  Suggestion,
+  ToneInterviewMessage,
+  ToneSetupMode
 } from "./types";
 import type { FileDiffMetadata } from "@pierre/diffs";
 
 type PanelMode = "threads" | "chat";
 type SaveState = "loading" | "saved" | "saving" | "error";
 type SupportedEditorLanguage = EditorLanguage;
+type ToneSetupInvocation = "first-run" | "settings";
 type BlockDropPlacement = "before" | "after";
 type FloatingToolbarState = {
   left: number;
@@ -106,6 +122,7 @@ type LinkPopoverState = {
 type SelectionContextMenuState = {
   left: number;
   top: number;
+  hasSelection: boolean;
 };
 type LinkTargetState = {
   blockId: string;
@@ -142,6 +159,76 @@ const editorLanguageOptions: Array<{ value: SupportedEditorLanguage; label: stri
   { value: "en-US", label: "EN-US" }
 ];
 
+const toneSetupModes: Array<{ id: ToneSetupMode; label: string }> = [
+  { id: "manual", label: "Manual" },
+  { id: "interview", label: "Interview" },
+  { id: "links", label: "Links" },
+  { id: "archetype", label: "Archetypes" }
+];
+
+const toneArchetypeOptions = [
+  {
+    id: "direct-founder",
+    label: "Direct founder",
+    description: "Plainspoken, concrete, low-hype."
+  },
+  {
+    id: "technical-editorial",
+    label: "Technical editorial",
+    description: "Analytical, clear, market-aware."
+  },
+  {
+    id: "operator-memo",
+    label: "Operator memo",
+    description: "Practical, concise, tradeoff-led."
+  },
+  {
+    id: "warm-teacher",
+    label: "Warm teacher",
+    description: "Patient, accessible, concrete."
+  },
+  {
+    id: "sharp-critic",
+    label: "Sharp critic",
+    description: "Pointed, fair, unsentimental."
+  },
+  {
+    id: "narrative-builder",
+    label: "Narrative builder",
+    description: "Thoughtful, thesis-led, grounded."
+  }
+];
+
+const defaultAppSettings: AppSettings = {
+  version: 1,
+  toneOfVoice: "",
+  toneOfVoiceSetupComplete: false,
+  editorLanguage: "en-GB",
+  agentRuntime: "auto",
+  agentModel: "auto",
+  agentEffort: "auto",
+  defaultSkills: [],
+  autoReplyToComments: true,
+  showResolvedThreads: false,
+  panelState: {
+    leftCollapsed: false,
+    rightCollapsed: false
+  },
+  proposalModeDefault: "conservative"
+};
+
+function mergeAppSettings(settings?: Partial<AppSettings> | null): AppSettings {
+  return {
+    ...defaultAppSettings,
+    ...(settings ?? {}),
+    defaultSkills: Array.isArray(settings?.defaultSkills) ? settings.defaultSkills : defaultAppSettings.defaultSkills,
+    panelState: {
+      ...defaultAppSettings.panelState,
+      ...(settings?.panelState ?? {})
+    }
+  };
+}
+
 function fileNameFromPath(path?: string) {
   return path?.split(/[\\/]/).filter(Boolean).at(-1) || "Untitled";
 }
@@ -154,6 +241,19 @@ function documentSourceLabel(fileInfo?: FileInfo) {
 
 function safeDownloadName(value: string) {
   return value.trim().replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "") || "skribe";
+}
+
+function modelIsAdvertisedByDifferentRuntime(
+  model: string,
+  runtimeId: string | null | undefined,
+  runtimes: AgentRuntimeConfig["runtimes"]
+) {
+  if (!model || model === "auto" || !runtimeId) return false;
+
+  const runtimesAdvertisingModel = runtimes.filter((runtime) => runtime.models.some((option) => option.id === model));
+  if (runtimesAdvertisingModel.length === 0) return false;
+
+  return !runtimesAdvertisingModel.some((runtime) => runtime.id === runtimeId);
 }
 
 const maxContextLedgerEvents = 240;
@@ -1388,17 +1488,23 @@ function isOlderDocument(candidate: DocumentState, current: DocumentState | null
 
 function App() {
   const [documentState, setDocumentState] = useState<DocumentState | null>(null);
+  const [appSettings, setAppSettings] = useState<AppSettings>(defaultAppSettings);
+  const [settingsDraft, setSettingsDraft] = useState<AppSettings>(defaultAppSettings);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [toneSetupInvocation, setToneSetupInvocation] = useState<ToneSetupInvocation | null>(null);
+  const [settingsSaveState, setSettingsSaveState] = useState<SaveState>("saved");
   const [revisionState, setRevisionState] = useState<RevisionState>({ revisions: [], currentRevisionId: null });
   const [agentSkills, setAgentSkills] = useState<AgentSkill[]>([]);
   const [agentRuntimeConfig, setAgentRuntimeConfig] = useState<AgentRuntimeConfig | null>(null);
   const [agentModelDraft, setAgentModelDraft] = useState("");
+  const [isAgentConfigOpen, setIsAgentConfigOpen] = useState(false);
+  const [isAgentModelMenuOpen, setIsAgentModelMenuOpen] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("loading");
   const [panelMode, setPanelMode] = useState<PanelMode>("threads");
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [activeBlockId, setActiveBlockId] = useState<string | null>(null);
   const [isLeftRailCollapsed, setIsLeftRailCollapsed] = useState(false);
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
-  const [showResolvedThreads, setShowResolvedThreads] = useState(false);
   const [isRestoringRevision, setIsRestoringRevision] = useState(false);
   const [isRevisionHistoryOpen, setIsRevisionHistoryOpen] = useState(false);
   const [selectionDraft, setSelectionDraft] = useState<SelectionDraft | null>(null);
@@ -1436,14 +1542,22 @@ function App() {
   const historyRestoreRef = useRef(false);
 
   useEffect(() => {
-    Promise.all([fetchDocument(), fetchRevisionHistory(), fetchAgentSkills(), fetchAgentRuntimes()])
-      .then(([loaded, revisions, skills, runtimeConfig]) => {
+    Promise.all([fetchAppSettings(), fetchDocument(), fetchRevisionHistory(), fetchAgentSkills(), fetchAgentRuntimes()])
+      .then(([settingsResponse, loaded, revisions, skills, runtimeConfig]) => {
+        const loadedSettings = mergeAppSettings(settingsResponse.settings);
+        setAppSettings(loadedSettings);
+        setSettingsDraft(loadedSettings);
+        setIsLeftRailCollapsed(loadedSettings.panelState.leftCollapsed);
+        setIsRightPanelCollapsed(loadedSettings.panelState.rightCollapsed);
+        setNewThreadSkillIds(loadedSettings.defaultSkills);
+        setChatSkillIds(loadedSettings.defaultSkills);
         stateRef.current = loaded;
         setDocumentState(loaded);
         setRevisionState(revisions);
         setAgentSkills(skills);
         setAgentRuntimeConfig(runtimeConfig);
         setAgentModelDraft(runtimeConfig.configuredModel === "auto" ? "" : runtimeConfig.configuredModel);
+        if (!loadedSettings.toneOfVoiceSetupComplete) setToneSetupInvocation("first-run");
         setSaveState("saved");
       })
       .catch(() => setSaveState("error"));
@@ -1454,9 +1568,38 @@ function App() {
   }, [saveState]);
 
   useEffect(() => {
+    if (!isSettingsOpen) return;
+    setSettingsDraft(appSettings);
+    setSettingsSaveState("saved");
+  }, [appSettings, isSettingsOpen]);
+
+  useEffect(() => {
     const configuredModel = agentRuntimeConfig?.configuredModel ?? documentState?.agentSession?.configuredModel ?? "auto";
+    const configuredRuntime = agentRuntimeConfig?.configuredRuntime ?? documentState?.agentSession?.configuredRuntime ?? "auto";
+    const resolvedRuntime =
+      agentRuntimeConfig?.resolvedRuntime ??
+      (configuredRuntime === "auto" ? documentState?.agentSession?.runtime ?? null : configuredRuntime);
+
+    if (
+      agentRuntimeConfig &&
+      modelIsAdvertisedByDifferentRuntime(configuredModel, resolvedRuntime, agentRuntimeConfig.runtimes)
+    ) {
+      setAgentModelDraft("");
+      void saveAgentRuntimeConfig({
+        runtime: configuredRuntime,
+        model: "auto",
+        effort: agentRuntimeConfig.configuredEffort ?? "auto"
+      });
+      return;
+    }
+
     setAgentModelDraft(configuredModel === "auto" ? "" : configuredModel);
-  }, [agentRuntimeConfig?.configuredModel, documentState?.agentSession?.configuredModel]);
+  }, [
+    agentRuntimeConfig,
+    documentState?.agentSession?.configuredModel,
+    documentState?.agentSession?.configuredRuntime,
+    documentState?.agentSession?.runtime
+  ]);
 
   useEffect(() => {
     if (!linkPopover) return;
@@ -1480,7 +1623,9 @@ function App() {
                 configuredRuntime: remote.agentSession?.configuredRuntime ?? current.configuredRuntime,
                 resolvedRuntime: remote.agentSession?.runtime ?? current.resolvedRuntime,
                 configuredModel: remote.agentSession?.configuredModel ?? current.configuredModel,
-                resolvedModel: remote.agentSession?.model ?? current.resolvedModel
+                resolvedModel: remote.agentSession?.model ?? current.resolvedModel,
+                configuredEffort: remote.agentSession?.configuredEffort ?? current.configuredEffort,
+                resolvedEffort: remote.agentSession?.effort ?? current.resolvedEffort
               }
             : current
         );
@@ -1511,6 +1656,7 @@ function App() {
   const outline = useMemo(() => extractOutline(documentState?.markdown ?? ""), [documentState?.markdown]);
   const words = useMemo(() => wordCount(documentState?.markdown ?? ""), [documentState?.markdown]);
   const threads = documentState?.review.threads ?? [];
+  const showResolvedThreads = appSettings.showResolvedThreads;
   const visibleThreads = useMemo(
     () => (showResolvedThreads ? threads : threads.filter((thread) => thread.status !== "resolved")),
     [showResolvedThreads, threads]
@@ -1543,7 +1689,7 @@ function App() {
       .catch(() => undefined);
   }
 
-  async function saveAgentRuntimeConfig(nextConfig: { runtime: string; model: string }) {
+  async function saveAgentRuntimeConfig(nextConfig: { runtime: string; model: string; effort: string }) {
     if (agentSession?.status === "running") return;
 
     setSaveState("saving");
@@ -1553,10 +1699,87 @@ function App() {
       setDocumentState(updated.document);
       setAgentRuntimeConfig(updated.config);
       setAgentModelDraft(updated.config.configuredModel === "auto" ? "" : updated.config.configuredModel);
+      if (updated.settings) {
+        const savedSettings = mergeAppSettings(updated.settings);
+        setAppSettings(savedSettings);
+        setSettingsDraft(savedSettings);
+      }
       setSaveState("saved");
     } catch {
       setSaveState("error");
     }
+  }
+
+  async function persistSettings(nextSettings: AppSettings, options: { closeDialog?: boolean } = {}) {
+    const normalizedSettings = mergeAppSettings(nextSettings);
+    setAppSettings(normalizedSettings);
+    setSettingsDraft(normalizedSettings);
+    setIsLeftRailCollapsed(normalizedSettings.panelState.leftCollapsed);
+    setIsRightPanelCollapsed(normalizedSettings.panelState.rightCollapsed);
+    if (!newComment.trim()) setNewThreadSkillIds(normalizedSettings.defaultSkills);
+    if (!chatDraft.trim()) setChatSkillIds(normalizedSettings.defaultSkills);
+    setSettingsSaveState("saving");
+    try {
+      const response = await updateAppSettings(normalizedSettings);
+      const savedSettings = mergeAppSettings(response.settings);
+      const runtimeConfig = await fetchAgentRuntimes();
+      setAppSettings(savedSettings);
+      setSettingsDraft(savedSettings);
+      setAgentRuntimeConfig(runtimeConfig);
+      setAgentModelDraft(runtimeConfig.configuredModel === "auto" ? "" : runtimeConfig.configuredModel);
+      setIsLeftRailCollapsed(savedSettings.panelState.leftCollapsed);
+      setIsRightPanelCollapsed(savedSettings.panelState.rightCollapsed);
+      if (!newComment.trim()) setNewThreadSkillIds(savedSettings.defaultSkills);
+      if (!chatDraft.trim()) setChatSkillIds(savedSettings.defaultSkills);
+      setSettingsSaveState("saved");
+      if (options.closeDialog) setIsSettingsOpen(false);
+    } catch {
+      setSettingsSaveState("error");
+    }
+  }
+
+  function updateSettingsDraft(patch: Partial<AppSettings>) {
+    setSettingsDraft((current) => ({
+      ...current,
+      ...patch
+    }));
+  }
+
+  function saveSettingsDraft() {
+    void persistSettings(settingsDraft, { closeDialog: true });
+  }
+
+  function toneSettingsBase() {
+    return isSettingsOpen ? settingsDraft : appSettings;
+  }
+
+  async function saveToneOfVoiceSetup(toneOfVoice: string) {
+    const nextSettings = mergeAppSettings({
+      ...toneSettingsBase(),
+      toneOfVoice,
+      toneOfVoiceSetupComplete: true
+    });
+    await persistSettings(nextSettings);
+    setToneSetupInvocation(null);
+  }
+
+  async function skipToneOfVoiceSetup() {
+    const nextSettings = mergeAppSettings({
+      ...toneSettingsBase(),
+      toneOfVoiceSetupComplete: true
+    });
+    await persistSettings(nextSettings);
+    setToneSetupInvocation(null);
+  }
+
+  function updatePanelState(patch: Partial<AppSettings["panelState"]>) {
+    void persistSettings({
+      ...appSettings,
+      panelState: {
+        ...appSettings.panelState,
+        ...patch
+      }
+    });
   }
 
   function currentConfiguredRuntime() {
@@ -1567,10 +1790,17 @@ function App() {
     return agentRuntimeConfig?.configuredModel ?? agentSession?.configuredModel ?? agentSession?.model ?? "auto";
   }
 
+  function currentConfiguredEffort() {
+    return agentRuntimeConfig?.configuredEffort ?? agentSession?.configuredEffort ?? agentSession?.effort ?? "auto";
+  }
+
   function updateAgentRuntime(runtime: string) {
+    setAgentModelDraft("");
+    setIsAgentModelMenuOpen(false);
     void saveAgentRuntimeConfig({
       runtime,
-      model: currentConfiguredModel()
+      model: "auto",
+      effort: "auto"
     });
   }
 
@@ -1579,7 +1809,23 @@ function App() {
     if (model === currentConfiguredModel()) return;
     void saveAgentRuntimeConfig({
       runtime: currentConfiguredRuntime(),
-      model
+      model,
+      effort: currentConfiguredEffort()
+    });
+  }
+
+  function selectAgentModel(value: string) {
+    setAgentModelDraft(value === "auto" ? "" : value);
+    setIsAgentModelMenuOpen(false);
+    commitAgentModel(value);
+  }
+
+  function updateAgentEffort(effort: string) {
+    if (effort === currentConfiguredEffort()) return;
+    void saveAgentRuntimeConfig({
+      runtime: currentConfiguredRuntime(),
+      model: currentConfiguredModel(),
+      effort
     });
   }
 
@@ -1714,8 +1960,16 @@ function App() {
   }
 
   function serializeCanvasMarkdown(markdown: string) {
+    const blocks = parseMarkdownBlocks(markdown);
+    if (blocks.length === 0) {
+      const emptyBlockId = markdownBlockIdFromIndex(0);
+      const node = blockRefs.current[emptyBlockId];
+      const text = node ? blockNodeToMarkdown(node, "paragraph") : "";
+      return serializeMarkdownBlocks(text.trim() ? [{ id: emptyBlockId, type: "paragraph", text }] : []);
+    }
+
     return serializeMarkdownBlocks(
-      parseMarkdownBlocks(markdown).flatMap((block) => {
+      blocks.flatMap((block) => {
         const node = blockRefs.current[block.id];
         if (!node) return [block];
         const text = blockNodeToMarkdown(node, block.type);
@@ -1908,6 +2162,38 @@ function App() {
     setSelectionContextMenu(null);
     linkRangeRef.current = null;
     linkTargetRef.current = null;
+  }
+
+  function selectEntireDocument() {
+    const current = stateRef.current;
+    if (!current) return false;
+
+    const liveState = stateWithPendingLiveCanvasEdit(current);
+    const exact = renderedMarkdownSnippet(liveState.markdown);
+    const draft = buildSelectionFromMarkdownRange(liveState.markdown, 0, liveState.markdown.length) ?? {
+      kind: "markdown-range" as const,
+      exact,
+      prefix: "",
+      suffix: "",
+      start: 0,
+      end: liveState.markdown.length
+    };
+    if (!exact || draft.end <= draft.start) return false;
+
+    if (liveState !== current) {
+      commit(() => liveState);
+    }
+
+    customSelectionActiveRef.current = true;
+    selectionRangeRef.current = null;
+    setSelectionDraft(null);
+    setPendingSelectionDraft(draft);
+    setFloatingToolbar(null);
+    setLinkPopover(null);
+    setSelectionContextMenu(null);
+    window.getSelection()?.removeAllRanges();
+    canvasRef.current?.focus({ preventScroll: true });
+    return true;
   }
 
   function isProposalReviewTarget(target: EventTarget | null) {
@@ -2326,6 +2612,56 @@ function App() {
     return pendingSelectionClipboardPayload() ?? nativeSelectionClipboardPayload();
   }
 
+  function hasActiveCanvasSelection() {
+    return Boolean(activeSelectionClipboardPayload());
+  }
+
+  function currentMarkdownEditRange(markdown: string) {
+    if (pendingSelectionDraft) return resolveSelectionDraftRange(markdown, pendingSelectionDraft);
+
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || !canvasRef.current) return null;
+
+    const range = selection.getRangeAt(0);
+    if (!canvasRef.current.contains(range.startContainer) || !canvasRef.current.contains(range.endContainer)) return null;
+
+    if (!range.collapsed) {
+      const selectedRange = buildSelectionFromCanvasRange(markdown, range);
+      if (selectedRange) return resolveSelectionDraftRange(markdown, selectedRange);
+    }
+
+    const blockNode = closestEditableBlock(range.startContainer);
+    const blockId = blockNode?.dataset.blockId;
+    if (!blockNode || !blockId) return null;
+
+    const blocks = parseMarkdownBlocks(markdown);
+    if (blocks.length === 0 && blockId === markdownBlockIdFromIndex(0)) return { start: 0, end: 0 };
+
+    const block = blocks.find((item) => item.id === blockId);
+    const span = getMarkdownBlockLineSpans(markdown).find((item) => item.id === blockId);
+    if (!block || !span) return null;
+
+    const plainOffset = plainOffsetInEditableBlock(blockNode, range.startContainer, range.startOffset);
+    const offset = span.textStart + markdownOffsetFromPlainOffset(block.text, plainOffset, "start");
+    return { start: offset, end: offset };
+  }
+
+  function placeCaretAtPoint(clientX: number, clientY: number) {
+    if (!canvasRef.current) return false;
+
+    const range = caretRangeFromPoint(clientX, clientY);
+    if (!range || !canvasRef.current.contains(range.startContainer)) return false;
+
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    selectionRangeRef.current = range.cloneRange();
+    const blockId = closestEditableBlock(range.startContainer)?.dataset.blockId;
+    if (blockId) focusCanvasBlock(blockId);
+    return true;
+  }
+
   function setClipboardEventPayload(clipboardData: DataTransfer, payload: ClipboardPayload) {
     clipboardData.setData("text/plain", payload.plainText);
     if (payload.markdown) clipboardData.setData("text/markdown", payload.markdown);
@@ -2352,6 +2688,56 @@ function App() {
     }
   }
 
+  function applyClipboardTextPaste(text: string, options: { asMarkdown: boolean }) {
+    if (!text) return false;
+
+    const current = stateRef.current;
+    if (!current) return false;
+
+    const liveState = stateWithLiveCanvasEdit(current);
+    const range = currentMarkdownEditRange(liveState.markdown);
+    if (!range) return false;
+
+    const blockMode = options.asMarkdown && shouldPasteAsMarkdownBlocks(text);
+    const insertion = options.asMarkdown ? normalizeMarkdownPaste(text) : text.replace(/\r\n/g, "\n");
+    const markdown = spliceMarkdownPaste(liveState.markdown, range.start, range.end, insertion, blockMode);
+    if (markdown === liveState.markdown) return false;
+
+    commit(() => ({
+      ...liveState,
+      markdown,
+      review: {
+        ...liveState.review,
+        updatedAt: nowIso()
+      }
+    }));
+    clearCanvasSelectionState();
+    showTransientToast(options.asMarkdown ? "Markdown pasted" : "Text pasted");
+    return true;
+  }
+
+  async function pasteClipboardFromMenu(asMarkdown: boolean) {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text.trim()) {
+        showTransientToast("Clipboard is empty");
+        return;
+      }
+      if (!applyClipboardTextPaste(text, { asMarkdown })) showTransientToast("Paste failed");
+    } catch {
+      showTransientToast("Clipboard unavailable");
+    } finally {
+      setSelectionContextMenu(null);
+    }
+  }
+
+  async function copyActiveSelectionToClipboard(label = "Selection copied") {
+    const payload = activeSelectionClipboardPayload();
+    if (!payload) return false;
+    setSelectionContextMenu(null);
+    return writeClipboardPayload(payload, label);
+  }
+
   async function copyPendingSelectionToClipboard(label = "Selection copied") {
     const payload = pendingSelectionClipboardPayload();
     if (!payload) return false;
@@ -2359,10 +2745,27 @@ function App() {
     return writeClipboardPayload(payload, label);
   }
 
-  async function cutPendingSelectionToClipboard() {
-    const copied = await copyPendingSelectionToClipboard("Selection cut");
+  function deleteNativeSelectionFromCanvas() {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0 || !canvasRef.current) return false;
+
+    const range = selection.getRangeAt(0);
+    if (!canvasRef.current.contains(range.commonAncestorContainer)) return false;
+
+    const editableBlock = getEditableBlockForRange(range);
+    const blockId = editableBlock?.dataset.blockId;
+    if (!editableBlock || !blockId) return false;
+
+    range.deleteContents();
+    updateCanvasBlock(blockId, editableBlock.innerHTML);
+    selection.removeAllRanges();
+    return true;
+  }
+
+  async function cutActiveSelectionToClipboard() {
+    const copied = await copyActiveSelectionToClipboard("Selection cut");
     if (!copied) return false;
-    return deletePendingMarkdownSelection();
+    return pendingSelectionDraft ? deletePendingMarkdownSelection() : deleteNativeSelectionFromCanvas();
   }
 
   function handleCanvasCopy(event: React.ClipboardEvent<HTMLElement>) {
@@ -2388,21 +2791,48 @@ function App() {
     showTransientToast("Selection cut");
   }
 
-  function handleCanvasContextMenu(event: React.MouseEvent<HTMLElement>) {
-    if (!pendingSelectionDraft || !pendingSelectionClipboardPayload()) return;
+  function handleCanvasPaste(event: React.ClipboardEvent<HTMLElement>) {
+    const explicitMarkdown = event.clipboardData.getData("text/markdown");
+    const plainText = event.clipboardData.getData("text/plain");
+    const text = explicitMarkdown || plainText;
+    if (!text) return;
+
+    const shouldIntercept =
+      Boolean(explicitMarkdown) || Boolean(pendingSelectionDraft) || looksLikeMarkdownPaste(plainText);
+    if (!shouldIntercept) return;
 
     event.preventDefault();
+    const asMarkdown = Boolean(explicitMarkdown) || looksLikeMarkdownPaste(text);
+    if (!applyClipboardTextPaste(text, { asMarkdown })) {
+      showTransientToast("Paste failed");
+    }
+  }
+
+  function handleCanvasContextMenu(event: React.MouseEvent<HTMLElement>) {
+    if (!canvasRef.current?.contains(event.target as Node)) return;
+
+    event.preventDefault();
+    const hasSelection = hasActiveCanvasSelection();
+    if (!hasSelection) placeCaretAtPoint(event.clientX, event.clientY);
+
     setSelectionContextMenu({
-      left: clamp(event.clientX, 8, window.innerWidth - 180),
-      top: clamp(event.clientY, 8, window.innerHeight - 92)
+      left: clamp(event.clientX, 8, window.innerWidth - 220),
+      top: clamp(event.clientY, 8, window.innerHeight - 170),
+      hasSelection
     });
   }
 
   function handleCanvasKeyDown(event: React.KeyboardEvent<HTMLElement>) {
-    if (event.defaultPrevented || !pendingSelectionDraft) return;
-
     const key = event.key.toLowerCase();
     const isCommand = event.metaKey || event.ctrlKey;
+
+    if (!event.defaultPrevented && isCommand && !event.shiftKey && key === "a") {
+      if (selectEntireDocument()) event.preventDefault();
+      return;
+    }
+
+    if (event.defaultPrevented || !pendingSelectionDraft) return;
+
     if (isCommand && !event.shiftKey && key === "c") {
       event.preventDefault();
       void copyPendingSelectionToClipboard();
@@ -2410,7 +2840,7 @@ function App() {
     }
     if (isCommand && !event.shiftKey && key === "x") {
       event.preventDefault();
-      void cutPendingSelectionToClipboard();
+      void cutActiveSelectionToClipboard();
       return;
     }
     if (event.key === "Backspace" || event.key === "Delete") {
@@ -2463,13 +2893,15 @@ function App() {
         updatedAt: createdAt
       }
     }));
-    triggerAgent("thread", prepared.body, nextState, thread.id, prepared.skills);
+    if (appSettings.autoReplyToComments) {
+      triggerAgent("thread", prepared.body, nextState, thread.id, prepared.skills);
+    }
 
     setActiveThreadId(thread.id);
     setSelectionDraft(null);
     setPendingSelectionDraft(null);
     setNewComment("");
-    setNewThreadSkillIds([]);
+    setNewThreadSkillIds(appSettings.defaultSkills);
     selectionRangeRef.current = null;
     setFloatingToolbar(null);
     window.getSelection()?.removeAllRanges();
@@ -2519,7 +2951,7 @@ function App() {
     triggerAgent("thread", prepared.body, nextState, threadId, prepared.skills);
 
     setReplyDrafts((drafts) => ({ ...drafts, [threadId]: "" }));
-    setThreadSkillIds((drafts) => ({ ...drafts, [threadId]: [] }));
+    setThreadSkillIds((drafts) => ({ ...drafts, [threadId]: appSettings.defaultSkills }));
   }
 
   function updateThreadStatus(threadId: string, status: "open" | "resolved") {
@@ -2797,7 +3229,7 @@ function App() {
     triggerAgent("chat", prepared.body, nextState, undefined, prepared.skills);
 
     setChatDraft("");
-    setChatSkillIds([]);
+    setChatSkillIds(appSettings.defaultSkills);
   }
 
   function updateCanvasBlock(blockId: string, html: string) {
@@ -3038,6 +3470,11 @@ function App() {
   function handleEditorShortcut(event: React.KeyboardEvent<HTMLElement>, blockId: string) {
     const isCommand = event.metaKey || event.ctrlKey;
     const key = event.key.toLowerCase();
+    if (isCommand && !event.shiftKey && key === "a") {
+      if (selectEntireDocument()) event.preventDefault();
+      return;
+    }
+
     if (isCommand && !event.shiftKey && key === "z" && restoreEditorHistory("undo")) {
       event.preventDefault();
       return;
@@ -3054,7 +3491,7 @@ function App() {
     }
     if (isCommand && !event.shiftKey && key === "x" && pendingSelectionDraft) {
       event.preventDefault();
-      void cutPendingSelectionToClipboard();
+      void cutActiveSelectionToClipboard();
       return;
     }
 
@@ -3123,20 +3560,6 @@ function App() {
       review: {
         ...state.review,
         title,
-        updatedAt: nowIso()
-      }
-    }));
-  }
-
-  function updateEditorLanguage(editorLanguage: SupportedEditorLanguage) {
-    commit((state) => ({
-      ...state,
-      review: {
-        ...state.review,
-        settings: {
-          ...state.review.settings,
-          editorLanguage
-        },
         updatedAt: nowIso()
       }
     }));
@@ -3238,20 +3661,41 @@ function App() {
     );
   }
 
-  const editorLanguage = documentState.review.settings?.editorLanguage ?? "en-GB";
+  const editorLanguage = appSettings.editorLanguage;
   const configuredRuntime = currentConfiguredRuntime();
   const resolvedRuntime =
     agentRuntimeConfig?.resolvedRuntime ?? (configuredRuntime === "auto" ? agentSession?.runtime ?? null : configuredRuntime);
   const configuredModel = currentConfiguredModel();
+  const configuredEffort = currentConfiguredEffort();
   const runtimeOptions = agentRuntimeConfig?.runtimes ?? [];
+  const providerOptions = runtimeOptions.filter((runtime) => runtime.id !== "stub");
+  const providerSelectValue = providerOptions.some((runtime) => runtime.id === configuredRuntime)
+    ? configuredRuntime
+    : providerOptions.some((runtime) => runtime.id === resolvedRuntime)
+      ? resolvedRuntime ?? ""
+      : "";
   const selectedRuntimeStatus = runtimeOptions.find((runtime) => runtime.id === resolvedRuntime) ?? null;
   const modelOptions = selectedRuntimeStatus?.models ?? [];
+  const effortOptions = selectedRuntimeStatus?.effortLevels ?? [];
+  const effortSelectValue = effortOptions.some((level) => level.id === configuredEffort) ? configuredEffort : "auto";
   const agentConfigDisabled = agentSession?.status === "running" || !agentRuntimeConfig;
+  const modelControlDisabled =
+    agentConfigDisabled || Boolean(selectedRuntimeStatus && !selectedRuntimeStatus.supportsManualModel);
+  const effortControlVisible = Boolean(selectedRuntimeStatus?.supportsEffort && effortOptions.length > 0);
   const agentRuntimeTitle = selectedRuntimeStatus
     ? `${selectedRuntimeStatus.label}${selectedRuntimeStatus.version ? ` ${selectedRuntimeStatus.version}` : ""}${
         selectedRuntimeStatus.notes.length > 0 ? `: ${selectedRuntimeStatus.notes.join(" ")}` : ""
       }`
     : "Agent runtime";
+  const selectedRuntimeLabel = selectedRuntimeStatus?.label ?? resolvedRuntime ?? "Agent";
+  const selectedModelOption = modelOptions.find((model) => model.id === configuredModel);
+  const selectedModelLabel = configuredModel === "auto" ? "Default model" : selectedModelOption?.label ?? configuredModel;
+  const selectedEffortOption = effortOptions.find((level) => level.id === configuredEffort);
+  const selectedEffortLabel =
+    configuredEffort === "auto" ? "Default effort" : selectedEffortOption?.label ?? configuredEffort;
+  const agentStatusLabel = agentSession
+    ? `${agentSession.status}${agentSession.queueDepth > 0 ? ` · ${agentSession.queueDepth}` : ""}`
+    : "idle";
 
   return (
     <main
@@ -3281,82 +3725,156 @@ function App() {
         />
 
         <div className="topbar-actions">
-          <label className="language-select-shell" title="Editor spelling language">
-            <select
-              value={editorLanguage}
-              onChange={(event) => updateEditorLanguage(event.target.value as SupportedEditorLanguage)}
-              aria-label="Editor spelling language"
-            >
-              {editorLanguageOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="agent-runtime-select-shell" title={agentRuntimeTitle}>
-            <select
-              value={configuredRuntime}
-              onChange={(event) => updateAgentRuntime(event.target.value)}
-              disabled={agentConfigDisabled}
-              aria-label="Agent runtime"
-            >
-              <option value="auto">Auto{resolvedRuntime ? ` (${resolvedRuntime})` : ""}</option>
-              {runtimeOptions.map((runtime) => (
-                <option key={runtime.id} value={runtime.id} disabled={!runtime.available}>
-                  {runtime.label}{runtime.available ? "" : " unavailable"}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label
-            className="agent-model-shell"
-            title={
-              selectedRuntimeStatus?.supportsManualModel
-                ? "Agent model. Leave empty for the selected CLI default."
-                : "Selected runtime does not expose model selection."
-            }
-          >
-            <input
-              value={agentModelDraft}
-              list="agent-model-options"
-              placeholder={configuredModel === "auto" ? "auto model" : configuredModel}
-              disabled={agentConfigDisabled || Boolean(selectedRuntimeStatus && !selectedRuntimeStatus.supportsManualModel)}
-              onChange={(event) => setAgentModelDraft(event.target.value)}
-              onBlur={(event) => commitAgentModel(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key !== "Enter") return;
-                event.preventDefault();
-                commitAgentModel(event.currentTarget.value);
-                event.currentTarget.blur();
+          <div className={`agent-config-shell ${isAgentConfigOpen ? "is-open" : ""}`}>
+            <button
+              type="button"
+              className={`agent-config-button is-${agentSession?.status ?? "idle"}`}
+              onClick={() => {
+                setIsAgentConfigOpen((open) => !open);
+                setIsAgentModelMenuOpen(false);
               }}
-              aria-label="Agent model"
-            />
-            <datalist id="agent-model-options">
-              <option value="auto" />
-              {modelOptions.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.label}
-                </option>
-              ))}
-            </datalist>
-          </label>
+              title={`${agentRuntimeTitle}. ${selectedModelLabel}. ${selectedEffortLabel}. Status: ${agentStatusLabel}.`}
+              aria-expanded={isAgentConfigOpen}
+              aria-label="Agent settings"
+            >
+              <Sparkles size={15} />
+              <span>
+                <strong>{selectedRuntimeLabel}</strong>
+                <small>
+                  {selectedModelLabel} · {selectedEffortLabel}
+                </small>
+              </span>
+              <em>{agentStatusLabel}</em>
+              <ChevronDown size={14} />
+            </button>
+            {isAgentConfigOpen ? (
+              <div className="agent-config-popover">
+                <div className="agent-config-field">
+                  <span>Provider</span>
+                  <label className="agent-runtime-select-shell" title={agentRuntimeTitle}>
+                    <select
+                      value={providerSelectValue}
+                      onChange={(event) => updateAgentRuntime(event.target.value)}
+                      disabled={agentConfigDisabled}
+                      aria-label="Agent runtime"
+                    >
+                      {providerOptions.map((runtime) => (
+                        <option key={runtime.id} value={runtime.id} disabled={!runtime.available}>
+                          {runtime.label}{runtime.available ? "" : " unavailable"}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <div className="agent-config-field">
+                  <span>Model</span>
+                  <div
+                    className="agent-model-shell"
+                    title={
+                      selectedRuntimeStatus?.supportsManualModel
+                        ? "Agent model. Use Default model to let the selected CLI choose."
+                        : "Selected runtime does not expose model selection."
+                    }
+                  >
+                    <input
+                      value={agentModelDraft}
+                      placeholder={configuredModel === "auto" ? "Default model" : configuredModel}
+                      disabled={modelControlDisabled}
+                      onChange={(event) => setAgentModelDraft(event.target.value)}
+                      onFocus={() => setIsAgentModelMenuOpen(true)}
+                      onClick={() => setIsAgentModelMenuOpen(true)}
+                      onBlur={(event) => {
+                        window.setTimeout(() => setIsAgentModelMenuOpen(false), 120);
+                        commitAgentModel(event.target.value);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter") return;
+                        event.preventDefault();
+                        commitAgentModel(event.currentTarget.value);
+                        setIsAgentModelMenuOpen(false);
+                        event.currentTarget.blur();
+                      }}
+                      aria-label="Agent model"
+                    />
+                    <button
+                      type="button"
+                      aria-label="Show model options"
+                      disabled={modelControlDisabled}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => setIsAgentModelMenuOpen((open) => !open)}
+                    >
+                      <ChevronDown size={14} />
+                    </button>
+                    {isAgentModelMenuOpen && !modelControlDisabled ? (
+                      <div className="agent-model-menu" role="listbox">
+                        <button
+                          type="button"
+                          className={configuredModel === "auto" ? "is-selected" : ""}
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={() => selectAgentModel("auto")}
+                          role="option"
+                          aria-selected={configuredModel === "auto"}
+                        >
+                          <strong>Default model</strong>
+                          <span>{selectedRuntimeStatus?.label || "Selected CLI"} decides</span>
+                        </button>
+                        {modelOptions.map((model) => (
+                          <button
+                            key={model.id}
+                            type="button"
+                            className={configuredModel === model.id ? "is-selected" : ""}
+                            onMouseDown={(event) => event.preventDefault()}
+                            onClick={() => selectAgentModel(model.id)}
+                            role="option"
+                            aria-selected={configuredModel === model.id}
+                          >
+                            <strong>{model.label}</strong>
+                            <span>
+                              {model.description || (model.label !== model.id ? model.id : model.source || "detected")}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+                {effortControlVisible ? (
+                  <div className="agent-config-field">
+                    <span>Effort</span>
+                    <label
+                      className="agent-effort-select-shell"
+                      title={
+                        selectedRuntimeStatus?.defaultEffort
+                          ? `Reasoning effort. Default: ${selectedRuntimeStatus.defaultEffort}.`
+                          : "Reasoning effort. Use Default effort to let the selected CLI choose."
+                      }
+                    >
+                      <select
+                        value={effortSelectValue}
+                        onChange={(event) => updateAgentEffort(event.target.value)}
+                        disabled={agentConfigDisabled}
+                        aria-label="Agent reasoning effort"
+                      >
+                        <option value="auto">Default effort</option>
+                        {effortOptions.map((level) => (
+                          <option key={level.id} value={level.id}>
+                            {level.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
           <span className={`save-pill is-${saveState}`}>
             {saveState === "saving" ? <RefreshCw size={14} /> : <Save size={14} />}
             {saveState}
           </span>
-          {agentSession ? (
-            <span
-              className={`agent-pill is-${agentSession.status}`}
-              title={`Runtime: ${resolvedRuntime || agentSession.runtime || "auto"}${
-                agentSession.model ? ` · Model: ${agentSession.model}` : " · Model: auto"
-              }`}
-            >
-              <Sparkles size={14} />
-              {agentSession.status}
-              {agentSession.queueDepth > 0 ? ` · ${agentSession.queueDepth}` : ""}
-            </span>
-          ) : null}
+          <button className="icon-button" onClick={() => setIsSettingsOpen(true)} title="Settings">
+            <Settings size={17} />
+          </button>
           <button className="icon-button" onClick={() => fileInputRef.current?.click()} title="Import Markdown">
             <Upload size={17} />
           </button>
@@ -3384,7 +3902,7 @@ function App() {
         <aside className="left-rail">
           <button
             className="rail-collapse-button"
-            onClick={() => setIsLeftRailCollapsed((value) => !value)}
+            onClick={() => updatePanelState({ leftCollapsed: !isLeftRailCollapsed })}
             title={isLeftRailCollapsed ? "Show left sidebar" : "Hide left sidebar"}
           >
             {isLeftRailCollapsed ? <ChevronsRight size={16} /> : <ChevronsLeft size={16} />}
@@ -3502,6 +4020,7 @@ function App() {
             onKeyUp={handleCanvasSelectionEvent}
             onCopy={handleCanvasCopy}
             onCut={handleCanvasCut}
+            onPaste={handleCanvasPaste}
             onContextMenu={handleCanvasContextMenu}
             onScroll={updateFloatingToolbarPosition}
           >
@@ -3543,7 +4062,7 @@ function App() {
         <aside className="right-panel">
           <button
             className="right-collapse-button"
-            onClick={() => setIsRightPanelCollapsed((value) => !value)}
+            onClick={() => updatePanelState({ rightCollapsed: !isRightPanelCollapsed })}
             title={isRightPanelCollapsed ? "Show right sidebar" : "Hide right sidebar"}
           >
             {isRightPanelCollapsed ? <ChevronsLeft size={16} /> : <ChevronsRight size={16} />}
@@ -3572,6 +4091,7 @@ function App() {
               agentSkills={agentSkills}
               newThreadSkillIds={newThreadSkillIds}
               threadSkillIds={threadSkillIds}
+              defaultSkillIds={appSettings.defaultSkills}
               showResolvedThreads={showResolvedThreads}
               resolvedThreadCount={resolvedThreadCount}
               onSetNewComment={setNewComment}
@@ -3591,7 +4111,12 @@ function App() {
               onRequestAgentReply={requestThreadAgentReply}
               onSetStatus={updateThreadStatus}
               onSuggestionStatus={updateSuggestionStatus}
-              onToggleResolvedThreads={() => setShowResolvedThreads((value) => !value)}
+              onToggleResolvedThreads={() =>
+                void persistSettings({
+                  ...appSettings,
+                  showResolvedThreads: !appSettings.showResolvedThreads
+                })
+              }
               agentSession={agentSession}
             />
           ) : (
@@ -3645,6 +4170,41 @@ function App() {
         />
       ) : null}
 
+      {isSettingsOpen ? (
+        <SettingsDialog
+          settings={settingsDraft}
+          saveState={settingsSaveState}
+          skills={agentSkills}
+          runtimeOptions={providerOptions}
+          resolvedRuntime={resolvedRuntime}
+          onChange={updateSettingsDraft}
+          onOpenToneSetup={() => setToneSetupInvocation("settings")}
+          onSave={saveSettingsDraft}
+          onCancel={() => {
+            setSettingsDraft(appSettings);
+            setSettingsSaveState("saved");
+            setIsSettingsOpen(false);
+          }}
+        />
+      ) : null}
+
+      {toneSetupInvocation ? (
+        <ToneSetupDialog
+          invocation={toneSetupInvocation}
+          currentTone={toneSettingsBase().toneOfVoice}
+          editorLanguage={toneSettingsBase().editorLanguage}
+          onSave={saveToneOfVoiceSetup}
+          onSkip={skipToneOfVoiceSetup}
+          onCancel={() => {
+            if (toneSetupInvocation === "first-run") {
+              skipToneOfVoiceSetup();
+            } else {
+              setToneSetupInvocation(null);
+            }
+          }}
+        />
+      ) : null}
+
       {selectionContextMenu ? (
         <div
           className="selection-context-menu"
@@ -3655,9 +4215,10 @@ function App() {
           <button
             type="button"
             role="menuitem"
+            disabled={!selectionContextMenu.hasSelection}
             onClick={() => {
               setSelectionContextMenu(null);
-              void copyPendingSelectionToClipboard();
+              void copyActiveSelectionToClipboard();
             }}
           >
             <Copy size={14} />
@@ -3666,19 +4227,640 @@ function App() {
           <button
             type="button"
             role="menuitem"
+            disabled={!selectionContextMenu.hasSelection}
             onClick={() => {
               setSelectionContextMenu(null);
-              void cutPendingSelectionToClipboard();
+              void cutActiveSelectionToClipboard();
             }}
           >
             <Scissors size={14} />
             Cut
+          </button>
+          <button type="button" role="menuitem" onClick={() => void pasteClipboardFromMenu(false)}>
+            <FileText size={14} />
+            Paste
+          </button>
+          <button type="button" role="menuitem" onClick={() => void pasteClipboardFromMenu(true)}>
+            <Pilcrow size={14} />
+            Paste Markdown
           </button>
         </div>
       ) : null}
 
       {lastCopied ? <div className="toast">{lastCopied}</div> : null}
     </main>
+  );
+}
+
+function toneModeIcon(mode: ToneSetupMode) {
+  if (mode === "manual") return <PenLine size={15} />;
+  if (mode === "interview") return <MessageSquare size={15} />;
+  if (mode === "links") return <Globe size={15} />;
+  return <BookOpen size={15} />;
+}
+
+function ToneSetupDialog({
+  invocation,
+  currentTone,
+  editorLanguage,
+  onSave,
+  onSkip,
+  onCancel
+}: {
+  invocation: ToneSetupInvocation;
+  currentTone: string;
+  editorLanguage: SupportedEditorLanguage;
+  onSave: (toneOfVoice: string) => void | Promise<void>;
+  onSkip: () => void | Promise<void>;
+  onCancel: () => void;
+}) {
+  const [mode, setMode] = useState<ToneSetupMode>(currentTone.trim() ? "manual" : "interview");
+  const [manualText, setManualText] = useState(currentTone);
+  const [interviewMessages, setInterviewMessages] = useState<ToneInterviewMessage[]>([]);
+  const [interviewDraft, setInterviewDraft] = useState("");
+  const [interviewState, setInterviewState] = useState<"idle" | "thinking" | "error">("idle");
+  const [urls, setUrls] = useState(() => Array.from({ length: 5 }, () => ""));
+  const [selectedArchetypeId, setSelectedArchetypeId] = useState(toneArchetypeOptions[0]?.id ?? "direct-founder");
+  const [generatedTone, setGeneratedTone] = useState(currentTone);
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const [builderState, setBuilderState] = useState<"idle" | "generating" | "saving" | "error">("idle");
+  const [errorMessage, setErrorMessage] = useState("");
+  const previewTone = mode === "manual" ? manualText : generatedTone;
+  const isBusy = builderState === "generating" || builderState === "saving" || interviewState === "thinking";
+
+  useEffect(() => {
+    if (mode !== "interview" || interviewMessages.length > 0 || interviewState === "thinking") return;
+    void requestInterviewTurn([]);
+  }, [mode]);
+
+  function updateUrl(index: number, value: string) {
+    setUrls((currentUrls) => currentUrls.map((url, urlIndex) => (urlIndex === index ? value : url)));
+  }
+
+  async function requestInterviewTurn(nextMessages: ToneInterviewMessage[], options: { forceGenerate?: boolean } = {}) {
+    setInterviewState("thinking");
+    setErrorMessage("");
+    setWarnings([]);
+    try {
+      const response = await sendToneInterviewMessage({
+        messages: nextMessages,
+        editorLanguage,
+        currentTone: generatedTone || currentTone,
+        forceGenerate: options.forceGenerate
+      });
+      const reply = response.reply.trim();
+      const messagesWithReply = reply ? [...nextMessages, { role: "agent" as const, body: reply }] : nextMessages;
+      setInterviewMessages(messagesWithReply);
+      if (response.toneOfVoice) setGeneratedTone(response.toneOfVoice);
+      setWarnings(response.warnings);
+      setInterviewState("idle");
+      return response;
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+      setInterviewState("error");
+      return null;
+    }
+  }
+
+  async function submitInterviewMessage() {
+    const body = interviewDraft.trim();
+    if (!body || isBusy) return;
+    const nextMessages: ToneInterviewMessage[] = [...interviewMessages, { role: "human", body }];
+    setInterviewMessages(nextMessages);
+    setInterviewDraft("");
+    await requestInterviewTurn(nextMessages);
+  }
+
+  function restartInterview() {
+    setInterviewMessages([]);
+    setInterviewDraft("");
+    setGeneratedTone("");
+    setWarnings([]);
+    setErrorMessage("");
+    setInterviewState("idle");
+    void requestInterviewTurn([]);
+  }
+
+  async function buildTone() {
+    if (mode === "interview") {
+      if (generatedTone.trim()) return generatedTone;
+      setBuilderState("generating");
+      const response = await requestInterviewTurn(interviewMessages, { forceGenerate: true });
+      setBuilderState(response ? "idle" : "error");
+      return response?.toneOfVoice ?? "";
+    }
+
+    setBuilderState("generating");
+    setErrorMessage("");
+    setWarnings([]);
+    try {
+      const response = await generateToneOfVoice({
+        mode,
+        manualText,
+        urls,
+        archetypeId: selectedArchetypeId,
+        editorLanguage
+      });
+      setGeneratedTone(response.toneOfVoice);
+      if (mode === "manual") setManualText(response.toneOfVoice);
+      setWarnings(response.warnings);
+      setBuilderState("idle");
+      return response.toneOfVoice;
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+      setBuilderState("error");
+      return "";
+    }
+  }
+
+  async function saveTone() {
+    const tone = previewTone.trim() || (await buildTone()).trim();
+    if (!tone) return;
+    setBuilderState("saving");
+    await onSave(tone);
+  }
+
+  return (
+    <div className="settings-backdrop tone-setup-backdrop" role="presentation" onMouseDown={() => !isBusy && onCancel()}>
+      <section
+        className="settings-dialog tone-setup-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="tone-setup-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="settings-dialog-header">
+          <div>
+            <span>{invocation === "first-run" ? "First run" : "Settings"}</span>
+            <h2 id="tone-setup-title">Tone of voice</h2>
+          </div>
+          <button className="icon-button mini" onClick={onCancel} title="Close tone setup" disabled={isBusy}>
+            <X size={15} />
+          </button>
+        </header>
+
+        <div className="tone-mode-tabs" role="tablist" aria-label="Tone setup mode">
+          {toneSetupModes.map((option) => (
+            <button
+              key={option.id}
+              className={mode === option.id ? "is-active" : ""}
+              onClick={() => {
+                setMode(option.id);
+                setErrorMessage("");
+                setWarnings([]);
+              }}
+              type="button"
+            >
+              {toneModeIcon(option.id)}
+              {option.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="tone-setup-body">
+          {mode === "manual" ? (
+            <label className="settings-field">
+              <span>Manual tone</span>
+              <textarea
+                value={manualText}
+                onChange={(event) => setManualText(event.target.value)}
+                placeholder="Direct, founder-to-founder, plainspoken, no hype, British English."
+                rows={8}
+              />
+            </label>
+          ) : null}
+
+          {mode === "interview" ? (
+            <div className="tone-interview-chat">
+              <div className="settings-field-header">
+                <span>Interview</span>
+                <button className="ghost-button small" onClick={restartInterview} disabled={isBusy}>
+                  <RotateCcw size={14} />
+                  Start over
+                </button>
+              </div>
+              <div className="tone-interview-messages" aria-live="polite">
+                {interviewMessages.map((message, index) => (
+                  <article key={`${message.role}-${index}`} className={`tone-interview-message is-${message.role}`}>
+                    <strong>{message.role === "agent" ? "Skribe" : "You"}</strong>
+                    <p>{message.body}</p>
+                  </article>
+                ))}
+                {interviewState === "thinking" ? <AgentTypingIndicator label="Skribe is thinking" /> : null}
+              </div>
+              <form
+                className="tone-interview-composer"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void submitInterviewMessage();
+                }}
+              >
+                <textarea
+                  value={interviewDraft}
+                  onChange={(event) => setInterviewDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                      event.preventDefault();
+                      void submitInterviewMessage();
+                    }
+                  }}
+                  placeholder="Reply to Skribe..."
+                  rows={4}
+                  disabled={isBusy}
+                />
+                <button className="primary-button" type="submit" disabled={isBusy || !interviewDraft.trim()}>
+                  <Send size={15} />
+                  Send
+                </button>
+              </form>
+            </div>
+          ) : null}
+
+          {mode === "links" ? (
+            <div className="tone-link-list">
+              {urls.map((url, index) => (
+                <label key={index} className="settings-field">
+                  <span>Link {index + 1}</span>
+                  <input
+                    value={url}
+                    onChange={(event) => updateUrl(index, event.target.value)}
+                    placeholder="https://example.com/post"
+                  />
+                </label>
+              ))}
+            </div>
+          ) : null}
+
+          {mode === "archetype" ? (
+            <div className="tone-archetype-grid">
+              {toneArchetypeOptions.map((archetype) => (
+                <button
+                  key={archetype.id}
+                  className={selectedArchetypeId === archetype.id ? "is-selected" : ""}
+                  onClick={() => {
+                    setSelectedArchetypeId(archetype.id);
+                    setGeneratedTone("");
+                  }}
+                  type="button"
+                >
+                  <strong>{archetype.label}</strong>
+                  <small>{archetype.description}</small>
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          {mode !== "manual" ? (
+            <div className="tone-preview">
+              <div className="settings-field-header">
+                <span>Generated tone</span>
+                <button className="secondary-button small" onClick={buildTone} disabled={isBusy}>
+                  <Sparkles size={14} />
+                  {builderState === "generating" ? "Generating" : "Generate"}
+                </button>
+              </div>
+              <textarea
+                value={generatedTone}
+                onChange={(event) => setGeneratedTone(event.target.value)}
+                placeholder="Generate a tone profile, then edit it here."
+                rows={6}
+              />
+            </div>
+          ) : null}
+
+          {warnings.length > 0 ? (
+            <div className="tone-warning-list">
+              {warnings.map((warning) => (
+                <p key={warning}>{warning}</p>
+              ))}
+            </div>
+          ) : null}
+
+          {errorMessage ? <p className="tone-error">{errorMessage}</p> : null}
+        </div>
+
+        <footer className="settings-dialog-actions">
+          <span className={`settings-save-state is-${builderState === "error" ? "error" : "saved"}`}>
+            {builderState === "generating" || builderState === "saving"
+              ? "working"
+              : builderState === "error"
+                ? "error"
+                : "ready"}
+          </span>
+          {invocation === "first-run" ? (
+            <button className="ghost-button" onClick={onSkip} disabled={isBusy}>
+              Skip
+            </button>
+          ) : null}
+          <button className="ghost-button" onClick={onCancel} disabled={isBusy}>
+            Cancel
+          </button>
+          <button className="primary-button" onClick={saveTone} disabled={isBusy}>
+            <Save size={15} />
+            Save tone
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function SettingsDialog({
+  settings,
+  saveState,
+  skills,
+  runtimeOptions,
+  resolvedRuntime,
+  onChange,
+  onOpenToneSetup,
+  onSave,
+  onCancel
+}: {
+  settings: AppSettings;
+  saveState: SaveState;
+  skills: AgentSkill[];
+  runtimeOptions: AgentRuntimeConfig["runtimes"];
+  resolvedRuntime: string | null;
+  onChange: (patch: Partial<AppSettings>) => void;
+  onOpenToneSetup: () => void;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  const selectedRuntimeId = settings.agentRuntime === "auto" ? resolvedRuntime : settings.agentRuntime;
+  const selectedRuntimeStatus = runtimeOptions.find((runtime) => runtime.id === selectedRuntimeId) ?? null;
+  const modelOptions = selectedRuntimeStatus?.models ?? [];
+  const effortOptions = selectedRuntimeStatus?.effortLevels ?? [];
+  const modelSelectValue =
+    settings.agentModel === "auto" || modelOptions.some((model) => model.id === settings.agentModel)
+      ? settings.agentModel
+      : "__custom";
+  const effortSelectValue =
+    settings.agentEffort === "auto" || effortOptions.some((effort) => effort.id === settings.agentEffort)
+      ? settings.agentEffort
+      : "auto";
+
+  return (
+    <div className="settings-backdrop" role="presentation" onMouseDown={onCancel}>
+      <section
+        className="settings-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="settings-dialog-header">
+          <div>
+            <span>Settings</span>
+            <h2 id="settings-title">Workspace</h2>
+          </div>
+          <button className="icon-button mini" onClick={onCancel} title="Close settings">
+            <X size={15} />
+          </button>
+        </header>
+
+        <div className="settings-form">
+          <div className="settings-field">
+            <div className="settings-field-header">
+              <span>Tone of voice</span>
+              <button className="secondary-button small" onClick={onOpenToneSetup}>
+                <Sparkles size={14} />
+                Build tone
+              </button>
+            </div>
+            <textarea
+              value={settings.toneOfVoice}
+              onChange={(event) => onChange({ toneOfVoice: event.target.value })}
+              placeholder="Direct, plainspoken, founder-to-founder, no hype."
+              rows={5}
+            />
+          </div>
+
+          <label className="settings-field">
+            <span>Language</span>
+            <select
+              value={settings.editorLanguage}
+              onChange={(event) => onChange({ editorLanguage: event.target.value as SupportedEditorLanguage })}
+            >
+              {editorLanguageOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <div className="settings-grid">
+            <label className="settings-field">
+              <span>Agent provider</span>
+              <select
+                value={settings.agentRuntime}
+                onChange={(event) =>
+                  onChange({
+                    agentRuntime: event.target.value,
+                    agentModel: "auto",
+                    agentEffort: "auto"
+                  })
+                }
+              >
+                <option value="auto">Auto</option>
+                {runtimeOptions.map((runtime) => (
+                  <option key={runtime.id} value={runtime.id} disabled={!runtime.available}>
+                    {runtime.label}{runtime.available ? "" : " unavailable"}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="settings-field">
+              <span>Agent model</span>
+              <select
+                value={modelSelectValue}
+                disabled={Boolean(selectedRuntimeStatus && !selectedRuntimeStatus.supportsManualModel)}
+                onChange={(event) => {
+                  if (event.target.value === "__custom") return;
+                  onChange({ agentModel: event.target.value });
+                }}
+              >
+                <option value="auto">Default model</option>
+                {modelOptions.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.label}
+                  </option>
+                ))}
+                {modelSelectValue === "__custom" ? <option value="__custom">{settings.agentModel}</option> : null}
+              </select>
+            </label>
+          </div>
+
+          <label className="settings-field">
+            <span>Agent effort</span>
+            <select
+              value={effortSelectValue}
+              disabled={Boolean(selectedRuntimeStatus && !selectedRuntimeStatus.supportsEffort)}
+              onChange={(event) => onChange({ agentEffort: event.target.value })}
+            >
+              <option value="auto">Default effort</option>
+              {effortOptions.map((effort) => (
+                <option key={effort.id} value={effort.id}>
+                  {effort.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <div className="settings-field">
+            <span>Default skills</span>
+            <SettingsSkillPicker
+              skills={skills}
+              selectedSkillIds={settings.defaultSkills}
+              onChange={(defaultSkills) => onChange({ defaultSkills })}
+            />
+          </div>
+
+          <label className="settings-check">
+            <input
+              type="checkbox"
+              checked={settings.autoReplyToComments}
+              onChange={(event) => onChange({ autoReplyToComments: event.target.checked })}
+            />
+            <span>Auto-reply to new comments</span>
+          </label>
+
+          <label className="settings-check">
+            <input
+              type="checkbox"
+              checked={settings.showResolvedThreads}
+              onChange={(event) => onChange({ showResolvedThreads: event.target.checked })}
+            />
+            <span>Show resolved threads</span>
+          </label>
+
+          <div className="settings-grid">
+            <label className="settings-check">
+              <input
+                type="checkbox"
+                checked={settings.panelState.leftCollapsed}
+                onChange={(event) =>
+                  onChange({
+                    panelState: {
+                      ...settings.panelState,
+                      leftCollapsed: event.target.checked
+                    }
+                  })
+                }
+              />
+              <span>Collapse left panel</span>
+            </label>
+
+            <label className="settings-check">
+              <input
+                type="checkbox"
+                checked={settings.panelState.rightCollapsed}
+                onChange={(event) =>
+                  onChange({
+                    panelState: {
+                      ...settings.panelState,
+                      rightCollapsed: event.target.checked
+                    }
+                  })
+                }
+              />
+              <span>Collapse right panel</span>
+            </label>
+          </div>
+
+          <label className="settings-field">
+            <span>Proposal mode</span>
+            <select
+              value={settings.proposalModeDefault}
+              onChange={(event) =>
+                onChange({ proposalModeDefault: event.target.value === "bold" ? "bold" : "conservative" })
+              }
+            >
+              <option value="conservative">Conservative</option>
+              <option value="bold">Bold</option>
+            </select>
+          </label>
+        </div>
+
+        <footer className="settings-dialog-actions">
+          <span className={`settings-save-state is-${saveState}`}>{saveState}</span>
+          <button className="ghost-button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button className="primary-button" onClick={onSave} disabled={saveState === "saving"}>
+            <Save size={15} />
+            Save
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function SettingsSkillPicker({
+  skills,
+  selectedSkillIds,
+  onChange
+}: {
+  skills: AgentSkill[];
+  selectedSkillIds: string[];
+  onChange: (skillIds: string[]) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const selectedSkills = selectedSkillIds
+    .map((id) => skills.find((skill) => skill.id === id) ?? { id, name: id, description: "", source: "saved" })
+    .filter(Boolean) as AgentSkill[];
+  const filteredSkills = skills.filter((skill) => skillMatchesQuery(skill, query)).slice(0, 20);
+
+  function removeSkill(skillId: string) {
+    onChange(selectedSkillIds.filter((id) => id !== skillId));
+  }
+
+  function toggleSkill(skillId: string) {
+    onChange(
+      selectedSkillIds.includes(skillId)
+        ? selectedSkillIds.filter((id) => id !== skillId)
+        : uniqueSkillIds([...selectedSkillIds, skillId])
+    );
+  }
+
+  return (
+    <div className="settings-skill-picker">
+      {selectedSkills.length > 0 ? (
+        <div className="skill-chip-row" aria-label="Default agent skills">
+          {selectedSkills.map((skill) => (
+            <button key={skill.id} className="skill-chip" onClick={() => removeSkill(skill.id)} title={`Remove ${skillLabel(skill)}`}>
+              /{skill.id}
+              <X size={12} />
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      <label className="skill-search settings-skill-search">
+        <Search size={14} />
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search skills" />
+      </label>
+
+      <div className="settings-skill-list">
+        {filteredSkills.length === 0 ? (
+          <p className="empty-note">No skills match that search.</p>
+        ) : (
+          filteredSkills.map((skill) => {
+            const selected = selectedSkillIds.includes(skill.id);
+            return (
+              <button key={skill.id} className={selected ? "is-selected" : ""} onClick={() => toggleSkill(skill.id)}>
+                <span>
+                  <strong>/{skill.id}</strong>
+                  <small>{skill.description || skill.source}</small>
+                </span>
+              </button>
+            );
+          })
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -4163,6 +5345,10 @@ function EditableMarkdownCanvas({
   const [draggingBlockId, setDraggingBlockId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<{ blockId: string; placement: BlockDropPlacement } | null>(null);
   const blocks = useMemo(() => parseMarkdownBlocks(markdown), [markdown]);
+  const visibleBlocks = useMemo(
+    () => (blocks.length > 0 ? blocks : [{ id: markdownBlockIdFromIndex(0), type: "paragraph" as const, text: "" }]),
+    [blocks]
+  );
   const blockSpans = useMemo(() => getMarkdownBlockLineSpans(markdown), [markdown]);
   const selectionPreviewThread = useMemo<ReviewThread | null>(
     () =>
@@ -4264,10 +5450,6 @@ function EditableMarkdownCanvas({
     onDocumentInput();
   }
 
-  if (blocks.length === 0) {
-    return <p className="editable-empty">Start writing...</p>;
-  }
-
   return (
     <>
       {unanchoredInlineChanges.map((change) => (
@@ -4287,7 +5469,7 @@ function EditableMarkdownCanvas({
         onKeyUp={handleDocumentKeyUp}
         onMouseUp={handleDocumentMouseUp}
       >
-        {blocks.map((block) => {
+        {visibleBlocks.map((block) => {
           const blockSpan = blockSpans.find((span) => span.id === block.id) ?? null;
           const blockAnchorRanges =
             blockSpan === null
@@ -4328,6 +5510,7 @@ function EditableMarkdownCanvas({
                 onDrop={(event) => dropBlock(event, block.id)}
                 onDragEnd={clearBlockDragState}
                 onDelete={() => onDeleteBlock(block.id)}
+                showControls={blocks.length > 0}
               >
                 <EditableBlock
                   key={`${block.id}:${blockResetKeys[block.id] ?? 0}`}
@@ -4372,6 +5555,7 @@ function EditableBlockShell({
   onDrop,
   onDragEnd,
   onDelete,
+  showControls,
   children
 }: {
   blockId: string;
@@ -4384,6 +5568,7 @@ function EditableBlockShell({
   onDrop: (event: React.DragEvent<HTMLDivElement>) => void;
   onDragEnd: () => void;
   onDelete: () => void;
+  showControls?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -4396,29 +5581,31 @@ function EditableBlockShell({
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
-      <div className="editable-block-controls" aria-label="Block controls" contentEditable={false}>
-        <button
-          type="button"
-          className="block-delete-button"
-          onMouseDown={(event) => event.preventDefault()}
-          onClick={onDelete}
-          title="Delete block"
-          aria-label="Delete block"
-        >
-          <X size={13} />
-        </button>
-        <button
-          type="button"
-          className="block-drag-handle"
-          draggable
-          onDragStart={onDragStart}
-          onDragEnd={onDragEnd}
-          title="Drag to move block"
-          aria-label="Drag to move block"
-        >
-          <GripVertical size={14} />
-        </button>
-      </div>
+      {showControls === false ? null : (
+        <div className="editable-block-controls" aria-label="Block controls" contentEditable={false}>
+          <button
+            type="button"
+            className="block-delete-button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={onDelete}
+            title="Delete block"
+            aria-label="Delete block"
+          >
+            <X size={13} />
+          </button>
+          <button
+            type="button"
+            className="block-drag-handle"
+            draggable
+            onDragStart={onDragStart}
+            onDragEnd={onDragEnd}
+            title="Drag to move block"
+            aria-label="Drag to move block"
+          >
+            <GripVertical size={14} />
+          </button>
+        </div>
+      )}
       <div className="editable-block-content">{children}</div>
     </div>
   );
@@ -4475,6 +5662,7 @@ const EditableBlock = React.memo(function EditableBlock({
     suppressContentEditableWarning: true,
     spellCheck: true,
     lang: editorLanguage,
+    "data-placeholder": "Start writing...",
     className: "editable-text"
   };
 
@@ -4681,6 +5869,7 @@ function renderHighlightedText(
     .sort((a, b) => a!.start - b!.start) as Array<{ thread: ReviewThread; start: number; end: number }>;
 
   if (ranges.length === 0) {
+    if (!text) return null;
     return <span dangerouslySetInnerHTML={{ __html: inlineMarkdownToHtml(text) }} />;
   }
 
@@ -4729,6 +5918,7 @@ interface ThreadPanelProps {
   agentSkills: AgentSkill[];
   newThreadSkillIds: string[];
   threadSkillIds: Record<string, string[]>;
+  defaultSkillIds: string[];
   showResolvedThreads: boolean;
   resolvedThreadCount: number;
   onSetNewComment: (value: string) => void;
@@ -4758,6 +5948,7 @@ function ThreadPanel(props: ThreadPanelProps) {
     agentSkills,
     newThreadSkillIds,
     threadSkillIds,
+    defaultSkillIds,
     showResolvedThreads,
     resolvedThreadCount,
     onSetNewComment,
@@ -4949,7 +6140,7 @@ function ThreadPanel(props: ThreadPanelProps) {
                   [activeThread.id]: value
                 }))
               }
-              selectedSkillIds={threadSkillIds[activeThread.id] ?? []}
+              selectedSkillIds={threadSkillIds[activeThread.id] ?? defaultSkillIds}
               onSelectedSkillIdsChange={(skillIds) =>
                 onSetThreadSkillIds((drafts) => ({
                   ...drafts,

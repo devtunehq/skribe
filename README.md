@@ -1,52 +1,172 @@
 # Skribe
 
-Skribe is a local-only Markdown review workbench for writing with an AI partner.
+Local-first Markdown writing with an AI review partner.
 
-It stores clean document content separately from review state:
+Skribe gives you an editable Markdown canvas, anchored comment threads, chat, reviewable diffs, revision history, and clean Markdown export. The document stays local. Review state stays local. Agent calls run through a local CLI runtime such as Codex or Claude Code.
 
-- `data/docs/default/draft.md` is the local Markdown source.
-- `data/docs/default/review.json` contains title, anchored threads, suggestions, chat, proposals, and context memory.
-- `data/docs/default/session.json` tracks the local agent session state.
-- External Markdown files opened with `skribe path/to/doc.md` keep the `.md` file as the content source and store Skribe review state under `data/external/<doc-id>/`.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Run it locally:
+![Skribe editor](docs/screenshots/editor.png)
+
+## Why Skribe?
+
+Most AI writing tools treat long-form editing as a chat transcript. That gets clunky fast.
+
+Skribe is built around the document:
+
+- **Editable rendered Markdown canvas** with headings, links, lists, quotes, code, GFM tables, copy/paste, and keyboard shortcuts.
+- **Anchored comment threads** for paragraph-level or selection-level review.
+- **Document chat** for broader passes, structural edits, and agent collaboration.
+- **Reviewable diffs** so agent edits can be accepted, declined, or revised before they touch the draft.
+- **Per-document context memory** so previous comments, decisions, accepted changes, and revision requests stay available to the agent.
+- **Local-only storage** for the Markdown file, review state, settings, revisions, and sidecars.
+- **Provider-agnostic agent runtime** with support for Codex CLI, Claude Code, or automatic runtime selection.
+
+## Screenshots
+
+### Editor
+
+Rendered Markdown stays editable, with a compact toolbar and collapsible sidebars.
+
+![Skribe editor](docs/screenshots/editor.png)
+
+### Chat
+
+Use chat for article-level discussion, skill-driven passes, and reviewable document diffs.
+
+![Skribe chat](docs/screenshots/chat.png)
+
+### Settings
+
+Persist tone of voice, language, agent runtime, model, effort, default skills, and review preferences.
+
+![Skribe settings](docs/screenshots/settings.png)
+
+## Quick Start
+
+Requirements:
+
+- Node.js 20 or newer
+- `npm`
+- Optional: Codex CLI or Claude Code if you want live agent replies
+
+Clone and run:
 
 ```bash
+git clone git@github.com:devtunehq/skribe.git
+cd skribe
 npm install
 npm run build
 npm run serve
 ```
 
-Open `http://127.0.0.1:4327`.
+Open [http://127.0.0.1:4327](http://127.0.0.1:4327).
 
-To open a specific Markdown file:
+## Open A Markdown File
+
+Run Skribe against a specific file:
 
 ```bash
-npm run serve -- path/to/mydoc.md
+npm run serve -- ~/draft.md
 ```
 
-Or link the local CLI and use:
+Or link the local CLI:
 
 ```bash
 npm link
-skribe path/to/mydoc.md
+skribe ~/draft.md
 ```
 
-For development, run the API server and Vite separately:
+Skribe keeps the `.md` file as the clean document source. Comments, chat, proposals, revisions, and agent memory are stored in a sidecar directory under the local Skribe config directory.
+
+## Agent Runtime
+
+Skribe invokes an external CLI behind the scenes. It does not hard-code one model provider.
+
+```bash
+SKRIBE_AGENT_RUNTIME=auto npm run serve -- ~/draft.md
+SKRIBE_AGENT_RUNTIME=claude SKRIBE_AGENT_MODEL=opus SKRIBE_AGENT_EFFORT=high npm run serve -- ~/draft.md
+SKRIBE_AGENT_RUNTIME=codex SKRIBE_AGENT_MODEL=gpt-5 npm run serve -- ~/draft.md
+```
+
+Supported runtime values:
+
+- `auto` - pick the first healthy local CLI from `SKRIBE_AGENT_RUNTIME_PRIORITY`
+- `codex` - use Codex CLI
+- `claude` - use Claude Code
+- `stub` - deterministic local responses for development and tests
+
+Useful environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `PORT` | Server port. Defaults to `4327`. |
+| `SKRIBE_CONFIG_DIR` | Config root. Defaults to `~/.config/skribe`. |
+| `SKRIBE_DATA_DIR` | Local document/review storage root. Defaults to `~/.config/skribe/data`. |
+| `SKRIBE_DOCUMENT` / `SKRIBE_DOCUMENT_PATH` | Markdown file to open when no CLI path is passed. |
+| `SKRIBE_AGENT_RUNTIME` | `auto`, `codex`, `claude`, or `stub`. |
+| `SKRIBE_AGENT_RUNTIME_PRIORITY` | Comma-separated runtime order for `auto`. Defaults to `codex,claude`. |
+| `SKRIBE_AGENT_MODEL` | Model id, or `auto` to let the selected CLI decide. |
+| `SKRIBE_AGENT_EFFORT` | Reasoning effort where supported. |
+| `SKRIBE_AGENT_TIMEOUT_MS` | Agent command timeout. Defaults to 10 minutes. |
+| `SKRIBE_SKILL_ROOTS` | Additional skill roots for slash-command style skills. |
+
+You can also change runtime, model, effort, language, tone, default skills, and review preferences from the settings panel.
+
+## Storage Model
+
+Skribe keeps one active document in memory for fast editing, then checkpoints to disk.
+
+Default local document:
+
+```text
+~/.config/skribe/data/docs/default/draft.md
+~/.config/skribe/data/docs/default/review.json
+~/.config/skribe/data/docs/default/session.json
+~/.config/skribe/data/docs/default/snapshots/
+```
+
+External Markdown file:
+
+```text
+~/draft.md
+~/.config/skribe/data/external/<doc-id>/review.json
+~/.config/skribe/data/external/<doc-id>/session.json
+~/.config/skribe/data/external/<doc-id>/snapshots/
+```
+
+Global settings live at:
+
+```text
+~/.config/skribe/settings.json
+```
+
+## Development
+
+Run the server:
 
 ```bash
 npm run serve
+```
+
+Run the Vite dev server separately:
+
+```bash
 npm run dev
 ```
 
-Agent runtime defaults can be set at startup, then changed in the app header:
+Validation:
 
 ```bash
-SKRIBE_AGENT_RUNTIME=auto SKRIBE_AGENT_MODEL=auto npm run serve
-SKRIBE_AGENT_RUNTIME=claude SKRIBE_AGENT_MODEL=sonnet npm run serve
-SKRIBE_AGENT_RUNTIME=codex SKRIBE_AGENT_MODEL=gpt-5 npm run serve
+npm test
+npm run typecheck
+npm run build
 ```
 
-Supported runtime values are `auto`, `codex`, `claude`, and `stub`. `auto` picks the first healthy local CLI from `SKRIBE_AGENT_RUNTIME_PRIORITY`, defaulting to `codex,claude`. `SKRIBE_AGENT_MODEL=auto` leaves model choice to the selected CLI.
+## Project Status
 
-The app keeps one active document in memory for snappy editing. It checkpoints Markdown back to the active `.md` file and checkpoints review state to the active document's Skribe sidecar directory. Local document data is ignored by git.
+Skribe is early and intentionally local-first. It is useful today for Markdown drafting and AI-assisted review, but the editor and agent workflow are still being hardened. Issues and focused PRs are welcome.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

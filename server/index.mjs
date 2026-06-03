@@ -2,26 +2,56 @@ import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
-import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { basename, delimiter, dirname, extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const root = resolve(__dirname, "..");
-const dataDir = join(root, "data");
+const legacyDataDir = join(root, "data");
+const homeDir = process.env.HOME || process.env.USERPROFILE || root;
+const appConfigDir = resolve(
+  process.env.SKRIBE_CONFIG_DIR ||
+    (process.env.XDG_CONFIG_HOME ? join(process.env.XDG_CONFIG_HOME, "skribe") : join(homeDir, ".config", "skribe"))
+);
+const settingsPath = join(appConfigDir, "settings.json");
+const dataDir = resolve(process.env.SKRIBE_DATA_DIR || join(appConfigDir, "data"));
 const docsDir = join(dataDir, "docs");
 const defaultDocId = "default";
 const distDir = join(root, "dist");
-const legacyDraftPath = join(dataDir, "draft.md");
-const legacyReviewPath = join(dataDir, "review.json");
+const legacyDraftPath = join(legacyDataDir, "draft.md");
+const legacyReviewPath = join(legacyDataDir, "review.json");
 const registryPath = join(dataDir, "registry.json");
 const defaultConfiguredRuntime = normalizeConfiguredRuntime(process.env.SKRIBE_AGENT_RUNTIME || "auto");
 const defaultConfiguredModel = normalizeConfiguredModel(process.env.SKRIBE_AGENT_MODEL || "auto");
+const defaultConfiguredEffort = normalizeConfiguredEffort(
+  process.env.SKRIBE_AGENT_EFFORT || process.env.SKRIBE_AGENT_REASONING_EFFORT || "auto"
+);
 const agentTimeoutMs = Number(process.env.SKRIBE_AGENT_TIMEOUT_MS || 600000);
+const toneOfVoiceMaxChars = Math.max(1200, Number(process.env.SKRIBE_TONE_OF_VOICE_MAX_CHARS || 6000));
 const port = Number(process.env.PORT || 4327);
 const skillRegistryTtlMs = 30000;
 const runtimeRegistryTtlMs = 30000;
 const activeDocument = resolveActiveDocument(requestedDocumentPath());
+
+const defaultSettings = {
+  version: 1,
+  toneOfVoice: "",
+  toneOfVoiceSetupComplete: false,
+  editorLanguage: "en-GB",
+  agentRuntime: defaultConfiguredRuntime,
+  agentModel: defaultConfiguredModel,
+  agentEffort: defaultConfiguredEffort,
+  defaultSkills: [],
+  autoReplyToComments: true,
+  showResolvedThreads: false,
+  panelState: {
+    leftCollapsed: false,
+    rightCollapsed: false
+  },
+  proposalModeDefault: "conservative",
+  updatedAt: new Date().toISOString()
+};
 
 const defaultMarkdown = `# Untitled Draft
 
@@ -49,6 +79,8 @@ const defaultSession = {
   configuredRuntime: defaultConfiguredRuntime,
   model: defaultConfiguredModel === "auto" ? null : defaultConfiguredModel,
   configuredModel: defaultConfiguredModel,
+  effort: defaultConfiguredEffort === "auto" ? null : defaultConfiguredEffort,
+  configuredEffort: defaultConfiguredEffort,
   status: "idle",
   turnCount: 0,
   queueDepth: 0,
@@ -81,11 +113,25 @@ const falseProposalDisabledPattern =
   /\b(?:document proposals?\s+(?:are|is)\s+disabled|can't\s+(?:show|return|create)[^.]*\b(?:diff|proposal)[^.]*\b(?:mode|disabled)|can't\s+return\s+a\s+reviewable\s+full[- ]document\s+diff\s+in\s+this\s+mode)\b/i;
 let checkpointTimer = null;
 let documentMemory = null;
+let settingsMemory = null;
 let agentRunning = false;
 let skillRegistryCache = null;
 let skillRegistryCachedAt = 0;
 let runtimeRegistryCache = null;
 let runtimeRegistryCachedAt = 0;
+
+async function ensureAppStorage() {
+  await mkdir(appConfigDir, { recursive: true });
+  if (resolve(dataDir) !== resolve(legacyDataDir) && !existsSync(dataDir) && existsSync(legacyDataDir)) {
+    await mkdir(dirname(dataDir), { recursive: true });
+    await cp(legacyDataDir, dataDir, { recursive: true, errorOnExist: false, force: false });
+  }
+  await mkdir(dataDir, { recursive: true });
+
+  if (!existsSync(settingsPath)) {
+    await writeFile(settingsPath, JSON.stringify(defaultSettings, null, 2), "utf8");
+  }
+}
 
 async function ensureDocumentFiles() {
   await mkdir(activeDocument.docDir, { recursive: true });
@@ -130,6 +176,78 @@ async function readJson(path, fallback) {
   }
 }
 
+function normalizeEditorLanguage(value) {
+  return value === "en-US" || value === "en-GB" ? value : defaultSettings.editorLanguage;
+}
+
+function normalizeProposalMode(value) {
+  return value === "bold" || value === "conservative" ? value : defaultSettings.proposalModeDefault;
+}
+
+function normalizeDefaultSkills(value) {
+  if (!Array.isArray(value)) return [];
+  return Array.from(
+    new Set(
+      value
+        .map((skillId) => String(skillId || "").trim())
+        .filter((skillId) => /^[a-z0-9:_-]+$/i.test(skillId))
+    )
+  ).slice(0, 20);
+}
+
+function normalizePanelState(value) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    leftCollapsed: typeof source.leftCollapsed === "boolean" ? source.leftCollapsed : defaultSettings.panelState.leftCollapsed,
+    rightCollapsed:
+      typeof source.rightCollapsed === "boolean" ? source.rightCollapsed : defaultSettings.panelState.rightCollapsed
+  };
+}
+
+function normalizeAppSettings(settings) {
+  const source = settings && typeof settings === "object" ? settings : {};
+  const toneOfVoice =
+    typeof source.toneOfVoice === "string" ? source.toneOfVoice.slice(0, toneOfVoiceMaxChars) : defaultSettings.toneOfVoice;
+  return {
+    ...defaultSettings,
+    ...source,
+    version: 1,
+    toneOfVoice,
+    toneOfVoiceSetupComplete:
+      typeof source.toneOfVoiceSetupComplete === "boolean" ? source.toneOfVoiceSetupComplete : Boolean(toneOfVoice.trim()),
+    editorLanguage: normalizeEditorLanguage(source.editorLanguage),
+    agentRuntime: normalizeConfiguredRuntime(source.agentRuntime ?? defaultSettings.agentRuntime),
+    agentModel: normalizeConfiguredModel(source.agentModel ?? defaultSettings.agentModel),
+    agentEffort: normalizeConfiguredEffort(source.agentEffort ?? defaultSettings.agentEffort),
+    defaultSkills: normalizeDefaultSkills(source.defaultSkills),
+    autoReplyToComments:
+      typeof source.autoReplyToComments === "boolean"
+        ? source.autoReplyToComments
+        : defaultSettings.autoReplyToComments,
+    showResolvedThreads:
+      typeof source.showResolvedThreads === "boolean" ? source.showResolvedThreads : defaultSettings.showResolvedThreads,
+    panelState: normalizePanelState(source.panelState),
+    proposalModeDefault: normalizeProposalMode(source.proposalModeDefault),
+    updatedAt: typeof source.updatedAt === "string" ? source.updatedAt : defaultSettings.updatedAt
+  };
+}
+
+function getSettings() {
+  if (!settingsMemory) settingsMemory = normalizeAppSettings(defaultSettings);
+  return settingsMemory;
+}
+
+async function setSettings(nextSettings) {
+  settingsMemory = normalizeAppSettings({
+    ...getSettings(),
+    ...(nextSettings && typeof nextSettings === "object" ? nextSettings : {}),
+    updatedAt: nowIso()
+  });
+  await mkdir(appConfigDir, { recursive: true });
+  await atomicWrite(settingsPath, JSON.stringify(settingsMemory, null, 2));
+  return settingsMemory;
+}
+
 function normalizeConfiguredRuntime(value) {
   const runtime = String(value || "").trim().toLowerCase();
   return runtime || "auto";
@@ -140,6 +258,11 @@ function normalizeConfiguredModel(value) {
   return model || "auto";
 }
 
+function normalizeConfiguredEffort(value) {
+  const effort = String(value || "").trim().toLowerCase();
+  return effort || "auto";
+}
+
 function sessionConfiguredRuntime(session) {
   return normalizeConfiguredRuntime(session?.configuredRuntime || session?.runtime || defaultConfiguredRuntime);
 }
@@ -148,9 +271,14 @@ function sessionConfiguredModel(session) {
   return normalizeConfiguredModel(session?.configuredModel || session?.model || defaultConfiguredModel);
 }
 
+function sessionConfiguredEffort(session) {
+  return normalizeConfiguredEffort(session?.configuredEffort || session?.effort || defaultConfiguredEffort);
+}
+
 function normalizeAgentSession(session, { queueDepth = agentQueue.length } = {}) {
   const configuredRuntime = sessionConfiguredRuntime(session);
   const configuredModel = sessionConfiguredModel(session);
+  const configuredEffort = sessionConfiguredEffort(session);
   const runtime = normalizeConfiguredRuntime(session?.runtime || (configuredRuntime === "auto" ? "auto" : configuredRuntime));
 
   return {
@@ -161,7 +289,21 @@ function normalizeAgentSession(session, { queueDepth = agentQueue.length } = {})
     configuredRuntime,
     model: configuredModel === "auto" ? null : configuredModel,
     configuredModel,
+    effort: configuredEffort === "auto" ? null : configuredEffort,
+    configuredEffort,
     queueDepth
+  };
+}
+
+function sessionWithAgentSettings(session, settings = getSettings()) {
+  return {
+    ...(session && typeof session === "object" ? session : {}),
+    configuredRuntime: settings.agentRuntime,
+    runtime: settings.agentRuntime === "auto" ? "auto" : settings.agentRuntime,
+    configuredModel: settings.agentModel,
+    model: settings.agentModel === "auto" ? null : settings.agentModel,
+    configuredEffort: settings.agentEffort,
+    effort: settings.agentEffort === "auto" ? null : settings.agentEffort
   };
 }
 
@@ -363,6 +505,105 @@ function parseHelpModels(helpText, patterns) {
   return models;
 }
 
+function effortLabel(effort) {
+  const labels = {
+    low: "Low",
+    medium: "Medium",
+    high: "High",
+    xhigh: "XHigh",
+    max: "Max"
+  };
+  return labels[effort] || effort;
+}
+
+function parseHelpEffortLevels(helpText) {
+  const match = helpText.match(/--effort[\s\S]*?\(([^)]+)\)/i);
+  if (!match) return [];
+
+  return match[1]
+    .split(/[,|/]\s*/)
+    .map((value) => value.replace(/['"`().]/g, "").trim().toLowerCase())
+    .filter(Boolean)
+    .map((effort) => ({ id: effort, label: effortLabel(effort), source: "help" }));
+}
+
+function mergeEffortLevels(levelGroups) {
+  const merged = [];
+  for (const levels of levelGroups) {
+    for (const level of levels || []) {
+      if (!level?.id || merged.some((item) => item.id === level.id)) continue;
+      merged.push(level);
+    }
+  }
+  return merged;
+}
+
+function displayNameFromClaudeModelId(modelId) {
+  const match = modelId.match(/^claude-([a-z]+)-(\d+)-(\d+)(?:-.+)?$/i);
+  if (!match) return null;
+  const family = `${match[1].slice(0, 1).toUpperCase()}${match[1].slice(1)}`;
+  return `${family} ${match[2]}.${match[3]}`;
+}
+
+function enrichClaudeModels(models, helpText) {
+  const fullNameExamples = Array.from(helpText.matchAll(/['"]?(claude-[a-z0-9:_-]+)['"]?/gi)).map((match) => match[1]);
+
+  return models.map((model) => {
+    const fullName = fullNameExamples.find((example) => example.includes(`-${model.id}-`));
+    const displayName = fullName ? displayNameFromClaudeModelId(fullName) : null;
+    return {
+      ...model,
+      label: displayName || `${model.id.slice(0, 1).toUpperCase()}${model.id.slice(1)}`,
+      description: fullName || `alias: ${model.id}`,
+      source: `alias: ${model.id}`
+    };
+  });
+}
+
+function parseCodexModelCatalog(catalogText) {
+  try {
+    const payload = JSON.parse(catalogText);
+    const catalogModels = Array.isArray(payload.models) ? payload.models : [];
+    const visibleModels = catalogModels
+      .filter((model) => model?.slug && model.visibility !== "hide")
+      .sort((a, b) => Number(a.priority ?? 999) - Number(b.priority ?? 999));
+    const models = visibleModels.map((model) => ({
+      id: model.slug,
+      label: model.display_name || model.slug,
+      description: model.description || model.slug,
+      source: "catalog"
+    }));
+    const effortLevels = mergeEffortLevels(
+      visibleModels.map((model) =>
+        Array.isArray(model.supported_reasoning_levels)
+          ? model.supported_reasoning_levels.map((level) => ({
+              id: String(level.effort || "").trim().toLowerCase(),
+              label: effortLabel(String(level.effort || "").trim().toLowerCase()),
+              description: level.description || "",
+              source: "catalog"
+            }))
+          : []
+      )
+    ).filter((level) => level.id);
+    const defaultEffort =
+      visibleModels.find((model) => model.slug === defaultConfiguredModel)?.default_reasoning_level ||
+      visibleModels.find((model) => model.default_reasoning_level)?.default_reasoning_level ||
+      null;
+
+    return {
+      models,
+      effortLevels,
+      defaultEffort
+    };
+  } catch {
+    return {
+      models: [],
+      effortLevels: [],
+      defaultEffort: null
+    };
+  }
+}
+
 async function detectCommandRuntime({ id, label, command, modelPatterns = [] }) {
   const versionResult = await runProcessNoThrow(command, ["--version"], "", 3500, { cwd: root });
   if (versionResult.error) {
@@ -377,6 +618,9 @@ async function detectCommandRuntime({ id, label, command, modelPatterns = [] }) 
       supportsManualModel: false,
       models: [],
       defaultModel: null,
+      supportsEffort: false,
+      effortLevels: [],
+      defaultEffort: null,
       notes: [`${label} executable not found or not runnable.`]
     };
   }
@@ -385,6 +629,7 @@ async function detectCommandRuntime({ id, label, command, modelPatterns = [] }) 
   const helpText = `${helpResult.stdout || ""}\n${helpResult.stderr || ""}`;
   const version = `${versionResult.stdout || versionResult.stderr || ""}`.trim() || null;
   const supportsModelFlag = /\s--model(?:\s|,|$)|\s-m,\s*--model/.test(helpText);
+  const effortLevels = parseHelpEffortLevels(helpText);
 
   return {
     id,
@@ -397,6 +642,9 @@ async function detectCommandRuntime({ id, label, command, modelPatterns = [] }) 
     supportsManualModel: supportsModelFlag,
     models: supportsModelFlag ? parseHelpModels(helpText, modelPatterns) : [],
     defaultModel: null,
+    supportsEffort: effortLevels.length > 0,
+    effortLevels,
+    defaultEffort: null,
     notes: supportsModelFlag
       ? ["CLI supports a model flag, but does not expose a reliable complete model list. Manual model ids are allowed."]
       : ["CLI does not appear to expose model selection."]
@@ -404,21 +652,49 @@ async function detectCommandRuntime({ id, label, command, modelPatterns = [] }) 
 }
 
 async function detectCodexRuntime() {
-  return detectCommandRuntime({
+  const status = await detectCommandRuntime({
     id: "codex",
     label: "Codex CLI",
     command: "codex",
     modelPatterns: []
   });
+  if (!status.available) return status;
+
+  const catalogResult = await runProcessNoThrow("codex", ["debug", "models", "--bundled"], "", 5000, { cwd: root });
+  if (catalogResult.error) return status;
+
+  const catalog = parseCodexModelCatalog(catalogResult.stdout || catalogResult.stderr || "");
+  if (catalog.models.length === 0 && catalog.effortLevels.length === 0) return status;
+
+  return {
+    ...status,
+    models: catalog.models.length > 0 ? catalog.models : status.models,
+    supportsEffort: catalog.effortLevels.length > 0,
+    effortLevels: catalog.effortLevels,
+    defaultEffort: catalog.defaultEffort,
+    notes:
+      catalog.models.length > 0
+        ? ["Model list loaded from the bundled Codex model catalog."]
+        : status.notes
+  };
 }
 
 async function detectClaudeRuntime() {
-  return detectCommandRuntime({
+  const status = await detectCommandRuntime({
     id: "claude",
     label: "Claude Code",
     command: "claude",
     modelPatterns: [/alias(?:es)?[^()]*\((?:e\.g\.\s*)?['"]?([a-z0-9:_-]+)['"]?\s+or\s+['"]?([a-z0-9:_-]+)['"]?\)/i]
   });
+  if (!status.available) return status;
+
+  const helpResult = await runProcessNoThrow("claude", ["--help"], "", 5000, { cwd: root });
+  const helpText = `${helpResult.stdout || ""}\n${helpResult.stderr || ""}`;
+
+  return {
+    ...status,
+    models: enrichClaudeModels(status.models, helpText)
+  };
 }
 
 async function detectStubRuntime() {
@@ -433,6 +709,9 @@ async function detectStubRuntime() {
     supportsManualModel: false,
     models: [],
     defaultModel: null,
+    supportsEffort: false,
+    effortLevels: [],
+    defaultEffort: null,
     notes: ["Local test runtime. It does not call an external model."]
   };
 }
@@ -478,6 +757,9 @@ async function detectAgentRuntimes({ force = false } = {}) {
         supportsManualModel: false,
         models: [],
         defaultModel: null,
+        supportsEffort: false,
+        effortLevels: [],
+        defaultEffort: null,
         notes: [error instanceof Error ? error.message : String(error)]
       });
     }
@@ -491,6 +773,42 @@ async function detectAgentRuntimes({ force = false } = {}) {
 function selectedModelForSession(session) {
   const configuredModel = sessionConfiguredModel(session);
   return configuredModel === "auto" ? null : configuredModel;
+}
+
+function selectedEffortForSession(session) {
+  const configuredEffort = sessionConfiguredEffort(session);
+  return configuredEffort === "auto" ? null : configuredEffort;
+}
+
+async function validateAgentConfiguration({ configuredRuntime, configuredModel, configuredEffort }, { force = false } = {}) {
+  if (configuredRuntime !== "auto" && !agentRuntimeAdapters[configuredRuntime]) {
+    throw new Error(`Unknown agent runtime "${configuredRuntime}".`);
+  }
+
+  const runtimes = await detectAgentRuntimes({ force });
+  const byId = new Map(runtimes.map((runtime) => [runtime.id, runtime]));
+  const selectedRuntime =
+    configuredRuntime === "auto" ? runtimePriority().find((id) => byId.get(id)?.available) ?? null : configuredRuntime;
+  const selectedStatus = selectedRuntime ? byId.get(selectedRuntime) : null;
+
+  if (configuredRuntime !== "auto" && selectedStatus && !selectedStatus.available) {
+    throw new Error(`${selectedStatus.label} is not available.`);
+  }
+  if (configuredModel !== "auto" && selectedStatus && !selectedStatus.supportsManualModel) {
+    throw new Error(`${selectedStatus.label} does not support model selection.`);
+  }
+  if (configuredEffort !== "auto" && selectedStatus && !selectedStatus.supportsEffort) {
+    throw new Error(`${selectedStatus.label} does not support effort selection.`);
+  }
+  if (
+    configuredEffort !== "auto" &&
+    selectedStatus?.effortLevels?.length > 0 &&
+    !selectedStatus.effortLevels.some((level) => level.id === configuredEffort)
+  ) {
+    throw new Error(`${selectedStatus.label} does not support effort "${configuredEffort}".`);
+  }
+
+  return { runtimes, selectedRuntime, selectedStatus };
 }
 
 async function resolveAgentRuntimeSelection(session) {
@@ -515,13 +833,22 @@ async function resolveAgentRuntimeSelection(session) {
   if (model && !status.supportsManualModel) {
     throw new Error(`${status.label || runtimeId} does not support model selection.`);
   }
+  const effort = selectedEffortForSession(session);
+  if (effort && !status.supportsEffort) {
+    throw new Error(`${status.label || runtimeId} does not support effort selection.`);
+  }
+  if (effort && status.effortLevels?.length > 0 && !status.effortLevels.some((level) => level.id === effort)) {
+    throw new Error(`${status.label || runtimeId} does not support effort "${effort}".`);
+  }
 
   return {
     adapter,
     status,
     configuredRuntime,
     configuredModel: sessionConfiguredModel(session),
-    model
+    model,
+    configuredEffort: sessionConfiguredEffort(session),
+    effort
   };
 }
 
@@ -541,11 +868,15 @@ async function agentRuntimeConfigResponse() {
     resolvedRuntime,
     configuredModel: session.configuredModel,
     resolvedModel: session.configuredModel === "auto" ? null : session.configuredModel,
+    configuredEffort: session.configuredEffort,
+    resolvedEffort: session.configuredEffort === "auto" ? null : session.configuredEffort,
     runtimes
   };
 }
 
 async function loadDocumentIntoMemory() {
+  await ensureAppStorage();
+  settingsMemory = normalizeAppSettings(await readJson(settingsPath, defaultSettings));
   await ensureDocumentFiles();
   const [markdown, review, agentSession, draftStat, reviewStat] = await Promise.all([
     readFile(activeDocument.markdownPath, "utf8"),
@@ -555,7 +886,7 @@ async function loadDocumentIntoMemory() {
     stat(activeDocument.reviewPath)
   ]);
 
-  const normalizedSession = normalizeAgentSession(agentSession);
+  const normalizedSession = normalizeAgentSession(sessionWithAgentSettings(agentSession));
   const restoredSession =
     normalizedSession.status === "running"
       ? {
@@ -602,7 +933,8 @@ async function loadDocumentIntoMemory() {
 
 function normalizeReview(review) {
   const requestedLanguage = review?.settings?.editorLanguage;
-  const editorLanguage = requestedLanguage === "en-US" || requestedLanguage === "en-GB" ? requestedLanguage : "en-GB";
+  const editorLanguage =
+    requestedLanguage === "en-US" || requestedLanguage === "en-GB" ? requestedLanguage : getSettings().editorLanguage;
 
   return {
     ...defaultReview,
@@ -805,6 +1137,437 @@ function clipText(text, maxLength = 360) {
   return compact.length > maxLength ? `${compact.slice(0, maxLength - 1)}...` : compact;
 }
 
+const toneArchetypes = {
+  "direct-founder": {
+    name: "Direct founder",
+    profile:
+      "Direct, founder-to-founder, plainspoken, no hype. Make the argument quickly, use concrete examples, keep sentences tight, and avoid performative certainty."
+  },
+  "technical-editorial": {
+    name: "Technical editorial",
+    profile:
+      "Clear, analytical, and editorial. Explain the technical idea in plain language, connect examples to the wider market, and avoid jargon unless it earns its place."
+  },
+  "operator-memo": {
+    name: "Operator memo",
+    profile:
+      "Practical, concise, and workmanlike. Lead with the decision or claim, spell out tradeoffs, use operational detail, and avoid decorative prose."
+  },
+  "warm-teacher": {
+    name: "Warm teacher",
+    profile:
+      "Approachable, patient, and concrete. Use short explanations, useful examples, and a calm voice that helps the reader understand without talking down to them."
+  },
+  "sharp-critic": {
+    name: "Sharp critic",
+    profile:
+      "Pointed, precise, and unsentimental. Name weak assumptions directly, support critiques with evidence, and keep the tone fair rather than snarky."
+  },
+  "narrative-builder": {
+    name: "Narrative builder",
+    profile:
+      "Narrative, thoughtful, and grounded. Build from a concrete observation toward a larger thesis, keep transitions smooth, and avoid abstract throat-clearing."
+  }
+};
+
+const toneInterviewQuestions = [
+  "Who are you writing for?",
+  "What should the reader come away with?",
+  "What should the voice avoid?",
+  "Paste a paragraph that sounds like you.",
+  "How direct should the agent be when editing?"
+];
+
+function normalizeToneLanguage(value) {
+  return value === "en-US" ? "en-US" : "en-GB";
+}
+
+function cleanToneSourceText(value, maxLength = 50000) {
+  return String(value || "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function stripHtmlToText(html) {
+  return cleanToneSourceText(
+    String(html || "")
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+      .replace(/<nav\b[^>]*>[\s\S]*?<\/nav>/gi, " ")
+      .replace(/<footer\b[^>]*>[\s\S]*?<\/footer>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/&#39;/gi, "'")
+      .replace(/&quot;/gi, '"')
+  );
+}
+
+function uniqueToneItems(value, maxItems) {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value.map((item) => String(item || "").trim()).filter(Boolean))).slice(0, maxItems);
+}
+
+function sentenceStats(text) {
+  const sentences = String(text || "").match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [];
+  const words = String(text || "").match(/[A-Za-z][A-Za-z'-]*/g) || [];
+  return {
+    sentenceCount: sentences.length,
+    wordCount: words.length,
+    averageSentenceLength: sentences.length ? Math.round(words.length / sentences.length) : 0,
+    questionCount: (String(text || "").match(/\?/g) || []).length,
+    firstPersonCount: (String(text || "").match(/\b(?:I|we|me|my|our|us)\b/gi) || []).length,
+    secondPersonCount: (String(text || "").match(/\b(?:you|your|reader|readers)\b/gi) || []).length
+  };
+}
+
+function toneStyleFromText(text) {
+  const stats = sentenceStats(text);
+  const lower = String(text || "").toLowerCase();
+  const traits = [];
+  const preferences = [];
+  const avoids = [];
+
+  if (stats.averageSentenceLength && stats.averageSentenceLength <= 15) {
+    traits.push("short, punchy sentences");
+    preferences.push("keep momentum with compact paragraphs");
+  } else if (stats.averageSentenceLength >= 24) {
+    traits.push("longer, essay-like sentences");
+    preferences.push("allow developed arguments when the logic needs room");
+  } else {
+    traits.push("balanced sentence length");
+    preferences.push("mix short claims with slightly longer explanation");
+  }
+
+  if (stats.questionCount >= Math.max(2, Math.round(stats.sentenceCount * 0.08))) {
+    traits.push("rhetorical questions");
+    preferences.push("use questions to move the argument forward");
+  }
+
+  if (stats.firstPersonCount > stats.secondPersonCount) {
+    traits.push("first-person perspective");
+    preferences.push("let personal judgment show when it clarifies the claim");
+  } else if (stats.secondPersonCount > 0) {
+    traits.push("reader-facing phrasing");
+    preferences.push("speak directly to the reader without sounding salesy");
+  }
+
+  if (/\b(?:because|therefore|so|that is why|the point is|the trap is|the move is)\b/i.test(text)) {
+    traits.push("argument-led structure");
+    preferences.push("make causal links explicit");
+  }
+
+  if (/\b(?:API|SDK|developer|infrastructure|deploy|runtime|agent|model|workflow|platform)\b/i.test(text)) {
+    traits.push("technical examples");
+    preferences.push("ground abstract points in concrete product or developer examples");
+  }
+
+  if (/\b(?:amazing|game[- ]changer|revolutionary|magical|10x|insane|incredible)\b/i.test(lower)) {
+    avoids.push("trim hype words unless the user explicitly asks for promotional copy");
+  } else {
+    avoids.push("avoid hype, filler, and corporate gloss");
+  }
+
+  if (!traits.includes("argument-led structure")) traits.push("plainspoken clarity");
+  if (preferences.length < 3) preferences.push("prefer concrete nouns and active verbs");
+
+  return {
+    traits: traits.slice(0, 5),
+    preferences: preferences.slice(0, 5),
+    avoids: avoids.slice(0, 3)
+  };
+}
+
+function composeToneProfile({ sourceText, interviewAnswers = [], editorLanguage = "en-GB" }) {
+  const language = normalizeToneLanguage(editorLanguage);
+  const sampleText = cleanToneSourceText([sourceText, ...interviewAnswers].filter(Boolean).join(" "));
+  const style = toneStyleFromText(sampleText);
+  const answers = interviewAnswers.map((answer) => cleanToneSourceText(answer, 500)).filter(Boolean);
+  const audience = answers[0] ? `Write for ${answers[0].replace(/[.]+$/g, "")}.` : "";
+  const outcome = answers[1] ? `The reader should come away with: ${answers[1].replace(/[.]+$/g, "")}.` : "";
+  const avoid = answers[2] ? `Avoid: ${answers[2].replace(/[.]+$/g, "")}.` : style.avoids.join(" ");
+  const exemplar = answers[3] ? `Style reference: ${answers[3].replace(/[.]+$/g, "")}.` : "";
+  const editing = answers[4] ? `When editing: ${answers[4].replace(/[.]+$/g, "")}.` : "";
+  const languageRule = language === "en-GB" ? "Use British English spelling." : "Use American English spelling.";
+  const parts = [
+    "Audience and effect:",
+    audience,
+    outcome,
+    "Stance and evidence: be opinionated, claim-first, and evidence-led. Back advice with examples, numbers, mechanisms, or direct operating experience.",
+    `Structure and flow: use problem -> reframe -> practical guidance. Open with a concrete claim or familiar idea, then challenge or sharpen it. Use direct headings and short signposts.`,
+    `Sentence style: ${style.traits.join(", ")}. Mix short standalone sentences with compact explanatory paragraphs. Use fragments deliberately for emphasis.`,
+    `Language and diction: ${style.preferences.join("; ")}. Use plain verbs, concrete nouns, and product/growth vocabulary when it helps.`,
+    "Punctuation and rhythm: prefer full stops, short paragraphs, colons for frameworks, parentheses for compact clarifications, and spaced hyphens for asides. Avoid em dashes.",
+    "Rhetorical devices: use rhetorical questions, repetition, labels, and light business-friendly metaphors when they clarify the argument.",
+    exemplar,
+    editing,
+    avoid,
+    "Avoid AI-ish contrast scaffolds like 'this is not X, it is Y' unless the user explicitly wrote that structure.",
+    languageRule
+  ].filter(Boolean);
+  return clipText(parts.join(" "), toneOfVoiceMaxChars);
+}
+
+function extractUrlsFromText(value) {
+  return Array.from(String(value || "").matchAll(/\bhttps?:\/\/[^\s<>"')]+/gi)).map((match) =>
+    match[0].replace(/[.,;:!?]+$/g, "")
+  );
+}
+
+function extractToneInterviewUrls(messages) {
+  return uniqueToneItems(
+    normalizeToneInterviewMessages(messages).flatMap((message) => extractUrlsFromText(message.body)),
+    5
+  );
+}
+
+function normalizeToneInterviewMessages(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((message) => ({
+      role: message?.role === "agent" ? "agent" : "human",
+      body: cleanToneSourceText(message?.body, 2000)
+    }))
+    .filter((message) => message.body)
+    .slice(-20);
+}
+
+function toneInterviewAnswers(messages) {
+  return normalizeToneInterviewMessages(messages)
+    .filter((message) => message.role === "human")
+    .map((message) => message.body);
+}
+
+function nextToneInterviewQuestion(messages) {
+  const answers = toneInterviewAnswers(messages);
+  return toneInterviewQuestions[Math.min(answers.length, toneInterviewQuestions.length - 1)] || toneInterviewQuestions[0];
+}
+
+function buildToneInterviewPrompt({ messages, editorLanguage, currentTone, forceGenerate, sourceSamples = [] }) {
+  const normalizedMessages = normalizeToneInterviewMessages(messages);
+  const answers = toneInterviewAnswers(normalizedMessages);
+  const shouldGenerate = Boolean(forceGenerate) || answers.length >= toneInterviewQuestions.length;
+  const sourceText = cleanToneSourceText(sourceSamples.join("\n\n"), 18000);
+
+  return `You are Skribe's tone-of-voice interviewer.
+
+Conduct a short back-and-forth interview, then generate a reusable writing preference for Skribe's agent.
+
+Rules:
+- Do not edit files.
+- Reply only as valid JSON. No Markdown fences.
+- Ask these questions in order, one at a time:
+${toneInterviewQuestions.map((question, index) => `${index + 1}. ${question}`).join("\n")}
+- If not enough questions have been answered and forceGenerate is false, briefly acknowledge the latest answer if useful, then ask the next unanswered question.
+- Do not ask all questions at once.
+- If all questions have been answered, or forceGenerate is true, synthesize a complete toneOfVoice profile instead of asking another question.
+- If the transcript includes URLs and Reference writing samples are available below, use those samples to infer sentence structure, paragraph cadence, diction, punctuation, rhetorical devices, and recurring quirks.
+- The toneOfVoice should be an instruction string the writing agent can follow. Include these sections in prose: audience and desired effect; stance and evidence; structure and flow; sentence structure; paragraph style; diction and vocabulary; punctuation; rhetorical devices; figurative language; humour/personality; editing behaviour; avoidances; spelling convention.
+- Be specific enough for another agent to imitate the voice. Include concrete style constraints such as target sentence length, use of fragments, preferred transitions, headings/lists, repeated frameworks, punctuation choices, and phrases or structures to avoid.
+- Be concise, but do not truncate important constraints.
+- Use ${editorLanguage === "en-US" ? "American English" : "British English"} spelling guidance.
+- Preserve the user's actual preferences over generic archetypes.
+- Avoid recommending generic writing advice unless it is grounded in the transcript or reference samples.
+
+Output shape:
+{
+  "status": "asking" | "ready",
+  "reply": "short interviewer response or completion note",
+  "toneOfVoice": "empty unless status is ready"
+}
+
+Existing tone, if any:
+${currentTone || "(none)"}
+
+forceGenerate: ${shouldGenerate ? "true" : "false"}
+nextQuestionToAskIfNotReady: ${shouldGenerate ? "(none)" : nextToneInterviewQuestion(normalizedMessages)}
+
+Interview transcript:
+${JSON.stringify(normalizedMessages, null, 2)}
+
+Reference writing samples from linked content:
+${sourceText || "(none)"}
+`;
+}
+
+function normalizeToneInterviewOutput(output, { messages, editorLanguage, forceGenerate, sourceSamples = [], warnings = [] }) {
+  const answers = toneInterviewAnswers(messages);
+  const shouldGenerate = Boolean(forceGenerate) || answers.length >= toneInterviewQuestions.length;
+  const reply = clipText(output?.reply || output?.chatReply || agentOutputText(output), 800);
+  const toneOfVoice = cleanToneSourceText(output?.toneOfVoice, toneOfVoiceMaxChars);
+  const status = output?.status === "ready" || toneOfVoice ? "ready" : "asking";
+
+  if (status === "ready" && toneOfVoice) {
+    return {
+      status: "ready",
+      reply: reply || "I have enough to build your tone of voice.",
+      toneOfVoice,
+      warnings
+    };
+  }
+
+  if (shouldGenerate) {
+    return {
+      status: "ready",
+      reply: reply || "I have enough to build your tone of voice.",
+      toneOfVoice: composeToneProfile({ interviewAnswers: answers, sourceText: sourceSamples.join("\n\n"), editorLanguage }),
+      warnings: [
+        ...warnings,
+        "The agent did not return a tone profile, so Skribe generated a fallback from the interview transcript."
+      ]
+    };
+  }
+
+  return {
+    status: "asking",
+    reply: reply || nextToneInterviewQuestion(messages),
+    toneOfVoice: "",
+    warnings: []
+  };
+}
+
+function runStubToneInterview({ messages, editorLanguage, forceGenerate, sourceSamples = [], warnings = [] }) {
+  const answers = toneInterviewAnswers(messages);
+  if (forceGenerate || answers.length >= toneInterviewQuestions.length) {
+    return {
+      status: "ready",
+      reply: "I have enough to build your tone of voice.",
+      toneOfVoice: composeToneProfile({ interviewAnswers: answers, sourceText: sourceSamples.join("\n\n"), editorLanguage }),
+      warnings
+    };
+  }
+
+  return {
+    status: "asking",
+    reply: nextToneInterviewQuestion(messages),
+    toneOfVoice: "",
+    warnings: []
+  };
+}
+
+async function runToneInterview(body) {
+  const editorLanguage = normalizeToneLanguage(body?.editorLanguage);
+  const messages = normalizeToneInterviewMessages(body?.messages);
+  const forceGenerate = Boolean(body?.forceGenerate);
+  const currentTone = cleanToneSourceText(body?.currentTone, toneOfVoiceMaxChars);
+  const runtimeSelection = await resolveAgentRuntimeSelection(sessionWithAgentSettings(getDocument().agentSession, getSettings()));
+  const shouldGenerate = forceGenerate || toneInterviewAnswers(messages).length >= toneInterviewQuestions.length;
+  const warnings = [];
+  const sourceSamples = shouldGenerate
+    ? (await Promise.all(extractToneInterviewUrls(messages).map((url) => fetchToneSource(url, warnings)))).filter(
+        (text) => text.length >= 80
+      )
+    : [];
+
+  if (runtimeSelection.adapter.id === "stub") {
+    return runStubToneInterview({ messages, editorLanguage, forceGenerate, sourceSamples, warnings });
+  }
+
+  const turn = {
+    id: makeId("tone"),
+    source: "chat",
+    body: "Tone of voice interview",
+    createdAt: nowIso(),
+    skills: []
+  };
+  const output = await runtimeSelection.adapter.run({
+    turn,
+    prompt: buildToneInterviewPrompt({ messages, editorLanguage, currentTone, forceGenerate, sourceSamples }),
+    model: runtimeSelection.model,
+    effort: runtimeSelection.effort,
+    timeoutMs: agentTimeoutMs
+  });
+
+  return normalizeToneInterviewOutput(output, { messages, editorLanguage, forceGenerate, sourceSamples, warnings });
+}
+
+async function fetchToneSource(url, warnings) {
+  let parsed;
+  try {
+    parsed = new URL(String(url || "").trim());
+  } catch {
+    warnings.push(`Skipped invalid URL: ${url}`);
+    return "";
+  }
+
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    warnings.push(`Skipped unsupported URL: ${parsed.href}`);
+    return "";
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const response = await fetch(parsed.href, {
+      signal: controller.signal,
+      headers: {
+        "user-agent": "Skribe tone setup/0.1"
+      }
+    });
+    if (!response.ok) {
+      warnings.push(`Could not read ${parsed.href}: HTTP ${response.status}`);
+      return "";
+    }
+    const text = await response.text();
+    return stripHtmlToText(text).slice(0, 30000);
+  } catch (error) {
+    warnings.push(`Could not read ${parsed.href}: ${error instanceof Error ? error.message : String(error)}`);
+    return "";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function generateToneOfVoice(body) {
+  const mode = String(body?.mode || "").trim();
+  const editorLanguage = normalizeToneLanguage(body?.editorLanguage);
+  const warnings = [];
+
+  if (mode === "manual") {
+    const toneOfVoice = cleanToneSourceText(body?.manualText, toneOfVoiceMaxChars);
+    if (!toneOfVoice) throw new Error("Add a tone of voice before saving.");
+    return { toneOfVoice, sourceCount: 1, warnings };
+  }
+
+  if (mode === "archetype") {
+    const archetype = toneArchetypes[String(body?.archetypeId || "")] ?? toneArchetypes["direct-founder"];
+    const languageRule = editorLanguage === "en-GB" ? " Use British English spelling." : " Use American English spelling.";
+    return {
+      toneOfVoice: clipText(`${archetype.profile}${languageRule}`, toneOfVoiceMaxChars),
+      sourceCount: 1,
+      warnings
+    };
+  }
+
+  if (mode === "interview") {
+    const answers = uniqueToneItems(body?.interviewAnswers, 8).map((answer) => cleanToneSourceText(answer, 1200));
+    if (answers.join(" ").length < 20) throw new Error("Answer at least one interview prompt before generating a tone.");
+    return {
+      toneOfVoice: composeToneProfile({ interviewAnswers: answers, editorLanguage }),
+      sourceCount: answers.length,
+      warnings
+    };
+  }
+
+  if (mode === "links") {
+    const urls = uniqueToneItems(body?.urls, 5);
+    if (urls.length === 0) throw new Error("Add at least one URL.");
+    const sources = (await Promise.all(urls.map((url) => fetchToneSource(url, warnings)))).filter((text) => text.length >= 80);
+    if (sources.length === 0) throw new Error(warnings[0] || "Could not read enough writing from those links.");
+    return {
+      toneOfVoice: composeToneProfile({ sourceText: sources.join("\n\n"), editorLanguage }),
+      sourceCount: sources.length,
+      warnings
+    };
+  }
+
+  throw new Error("Unsupported tone setup mode.");
+}
+
 function makeLedgerEvent({ type, actor = "agent", summary, createdAt = nowIso(), threadId = null, proposalId = null, changeKey = null, metadata }) {
   return {
     id: makeId("mem"),
@@ -947,6 +1710,84 @@ function streamEvents(req, res) {
 async function handleApi(req, res) {
   const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
 
+  if (req.method === "GET" && url.pathname === "/api/settings") {
+    sendJson(res, 200, {
+      settings: getSettings(),
+      storage: {
+        configDir: appConfigDir,
+        dataDir,
+        settingsPath
+      }
+    });
+    return true;
+  }
+
+  if (req.method === "PUT" && url.pathname === "/api/settings") {
+    const body = await parseBody(req);
+    const requestedSettings = normalizeAppSettings({
+      ...getSettings(),
+      ...(body.settings && typeof body.settings === "object" ? body.settings : body)
+    });
+
+    let selectedRuntime;
+    try {
+      selectedRuntime = (
+        await validateAgentConfiguration(
+          {
+            configuredRuntime: requestedSettings.agentRuntime,
+            configuredModel: requestedSettings.agentModel,
+            configuredEffort: requestedSettings.agentEffort
+          },
+          { force: true }
+        )
+      ).selectedRuntime;
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      return true;
+    }
+
+    const settings = await setSettings(requestedSettings);
+    updateSession(
+      {
+        ...sessionWithAgentSettings(getDocument().agentSession, settings),
+        runtime: selectedRuntime || settings.agentRuntime,
+        lastError: null
+      },
+      "settings:update"
+    );
+    await checkpoint();
+
+    sendJson(res, 200, {
+      settings,
+      storage: {
+        configDir: appConfigDir,
+        dataDir,
+        settingsPath
+      }
+    });
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/tone/generate") {
+    const body = await parseBody(req);
+    try {
+      sendJson(res, 200, await generateToneOfVoice(body));
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/tone/interview") {
+    const body = await parseBody(req);
+    try {
+      sendJson(res, 200, await runToneInterview(body));
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
   if (req.method === "GET" && url.pathname === "/api/document") {
     sendJson(res, 200, getDocument());
     return true;
@@ -971,33 +1812,29 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const configuredRuntime = normalizeConfiguredRuntime(body.runtime);
     const configuredModel = normalizeConfiguredModel(body.model);
+    const configuredEffort = normalizeConfiguredEffort(body.effort);
 
-    if (configuredRuntime !== "auto" && !agentRuntimeAdapters[configuredRuntime]) {
-      sendJson(res, 400, { error: `Unknown agent runtime "${configuredRuntime}".` });
+    let selectedRuntime;
+    try {
+      selectedRuntime = (
+        await validateAgentConfiguration({ configuredRuntime, configuredModel, configuredEffort }, { force: true })
+      ).selectedRuntime;
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
       return true;
     }
 
-    const runtimes = await detectAgentRuntimes({ force: true });
-    const byId = new Map(runtimes.map((runtime) => [runtime.id, runtime]));
-    const selectedRuntime =
-      configuredRuntime === "auto" ? runtimePriority().find((id) => byId.get(id)?.available) ?? null : configuredRuntime;
-    const selectedStatus = selectedRuntime ? byId.get(selectedRuntime) : null;
-
-    if (configuredRuntime !== "auto" && selectedStatus && !selectedStatus.available) {
-      sendJson(res, 400, { error: `${selectedStatus.label} is not available.` });
-      return true;
-    }
-    if (configuredModel !== "auto" && selectedStatus && !selectedStatus.supportsManualModel) {
-      sendJson(res, 400, { error: `${selectedStatus.label} does not support model selection.` });
-      return true;
-    }
+    const settings = await setSettings({
+      ...getSettings(),
+      agentRuntime: configuredRuntime,
+      agentModel: configuredModel,
+      agentEffort: configuredEffort
+    });
 
     updateSession(
       {
-        configuredRuntime,
+        ...sessionWithAgentSettings(getDocument().agentSession, settings),
         runtime: selectedRuntime || configuredRuntime,
-        configuredModel,
-        model: configuredModel === "auto" ? null : configuredModel,
         lastError: null
       },
       "agent:config"
@@ -1006,7 +1843,8 @@ async function handleApi(req, res) {
 
     sendJson(res, 200, {
       document: getDocument(),
-      config: await agentRuntimeConfigResponse()
+      config: await agentRuntimeConfigResponse(),
+      settings: getSettings()
     });
     return true;
   }
@@ -1172,6 +2010,8 @@ async function handleApi(req, res) {
       configuredRuntime: session.configuredRuntime,
       model: session.model,
       configuredModel: session.configuredModel,
+      effort: session.effort,
+      configuredEffort: session.configuredEffort,
       docId: activeDocument.id,
       documentSource: activeDocument.source,
       markdownPath: activeDocument.markdownPath,
@@ -1215,6 +2055,8 @@ async function drainAgentQueue() {
           model: runtimeSelection.model,
           configuredRuntime: runtimeSelection.configuredRuntime,
           configuredModel: runtimeSelection.configuredModel,
+          effort: runtimeSelection.effort,
+          configuredEffort: runtimeSelection.configuredEffort,
           queueDepth: agentQueue.length,
           activeTurn: {
             id: turn.id,
@@ -1346,7 +2188,7 @@ function confirmsPendingDocumentProposal(body) {
   return latestAgentRequestedDocumentProposal();
 }
 
-function asksForDocumentProposal(turn) {
+function asksForDocumentProposal(turn, proposalModeDefault = getSettings().proposalModeDefault) {
   const body = String(turn.body || "").toLowerCase();
   if (isSkillOnlyTurn(turn)) return false;
 
@@ -1360,9 +2202,11 @@ function asksForDocumentProposal(turn) {
     /\b(show|send|return|give|create|prepare|generate|produce)\s+(?:me\s+)?(?:the\s+)?(?:full[- ]document\s+|reviewable\s+)?(?:diff|proposal|proposed changes|reviewable edit|reviewable edits|reviewable changes|edit pass|change set)\b/.test(
       body
     );
+  const focusedEditRequest = editVerb && /\b(this|selected|selection|paragraph|sentence|section|intro|opening|ending|summary|headline)\b/.test(body);
   const confirmationSignal = /\b(proceed|go ahead|do it|yes|confirm|confirmed|sounds good|looks good)\b/.test(body);
 
   return (
+    (proposalModeDefault === "bold" && focusedEditRequest) ||
     (editVerb && (broadTarget || reviewArtifact)) ||
     explicitDiffRequest ||
     (reviewArtifact && latestAgentRequestedDocumentProposal()) ||
@@ -1372,8 +2216,11 @@ function asksForDocumentProposal(turn) {
 }
 
 function inferTurnIntent(turn) {
+  const proposalModeDefault = getSettings().proposalModeDefault;
   if (isSkillOnlyTurn(turn)) return "skill_pass";
-  if (asksForDocumentProposal(turn)) return turn.source === "thread" ? "thread_document_proposal" : "document_proposal";
+  if (asksForDocumentProposal(turn, proposalModeDefault)) {
+    return turn.source === "thread" ? "thread_document_proposal" : "document_proposal";
+  }
   if (turn.source === "thread") return "anchored_thread";
   return "chat";
 }
@@ -1384,6 +2231,7 @@ function buildResponsePolicy(turn) {
   const allowDocumentProposals = intent === "document_proposal" || intent === "thread_document_proposal" || isSkillPass;
   return {
     intent,
+    proposalModeDefault: getSettings().proposalModeDefault,
     allowDocumentProposals,
     maxDocumentProposals: allowDocumentProposals ? 1 : 0,
     skillProposalMode: isSkillPass ? "agent_decides_from_skill_instructions" : "not_applicable",
@@ -1422,6 +2270,7 @@ function markdownForAgentTurn(turn) {
 function buildAgentContextPacket(turn) {
   const doc = getDocument();
   const review = normalizeReview(doc.review);
+  const settings = getSettings();
   const responsePolicy = buildResponsePolicy(turn);
   const openThreads = review.threads.filter((thread) => thread.status === "open");
   const activeThread = turn.threadId ? review.threads.find((thread) => thread.id === turn.threadId) : null;
@@ -1447,8 +2296,12 @@ function buildAgentContextPacket(turn) {
       markdownPath: activeDocument.markdownPath,
       title: review.title || titleFromMarkdown(doc.markdown),
       words: doc.markdown.split(/\s+/).filter(Boolean).length,
-      editorLanguage: review.settings?.editorLanguage ?? "en-GB",
+      editorLanguage: settings.editorLanguage,
       updatedAt: review.updatedAt
+    },
+    writingPreferences: {
+      toneOfVoice: settings.toneOfVoice,
+      editorLanguage: settings.editorLanguage
     },
     currentTurn: turn,
     responsePolicy,
@@ -1506,7 +2359,9 @@ Rules:
 - If the human names a skill in the message, or a skill clearly fits the writing task, use the runtime's skill mechanism when available.
 - Apply skill guidance to your answer; do not paste long skill instructions back into Skribe.
 - Respect document.editorLanguage for spelling conventions in replies and proposed edits.
+- Respect writingPreferences.toneOfVoice as the default style for replies and proposed edits. Current user instructions, requested skills, and anchored comment context override the global tone when they conflict.
 - Follow responsePolicy exactly.
+- If responsePolicy.proposalModeDefault is "conservative", ask before broad rewrites unless responsePolicy.allowDocumentProposals is true. If it is "bold", prefer reviewable documentProposals for edit requests that imply changing the draft.
 - If responsePolicy.allowDocumentProposals is false, do not return documentProposals. Use chatReply or threadReplies instead.
 - If responsePolicy.intent is "skill_pass", load and follow the requested skill instructions, then decide from those instructions and the human's wording whether the skill is meant to transform/rewrite/edit the current draft or only advise/review/analyze.
 - For transformational skill passes, return a documentProposals entry immediately with the full revised Markdown in replacementMarkdown. Do not ask for confirmation first when the skill itself is an instruction to rewrite, transform, humanize, adapt voice, copyedit, polish, or otherwise change the text.
@@ -1543,11 +2398,12 @@ async function runAgentRuntime(turn, runtimeSelection) {
     turn,
     prompt: buildAgentPrompt(turn),
     model: runtimeSelection.model,
+    effort: runtimeSelection.effort,
     timeoutMs: agentTimeoutMs
   });
 }
 
-async function runCodexAgent({ turn, prompt, model, timeoutMs }) {
+async function runCodexAgent({ turn, prompt, model, effort, timeoutMs }) {
   const outputPath = join(activeDocument.docDir, `.agent-output-${turn.id}.json`);
   const args = [
     "exec",
@@ -1561,6 +2417,7 @@ async function runCodexAgent({ turn, prompt, model, timeoutMs }) {
     "-"
   ];
   if (model) args.splice(1, 0, "--model", model);
+  if (effort) args.splice(1, 0, "-c", `model_reasoning_effort=${JSON.stringify(effort)}`);
 
   await appendEvent({ type: "agent:spawn", at: nowIso(), args: ["codex", ...args] });
 
@@ -1581,7 +2438,7 @@ async function runCodexAgent({ turn, prompt, model, timeoutMs }) {
   return parseAgentOutput(finalText);
 }
 
-async function runClaudeAgent({ prompt, model, timeoutMs }) {
+async function runClaudeAgent({ prompt, model, effort, timeoutMs }) {
   const args = [
     "--print",
     "--output-format",
@@ -1593,6 +2450,7 @@ async function runClaudeAgent({ prompt, model, timeoutMs }) {
     "--no-session-persistence"
   ];
   if (model) args.push("--model", model);
+  if (effort) args.push("--effort", effort);
 
   await appendEvent({ type: "agent:spawn", at: nowIso(), args: ["claude", ...args] });
 

@@ -353,8 +353,64 @@ export function serializeMarkdownBlocks(blocks: MarkdownBlock[]) {
     .concat("\n");
 }
 
+function clampMarkdownIndex(index: number, min: number, max: number) {
+  return Math.min(Math.max(index, min), max);
+}
+
+export function looksLikeMarkdownPaste(value: string) {
+  const text = value.trim();
+  if (!text) return false;
+
+  return (
+    /^#{1,6}\s+\S/m.test(text) ||
+    /^```/m.test(text) ||
+    /^\s*(?:[-*+]\s+|\d+\.\s+)/m.test(text) ||
+    /^\s*>\s+\S/m.test(text) ||
+    /\|.+\|\s*\n\s*\|?\s*:?-{3,}:?\s*(?:\||$)/m.test(text) ||
+    /\[[^\]\n]+\]\([^)]+\)/.test(text) ||
+    /(?:\*\*|__)[^*_]+(?:\*\*|__)/.test(text) ||
+    /`[^`\n]+`/.test(text) ||
+    /\n\s*\n/.test(text)
+  );
+}
+
+export function normalizeMarkdownPaste(value: string) {
+  const normalized = value.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return "";
+
+  const blocks = parseMarkdownBlocks(normalized);
+  return blocks.length > 0 ? serializeMarkdownBlocks(blocks).trimEnd() : normalized;
+}
+
+export function shouldPasteAsMarkdownBlocks(value: string) {
+  const normalized = value.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return false;
+
+  const blocks = parseMarkdownBlocks(normalized);
+  return blocks.length > 1 || blocks.some((block) => block.type !== "paragraph") || /\n\s*\n/.test(normalized);
+}
+
+export function spliceMarkdownPaste(markdown: string, start: number, end: number, insertion: string, blockMode: boolean) {
+  const safeStart = clampMarkdownIndex(Math.min(start, end), 0, markdown.length);
+  const safeEnd = clampMarkdownIndex(Math.max(start, end), safeStart, markdown.length);
+  const text = blockMode ? normalizeMarkdownPaste(insertion) : insertion.replace(/\r\n/g, "\n");
+  if (!text) return markdown;
+
+  if (!blockMode) {
+    return `${markdown.slice(0, safeStart)}${text}${markdown.slice(safeEnd)}`;
+  }
+
+  const before = markdown.slice(0, safeStart).trimEnd();
+  const after = markdown.slice(safeEnd).trimStart();
+  return [before, text.trim(), after].filter(Boolean).join("\n\n").trimEnd().concat("\n");
+}
+
 export function updateMarkdownBlock(markdown: string, blockId: string, text: string) {
   const blocks = parseMarkdownBlocks(markdown);
+  if (blocks.length === 0 && blockId === markdownBlockIdFromIndex(0)) {
+    return serializeMarkdownBlocks(text.trim() ? [{ id: blockId, type: "paragraph", text }] : []);
+  }
+
   return serializeMarkdownBlocks(
     blocks.flatMap((block) => {
       if (block.id !== blockId) return [block];
