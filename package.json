@@ -1,5 +1,5 @@
 {
-  "name": "skribe",
+  "name": "skribe-editor",
   "version": "0.1.0",
   "description": "Local-first Markdown writing and review workbench with AI chat, comments, and reviewable diffs.",
   "license": "MIT",
@@ -12,18 +12,36 @@
   },
   "homepage": "https://github.com/devtunehq/skribe#readme",
   "type": "module",
-  "bin": {
-    "skribe": "./bin/skribe.mjs"
+  "publishConfig": {
+    "access": "public"
   },
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "skribe": "bin/skribe.mjs"
+  },
+  "files": [
+    "bin/",
+    "server/",
+    "dist/",
+    "docs/screenshots/",
+    "README.md",
+    "LICENSE",
+    "PRODUCT.md"
+  ],
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
+    "prepack": "npm run build",
     "serve": "node server/index.mjs",
     "test": "node --test",
     "typecheck": "tsc -b"
   },
-  "dependencies": {
+  "devDependencies": {
     "@pierre/diffs": "^1.2.4",
+    "@types/react": "^19.2.15",
+    "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.0.4",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
@@ -32,9 +50,5 @@
     "remark-gfm": "^4.0.0",
     "typescript": "^5.7.2",
     "vite": "^6.0.3"
-  },
-  "devDependencies": {
-    "@types/react": "^19.2.15",
-    "@types/react-dom": "^19.2.3"
   }
 }

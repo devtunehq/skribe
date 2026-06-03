@@ -61,6 +61,23 @@ Requirements:
 - `npm`
 - Optional: Codex CLI or Claude Code if you want live agent replies
 
+Run without installing:
+
+```bash
+npx skribe-editor ~/draft.md
+```
+
+Or install globally:
+
+```bash
+npm install -g skribe-editor
+skribe ~/draft.md
+```
+
+Skribe starts a local server and prints the browser URL.
+
+## Run From Source
+
 Clone and run:
 
 ```bash
