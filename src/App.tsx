@@ -357,8 +357,10 @@ async function downloadTableAsPng(table: HTMLTableElement, filename: string) {
     context.fillStyle = "rgba(56, 56, 56, 0.72)";
     context.fillRect(tableX - 3, tableY + 3, width, height);
   }
-  context.fillStyle = isVisibleColor(tableStyle.backgroundColor) ? tableStyle.backgroundColor : "#ffffff";
-  context.fillRect(tableX, tableY, width, height);
+  if (isVisibleColor(tableStyle.backgroundColor)) {
+    context.fillStyle = tableStyle.backgroundColor;
+    context.fillRect(tableX, tableY, width, height);
+  }
 
   Array.from(table.rows).forEach((row) => {
     Array.from(row.cells).forEach((cell) => {
