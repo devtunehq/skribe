@@ -1481,6 +1481,7 @@ function prepareAgentTurnDraft(value: string, selectedSkillIds: string[], skills
 
 function isOlderDocument(candidate: DocumentState, current: DocumentState | null) {
   if (!current) return false;
+  if (candidate.id !== current.id) return false;
   const candidateTime = Date.parse(candidate.review?.updatedAt ?? "");
   const currentTime = Date.parse(current.review?.updatedAt ?? "");
   return Number.isFinite(candidateTime) && Number.isFinite(currentTime) && candidateTime < currentTime;
@@ -1611,8 +1612,33 @@ function App() {
 
   useEffect(() => {
     return subscribeToDocumentEvents((remote) => {
-      if (isOlderDocument(remote, stateRef.current)) return;
-      const shouldSkipRender = shouldAvoidDocumentRenderWhileEditing(remote);
+      const current = stateRef.current;
+      const switchedDocument = Boolean(current && remote.id !== current.id);
+      if (isOlderDocument(remote, current)) return;
+      const shouldSkipRender = switchedDocument ? false : shouldAvoidDocumentRenderWhileEditing(remote);
+      if (switchedDocument) {
+        if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+        if (liveEditTimerRef.current) window.clearTimeout(liveEditTimerRef.current);
+        saveTimerRef.current = null;
+        liveEditTimerRef.current = null;
+        undoStackRef.current = [];
+        redoStackRef.current = [];
+        selectionRangeRef.current = null;
+        linkRangeRef.current = null;
+        linkTargetRef.current = null;
+        stateEpochRef.current += 1;
+        setActiveThreadId(null);
+        setActiveBlockId(null);
+        setSelectionDraft(null);
+        setPendingSelectionDraft(null);
+        setFloatingToolbar(null);
+        setSelectionContextMenu(null);
+        setLinkPopover(null);
+        setReplyDrafts({});
+        setThreadSkillIds({});
+        setBlockResetKeys({});
+        refreshRevisions();
+      }
       stateRef.current = remote;
       if (!shouldSkipRender) setDocumentState(remote);
       if (remote.agentSession) {
@@ -2106,9 +2132,11 @@ function App() {
     const rect = rects[0] ?? range.getBoundingClientRect();
     if (!rect || rect.width === 0 || rect.height === 0) return null;
 
-    const toolbarWidth = 430;
+    const toolbarWidth = Math.min(430, window.innerWidth - 20);
     const toolbarHeight = 42;
     const margin = 10;
+    const minLeft = margin + toolbarWidth / 2;
+    const maxLeft = Math.max(minLeft, window.innerWidth - margin - toolbarWidth / 2);
     const placement = rect.top > toolbarHeight + margin * 2 ? "above" : "below";
     const top =
       placement === "above"
@@ -2116,7 +2144,7 @@ function App() {
         : Math.min(window.innerHeight - toolbarHeight - margin, rect.bottom + margin);
 
     return {
-      left: clamp(rect.left + rect.width / 2, margin + toolbarWidth / 2, window.innerWidth - margin - toolbarWidth / 2),
+      left: clamp(rect.left + rect.width / 2, minLeft, maxLeft),
       top,
       placement
     };
@@ -3706,7 +3734,9 @@ function App() {
     >
       <header className="topbar">
         <div className="brand">
-          <div className="brand-mark">S</div>
+          <div className="brand-mark" aria-hidden="true">
+            <img src="/skribe-icon.png" alt="" />
+          </div>
           <div>
             <strong>Skribe</strong>
             <span title={documentState.fileInfo?.displayPath || documentState.fileInfo?.markdownPath}>

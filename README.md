@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="public/skribe-icon.png" alt="Skribe app icon" width="96" height="96">
+</p>
+
 # Skribe
 
 Local-first Markdown writing with an AI review partner.
@@ -75,6 +79,32 @@ skribe ~/draft.md
 ```
 
 Skribe starts a local server and prints the browser URL.
+
+## Opening Multiple Documents
+
+Skribe runs one local app instance and keeps one document open at a time.
+
+The first command starts the local server:
+
+```bash
+skribe ~/draft-one.md
+```
+
+If Skribe is already running, another command hands the new file to the existing server instead of starting a second server:
+
+```bash
+skribe ~/draft-two.md
+```
+
+The existing browser tab switches to `draft-two.md`, and the second terminal command exits after printing the running app URL. The previous document is saved before the switch, and each Markdown file keeps its own comments, chat, proposals, revisions, and agent session sidecar state.
+
+If an agent turn is running, Skribe will not switch documents until that turn finishes. This prevents an agent response from being applied to the wrong draft.
+
+If port `4327` is already used by another app, Skribe prints a clear port conflict message. Use a different port if needed:
+
+```bash
+PORT=4330 skribe ~/draft.md
+```
 
 ## Run From Source
 

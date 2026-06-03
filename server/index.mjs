@@ -30,9 +30,12 @@ const defaultConfiguredEffort = normalizeConfiguredEffort(
 const agentTimeoutMs = Number(process.env.SKRIBE_AGENT_TIMEOUT_MS || 600000);
 const toneOfVoiceMaxChars = Math.max(1200, Number(process.env.SKRIBE_TONE_OF_VOICE_MAX_CHARS || 6000));
 const port = Number(process.env.PORT || 4327);
+const host = "127.0.0.1";
+const appUrl = `http://${host}:${port}`;
 const skillRegistryTtlMs = 30000;
 const runtimeRegistryTtlMs = 30000;
-const activeDocument = resolveActiveDocument(requestedDocumentPath());
+const requestedMarkdownArg = requestedDocumentPath();
+let activeDocument = resolveActiveDocument(requestedMarkdownArg);
 
 const defaultSettings = {
   version: 1,
@@ -101,7 +104,9 @@ const contentTypes = {
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".svg": "image/svg+xml",
+  ".png": "image/png",
   ".json": "application/json; charset=utf-8",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
   ".ico": "image/x-icon",
   ".txt": "text/plain; charset=utf-8"
 };
@@ -356,6 +361,62 @@ function resolveActiveDocument(markdownArg) {
     title: titleFromPath(markdownPath),
     markdownPath
   });
+}
+
+async function handOffToExistingServer(markdownArg) {
+  const health = await requestExistingServer("/api/health");
+  if (!isSkribeHealthResponse(health.payload)) return false;
+
+  if (!markdownArg) {
+    console.log(`Skribe is already running at ${appUrl}`);
+    if (health.payload.markdownPath) console.log(`Document: ${health.payload.markdownPath}`);
+    return true;
+  }
+
+  const response = await requestExistingServer("/api/documents/open", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ markdownPath: activeDocument.markdownPath })
+  });
+
+  if (!response.ok) {
+    const message = response.payload?.error || `Existing Skribe server could not open ${activeDocument.markdownPath}`;
+    console.error(message);
+    process.exitCode = 1;
+    return true;
+  }
+
+  const document = response.payload?.document;
+  console.log(`Skribe is already running at ${appUrl}`);
+  console.log(`Opened: ${document?.fileInfo?.markdownPath || activeDocument.markdownPath}`);
+  return true;
+}
+
+async function requestExistingServer(path, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 750);
+  try {
+    const response = await fetch(`${appUrl}${path}`, {
+      ...options,
+      signal: controller.signal
+    });
+    const contentType = response.headers.get("content-type") || "";
+    const payload = contentType.includes("application/json") ? await response.json() : null;
+    return { ok: response.ok, status: response.status, payload };
+  } catch {
+    return { ok: false, status: 0, payload: null };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function isSkribeHealthResponse(payload) {
+  return Boolean(
+    payload &&
+      typeof payload === "object" &&
+      payload.ok === true &&
+      (payload.app === "skribe" || (payload.storage === "memory-first" && typeof payload.markdownPath === "string"))
+  );
 }
 
 function slugSkillName(name) {
@@ -929,6 +990,34 @@ async function loadDocumentIntoMemory() {
   await touchDocumentRegistry();
 
   return documentMemory;
+}
+
+async function openDocument(markdownArg) {
+  if (agentRunning || agentQueue.length > 0 || getDocument().agentSession?.status === "running") {
+    throw new Error("Cannot open another document while an agent turn is running.");
+  }
+
+  const nextDocument = resolveActiveDocument(markdownArg || null);
+  if (nextDocument.id === activeDocument.id) {
+    await flushPendingCheckpoint();
+    return getDocument();
+  }
+
+  await flushPendingCheckpoint();
+  activeDocument = nextDocument;
+  documentMemory = null;
+  await loadDocumentIntoMemory();
+  broadcast("document", getDocument());
+  await appendEvent({ type: "document:open", at: nowIso(), markdownPath: activeDocument.markdownPath });
+  return getDocument();
+}
+
+async function flushPendingCheckpoint() {
+  if (checkpointTimer) {
+    clearTimeout(checkpointTimer);
+    checkpointTimer = null;
+  }
+  await checkpoint();
 }
 
 function normalizeReview(review) {
@@ -1610,6 +1699,7 @@ function updateDocument(updater, reason) {
 function scheduleCheckpoint() {
   if (checkpointTimer) clearTimeout(checkpointTimer);
   checkpointTimer = setTimeout(() => {
+    checkpointTimer = null;
     checkpoint().catch((error) => console.error("checkpoint failed", error));
   }, 250);
 }
@@ -1790,6 +1880,20 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/document") {
     sendJson(res, 200, getDocument());
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/documents/open") {
+    const body = await parseBody(req);
+    try {
+      const document = await openDocument(typeof body.markdownPath === "string" && body.markdownPath.trim() ? body.markdownPath : null);
+      sendJson(res, 200, {
+        document,
+        revisions: await getRevisionResponse()
+      });
+    } catch (error) {
+      sendJson(res, 409, { error: error instanceof Error ? error.message : String(error) });
+    }
     return true;
   }
 
@@ -2004,6 +2108,7 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/health") {
     const session = normalizeAgentSession(getDocument().agentSession);
     sendJson(res, 200, {
+      app: "skribe",
       ok: true,
       storage: "memory-first",
       runtime: session.runtime,
@@ -2866,25 +2971,57 @@ function serveStatic(req, res) {
   createReadStream(filePath).pipe(res);
 }
 
+function createAppServer() {
+  return createServer(async (req, res) => {
+    try {
+      if (req.url?.startsWith("/api/")) {
+        const handled = await handleApi(req, res);
+        if (!handled) sendJson(res, 404, { error: "Not found" });
+        return;
+      }
+
+      serveStatic(req, res);
+    } catch (error) {
+      console.error(error);
+      sendJson(res, 500, { error: "Internal server error" });
+    }
+  });
+}
+
+async function startServer() {
+  const server = createAppServer();
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, host, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  return server;
+}
+
+if (await handOffToExistingServer(requestedMarkdownArg)) {
+  process.exit(process.exitCode ?? 0);
+}
+
 await loadDocumentIntoMemory();
 
-createServer(async (req, res) => {
-  try {
-    if (req.url?.startsWith("/api/")) {
-      const handled = await handleApi(req, res);
-      if (!handled) sendJson(res, 404, { error: "Not found" });
-      return;
+try {
+  await startServer();
+} catch (error) {
+  if (error?.code === "EADDRINUSE") {
+    if (await handOffToExistingServer(requestedMarkdownArg)) {
+      process.exit(process.exitCode ?? 0);
     }
-
-    serveStatic(req, res);
-  } catch (error) {
-    console.error(error);
-    sendJson(res, 500, { error: "Internal server error" });
+    console.error(`Skribe could not start because ${appUrl} is already in use by another process.`);
+    console.error("Stop that process, or start Skribe with a different PORT value.");
+    process.exit(1);
   }
-}).listen(port, "127.0.0.1", () => {
-  console.log(`Skribe running at http://127.0.0.1:${port}`);
-  console.log(`Document: ${activeDocument.markdownPath}`);
-  console.log(`Review state: ${activeDocument.docDir}`);
-  console.log(`Agent runtime: ${getDocument().agentSession.configuredRuntime}`);
-  console.log(`Agent model: ${getDocument().agentSession.configuredModel}`);
-});
+  throw error;
+}
+
+console.log(`Skribe running at ${appUrl}`);
+console.log(`Document: ${activeDocument.markdownPath}`);
+console.log(`Review state: ${activeDocument.docDir}`);
+console.log(`Agent runtime: ${getDocument().agentSession.configuredRuntime}`);
+console.log(`Agent model: ${getDocument().agentSession.configuredModel}`);

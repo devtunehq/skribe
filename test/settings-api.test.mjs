@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,12 +31,12 @@ async function waitForServer(baseUrl, process, timeoutMs = 8000) {
   throw new Error(`server did not start: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
-async function startServer() {
+async function startServer(options = {}) {
   const configDir = await mkdtemp(join(tmpdir(), "skribe-config-"));
   const dataDir = await mkdtemp(join(tmpdir(), "skribe-data-"));
-  const port = 46000 + Math.floor(Math.random() * 1000);
+  const port = options.port ?? 46000 + Math.floor(Math.random() * 1000);
   const baseUrl = `http://127.0.0.1:${port}`;
-  const child = spawn("node", ["server/index.mjs"], {
+  const child = spawn("node", ["server/index.mjs", ...(options.args ?? [])], {
     cwd: root,
     env: {
       ...process.env,
@@ -71,6 +71,28 @@ async function startServer() {
       await rm(dataDir, { recursive: true, force: true });
     }
   };
+}
+
+async function runSkribeInvocation({ port, configDir, dataDir, args = [] }) {
+  const child = spawn("node", ["server/index.mjs", ...args], {
+    cwd: root,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      SKRIBE_CONFIG_DIR: configDir,
+      SKRIBE_DATA_DIR: dataDir,
+      SKRIBE_AGENT_RUNTIME: "stub",
+      SKRIBE_AGENT_MODEL: "auto",
+      SKRIBE_AGENT_EFFORT: "auto"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  const output = [];
+  child.stdout.on("data", (chunk) => output.push(chunk.toString()));
+  child.stderr.on("data", (chunk) => output.push(chunk.toString()));
+  const [code] = await once(child, "exit");
+  return { code, output: output.join("") };
 }
 
 async function jsonRequest(baseUrl, path, options = {}) {
@@ -150,6 +172,38 @@ test("settings API persists all global settings to the config directory", async 
     assert.match(health.payload.markdownPath, new RegExp(server.dataDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   } finally {
     await server.stop();
+  }
+});
+
+test("a second invocation opens another document in the running server", async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), "skribe-open-doc-"));
+  const firstPath = join(rootDir, "first.md");
+  const secondPath = join(rootDir, "second.md");
+  await writeFile(firstPath, "# First\n\nOne.", "utf8");
+  await writeFile(secondPath, "# Second\n\nTwo.", "utf8");
+
+  const server = await startServer({ args: [firstPath] });
+  try {
+    const initial = await jsonRequest(server.baseUrl, "/api/health");
+    assert.equal(initial.payload.markdownPath, firstPath);
+
+    const handoff = await runSkribeInvocation({
+      port: Number(new URL(server.baseUrl).port),
+      configDir: server.configDir,
+      dataDir: server.dataDir,
+      args: [secondPath]
+    });
+
+    assert.equal(handoff.code, 0);
+    assert.match(handoff.output, /Skribe is already running/);
+    assert.doesNotMatch(handoff.output, /EADDRINUSE/);
+
+    const opened = await jsonRequest(server.baseUrl, "/api/document");
+    assert.equal(opened.payload.fileInfo.markdownPath, secondPath);
+    assert.match(opened.payload.markdown, /# Second/);
+  } finally {
+    await server.stop();
+    await rm(rootDir, { recursive: true, force: true });
   }
 });
 

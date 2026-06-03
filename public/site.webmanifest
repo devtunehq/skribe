@@ -1,0 +1,14 @@
+{
+  "name": "Skribe",
+  "short_name": "Skribe",
+  "icons": [
+    {
+      "src": "/skribe-icon.png",
+      "sizes": "1254x1254",
+      "type": "image/png"
+    }
+  ],
+  "theme_color": "#f4efea",
+  "background_color": "#f4efea",
+  "display": "standalone"
+}
