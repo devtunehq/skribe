@@ -22,6 +22,17 @@ Skribe is built around the document:
 - **Local-only storage** for the Markdown file, review state, settings, revisions, and sidecars.
 - **Provider-agnostic agent runtime** with support for Codex CLI, Claude Code, or automatic runtime selection.
 
+## Threads vs Chat
+
+Skribe has two agent conversation surfaces because they serve different editorial jobs.
+
+| Surface | Use it for | What the agent sees |
+| --- | --- | --- |
+| **Threads** | Anchored comments on selected text, paragraph-level rewrites, local clarification, and focused suggestions. | The selected passage, the thread history, relevant document context, and previous decisions. |
+| **Chat** | Article-level discussion, broad review passes, structural edits, skill-driven rewrites, and document-level diffs. | The wider document, chat history, context memory, open proposals, thread decisions, and selected skills. |
+
+Use Threads when the question belongs to a specific passage. Use Chat when the question belongs to the whole draft.
+
 ## Screenshots
 
 ### Editor
@@ -165,7 +176,7 @@ npm run build
 
 ## Project Status
 
-Skribe is early and intentionally local-first. It is useful today for Markdown drafting and AI-assisted review, but the editor and agent workflow are still being hardened. Issues and focused PRs are welcome.
+Skribe is early and intentionally local-first. It is useful today for Markdown drafting and AI-assisted review, but the editor and agent workflow are still being hardened. The source is public for transparency and local use, but external contributions are not open at this stage.
 
 ## License
 

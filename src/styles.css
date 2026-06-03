@@ -2463,14 +2463,16 @@ select:focus,
 /* ---------- Chat panel ---------- */
 
 .panel-body.chat-panel {
-  display: grid;
-  grid-template-rows: auto 1fr auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   height: calc(100vh - 116px);
   min-height: 0;
   overflow: hidden;
 }
 
 .chat-stack {
+  flex: 1 1 auto;
   overflow: auto;
   min-height: 0;
   align-content: start;
@@ -2552,10 +2554,17 @@ select:focus,
 }
 
 .chat-composer {
-  position: sticky;
-  bottom: 0;
-  background: var(--canvas-oat);
-  padding-top: 8px;
+  flex: 0 0 auto;
+  margin-top: 0;
+  background: var(--paper-white);
+}
+
+.chat-composer .skill-composer {
+  gap: 10px;
+}
+
+.chat-composer textarea {
+  min-height: 112px;
 }
 
 .empty-note {
