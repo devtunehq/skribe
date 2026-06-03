@@ -35,7 +35,9 @@
     "build": "tsc -b && vite build",
     "prepack": "npm run build",
     "serve": "node server/index.mjs",
-    "test": "node --test",
+    "test": "node --test test/*.test.mjs",
+    "test:coverage": "node --experimental-test-coverage --test test/*.test.mjs",
+    "test:e2e": "npm run build && node --test test/e2e/*.test.mjs",
     "typecheck": "tsc -b"
   },
   "devDependencies": {
