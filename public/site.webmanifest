@@ -3,8 +3,8 @@
   "short_name": "Skribe",
   "icons": [
     {
-      "src": "/skribe-icon.png",
-      "sizes": "1254x1254",
+      "src": "/skribe-icon.png?v=2",
+      "sizes": "1024x1024",
       "type": "image/png"
     }
   ],

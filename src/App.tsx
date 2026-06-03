@@ -3735,7 +3735,7 @@ function App() {
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark" aria-hidden="true">
-            <img src="/skribe-icon.png" alt="" />
+            <img src="/skribe-icon.png?v=2" alt="" />
           </div>
           <div>
             <strong>Skribe</strong>

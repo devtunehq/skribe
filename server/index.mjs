@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { cp, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
-import { basename, delimiter, dirname, extname, join, normalize, resolve } from "node:path";
+import { basename, delimiter, dirname, extname, join, normalize, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -2964,9 +2964,11 @@ function serveStatic(req, res) {
   }
 
   const ext = extname(filePath);
+  const relativeFilePath = relative(distDir, filePath).replaceAll("\\", "/");
+  const isFingerprintedAsset = relativeFilePath.startsWith("assets/");
   res.writeHead(200, {
     "content-type": contentTypes[ext] || "application/octet-stream",
-    "cache-control": ext === ".html" ? "no-store" : "public, max-age=31536000, immutable"
+    "cache-control": ext === ".html" || !isFingerprintedAsset ? "no-store" : "public, max-age=31536000, immutable"
   });
   createReadStream(filePath).pipe(res);
 }
