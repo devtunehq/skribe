@@ -154,7 +154,7 @@ button {
 
 .topbar {
   display: grid;
-  grid-template-columns: 260px minmax(220px, 1fr) auto;
+  grid-template-columns: minmax(180px, 1fr) auto;
   gap: 16px;
   align-items: center;
   min-height: 64px;
@@ -207,28 +207,6 @@ button {
   color: var(--muted);
   font-size: 12px;
   margin-top: 2px;
-}
-
-.title-input {
-  width: 100%;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--text);
-  font-size: 18px;
-  font-weight: 600;
-  padding: 8px 10px;
-  min-width: 0;
-  border-radius: var(--radius);
-}
-
-.title-input:hover {
-  border-color: var(--line);
-}
-
-.title-input:focus {
-  outline: none;
-  border-color: var(--sky-blue);
-  background: var(--smoke-gray);
 }
 
 .topbar-actions {
@@ -1721,7 +1699,6 @@ blockquote {
 
 textarea,
 select,
-input.title-input,
 .skill-search input {
   width: 100%;
   border: 1px solid var(--line-ink);
@@ -3084,7 +3061,7 @@ select:focus,
 
 @media (max-width: 1180px) {
   .topbar {
-    grid-template-columns: minmax(150px, 210px) minmax(180px, 1fr) auto;
+    grid-template-columns: minmax(150px, 1fr) auto;
     gap: 10px;
     padding-inline: 14px;
   }
@@ -3125,11 +3102,6 @@ select:focus,
     gap: 8px 12px;
   }
 
-  .title-input {
-    grid-column: 1 / -1;
-    grid-row: 2;
-  }
-
   .workspace {
     display: flex;
     flex-direction: column;
@@ -3138,8 +3110,8 @@ select:focus,
 
   .center-pane {
     order: 1;
-    min-height: calc(100vh - 116px);
-    min-height: calc(100dvh - 116px);
+    min-height: calc(100vh - 64px);
+    min-height: calc(100dvh - 64px);
     max-height: none;
   }
 
@@ -3216,12 +3188,6 @@ select:focus,
   .brand-mark {
     width: 38px;
     height: 38px;
-  }
-
-  .title-input {
-    grid-row: auto;
-    padding: 7px 8px;
-    font-size: 16px;
   }
 
   .topbar-actions {

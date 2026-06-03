@@ -45,6 +45,12 @@ Rendered Markdown stays editable, with a compact toolbar and collapsible sidebar
 
 ![Skribe editor](docs/screenshots/editor.png)
 
+### Threads
+
+Anchor comments to highlighted passages, discuss the local edit, and review focused replacement suggestions.
+
+![Skribe threads](docs/screenshots/threads.png)
+
 ### Chat
 
 Use chat for article-level discussion, skill-driven passes, and reviewable document diffs.

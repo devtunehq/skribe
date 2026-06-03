@@ -3582,17 +3582,6 @@ function App() {
     }
   }
 
-  function updateTitle(title: string) {
-    commit((state) => ({
-      ...state,
-      review: {
-        ...state.review,
-        title,
-        updatedAt: nowIso()
-      }
-    }));
-  }
-
   async function copyText(text: string, label: string) {
     await writeClipboardPayload({ plainText: text }, label);
   }
@@ -3744,15 +3733,6 @@ function App() {
             </span>
           </div>
         </div>
-
-        <input
-          className="title-input"
-          value={documentState.review.title}
-          onChange={(event) => updateTitle(event.target.value)}
-          lang={editorLanguage}
-          spellCheck
-          aria-label="Document title"
-        />
 
         <div className="topbar-actions">
           <div className={`agent-config-shell ${isAgentConfigOpen ? "is-open" : ""}`}>
