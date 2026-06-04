@@ -6,7 +6,9 @@
 
 Local-first Markdown writing with an AI review partner.
 
-Skribe gives you an editable Markdown canvas, anchored comment threads, chat, reviewable diffs, revision history, and clean Markdown export. The document stays local. Review state stays local. Agent calls run through a local CLI runtime such as Codex or Claude Code.
+Skribe gives you an editable Markdown canvas, anchored comment threads, chat, reviewable diffs, revision history, and clean Markdown export. The document stays local. Review state stays local.
+
+**Bring your own AI subscription.** Skribe uses the native agent CLIs you already have installed, such as Codex CLI or Claude Code. If your local CLI is signed in and working, Skribe can use it.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -24,7 +26,7 @@ Skribe is built around the document:
 - **Reviewable diffs** so agent edits can be accepted, declined, or revised before they touch the draft.
 - **Per-document context memory** so previous comments, decisions, accepted changes, and revision requests stay available to the agent.
 - **Local-only storage** for the Markdown file, review state, settings, revisions, and sidecars.
-- **Provider-agnostic agent runtime** with support for Codex CLI, Claude Code, or automatic runtime selection.
+- **Provider-agnostic agent runtime** with support for Codex CLI, Claude Code, or automatic runtime selection using your existing CLI authentication and provider plan.
 
 ## Threads vs Chat
 
@@ -69,7 +71,7 @@ Requirements:
 
 - Node.js 20 or newer
 - `npm`
-- Optional: Codex CLI or Claude Code if you want live agent replies
+- Optional: Codex CLI or Claude Code if you want live agent replies from your existing provider subscription
 
 Run without installing:
 
@@ -146,6 +148,8 @@ Skribe keeps the `.md` file as the clean document source. Comments, chat, propos
 ## Agent Runtime
 
 Skribe invokes an external CLI behind the scenes. It does not hard-code one model provider.
+
+That means your normal CLI setup still owns authentication, model access, limits, and billing. Use Codex CLI if that is where you work. Use Claude Code if that is where you work. Leave Skribe on `auto` if you want it to pick the first healthy local runtime.
 
 ```bash
 SKRIBE_AGENT_RUNTIME=auto npm run serve -- ~/draft.md
