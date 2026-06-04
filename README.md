@@ -23,6 +23,7 @@ Skribe is built around the document:
 - **Editable rendered Markdown canvas** with headings, links, lists, quotes, code, GFM tables, copy/paste, and keyboard shortcuts.
 - **Anchored comment threads** for paragraph-level or selection-level review.
 - **Document chat** for broader passes, structural edits, and agent collaboration.
+- **Agent skills** for reusable writing passes such as voice, humanising, copyediting, newsletter review, or any local skill your CLI runtime already knows about.
 - **Reviewable diffs** so agent edits can be accepted, declined, or revised before they touch the draft.
 - **Per-document context memory** so previous comments, decisions, accepted changes, and revision requests stay available to the agent.
 - **Local-only storage** for the Markdown file, review state, settings, revisions, and sidecars.
@@ -38,6 +39,36 @@ Skribe has two agent conversation surfaces because they serve different editoria
 | **Chat** | Article-level discussion, broad review passes, structural edits, skill-driven rewrites, and document-level diffs. | The wider document, chat history, context memory, open proposals, thread decisions, and selected skills. |
 
 Use Threads when the question belongs to a specific passage. Use Chat when the question belongs to the whole draft.
+
+## Skills
+
+Skribe treats skills as reusable instructions for the agent.
+
+It discovers local `SKILL.md` files from:
+
+- `~/.agents/skills`
+- `~/.claude/skills`
+- `~/.codex/skills`
+- `~/.codex/plugins/cache`
+- Any extra directories listed in `SKRIBE_SKILL_ROOTS`
+
+Skills show up in the chat and thread composers. You can click **Skills** to browse them, type `/skill-name` for autocomplete, or set favourite defaults in Settings.
+
+When you send a message, Skribe passes the selected skills to the active agent runtime. The native CLI is then instructed to load and follow those local skill instructions before replying. That keeps the integration provider-agnostic: Codex CLI, Claude Code, and future runtimes can use the same Skribe UI while relying on their own local skill support.
+
+You can also send a skill by itself:
+
+```text
+/humanizer
+```
+
+In that case Skribe asks the agent to apply the skill to the current writing context and return reviewable suggestions or document proposals when edits are useful.
+
+To add another skill directory:
+
+```bash
+SKRIBE_SKILL_ROOTS=~/company/skills:~/personal/skills skribe ~/draft.md
+```
 
 ## Screenshots
 

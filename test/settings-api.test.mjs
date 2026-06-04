@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,7 +45,8 @@ async function startServer(options = {}) {
       SKRIBE_DATA_DIR: dataDir,
       SKRIBE_AGENT_RUNTIME: "stub",
       SKRIBE_AGENT_MODEL: "auto",
-      SKRIBE_AGENT_EFFORT: "auto"
+      SKRIBE_AGENT_EFFORT: "auto",
+      ...(options.env ?? {})
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -204,6 +205,41 @@ test("a second invocation opens another document in the running server", async (
   } finally {
     await server.stop();
     await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("skills API discovers Claude Code skills from the default home directory", async () => {
+  const homeDir = await mkdtemp(join(tmpdir(), "skribe-home-"));
+  const skillDir = join(homeDir, ".claude", "skills", "sharp-editor");
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(
+    join(skillDir, "SKILL.md"),
+    `---
+name: sharp-editor
+description: Tighten long-form writing with direct editorial feedback.
+---
+
+# Sharp Editor
+`,
+    "utf8"
+  );
+
+  const server = await startServer({ env: { HOME: homeDir } });
+  try {
+    const skills = await jsonRequest(server.baseUrl, "/api/skills");
+    assert.equal(skills.response.status, 200);
+    assert.ok(
+      skills.payload.skills.some(
+        (skill) =>
+          skill.id === "sharp-editor" &&
+          skill.name === "sharp-editor" &&
+          skill.description === "Tighten long-form writing with direct editorial feedback." &&
+          skill.source === "local"
+      )
+    );
+  } finally {
+    await server.stop();
+    await rm(homeDir, { recursive: true, force: true });
   }
 });
 

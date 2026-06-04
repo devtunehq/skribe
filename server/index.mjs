@@ -449,6 +449,7 @@ function defaultSkillRoots() {
   return [
     process.env.SKRIBE_SKILL_ROOTS,
     home ? join(home, ".agents", "skills") : null,
+    home ? join(home, ".claude", "skills") : null,
     home ? join(home, ".codex", "skills") : null,
     home ? join(home, ".codex", "plugins", "cache") : null
   ]
@@ -460,7 +461,7 @@ function defaultSkillRoots() {
 
 function skillSourceForPath(path) {
   if (path.includes(`${join(".codex", "plugins", "cache")}`) || path.includes("/.codex/plugins/cache/")) return "plugin";
-  if (path.includes("/.agents/skills/") || path.includes("/.codex/skills/")) return "local";
+  if (path.includes("/.agents/skills/") || path.includes("/.claude/skills/") || path.includes("/.codex/skills/")) return "local";
   return "configured";
 }
 
