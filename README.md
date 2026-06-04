@@ -59,6 +59,12 @@ Use chat for article-level discussion, skill-driven passes, and reviewable docum
 
 ![Skribe chat](docs/screenshots/chat.png)
 
+### Diff Review
+
+Review proposed document changes inline, then accept, decline, rewrite, or comment on each change block.
+
+![Skribe diff review](docs/screenshots/diff.png)
+
 ### Settings
 
 Persist tone of voice, language, agent runtime, model, effort, default skills, and review preferences.
