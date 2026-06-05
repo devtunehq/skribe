@@ -24,7 +24,7 @@ Skribe is built around the document:
 - **Anchored comment threads** for paragraph-level or selection-level review.
 - **Document chat** for broader passes, structural edits, and agent collaboration.
 - **Agent skills** for reusable writing passes such as voice, humanising, copyediting, newsletter review, or any local skill your CLI runtime already knows about.
-- **Reviewable diffs** so agent edits can be accepted, declined, or revised before they touch the draft.
+- **Reviewable diffs** in split or unified view, so agent edits can be accepted, declined, or revised before they touch the draft.
 - **Per-document context memory** so previous comments, decisions, accepted changes, and revision requests stay available to the agent.
 - **Local-only storage** for the Markdown file, review state, settings, revisions, and sidecars.
 - **Local image assets** from inserted, pasted, or dropped images, stored beside the active Markdown document and referenced with normal Markdown image syntax.
@@ -56,6 +56,17 @@ It discovers local `SKILL.md` files from:
 Skills show up in the chat and thread composers. You can click **Skills** to browse them, type `/skill-name` for autocomplete, or set favourite defaults in Settings.
 
 When you send a message, Skribe passes the selected skills to the active agent runtime. The native CLI is then instructed to load and follow those local skill instructions before replying. That keeps the integration provider-agnostic: Codex CLI, Claude Code, and future runtimes can use the same Skribe UI while relying on their own local skill support.
+
+Skills describe *how* the agent should work. The current surface decides *where* that work should focus.
+
+| Surface | Skill scope |
+| --- | --- |
+| **Thread** | The anchored selection or passage is the focus. The agent also sees enough document context and previous decisions to make the local edit fit. |
+| **Chat** | The whole draft is the default focus, especially for broad review passes, structural rewrites, and skill-only requests. |
+
+For example, `/humanizer` in a thread should humanise the selected passage and usually return a focused reply or replacement suggestion. `/humanizer` in Chat should treat the current draft as the writing context and, when useful, return a reviewable document proposal. Your wording can narrow or widen the scope: "use `/humanizer` on the intro only" keeps the edit focused, while "use `/humanizer` across the whole piece" asks for a broader pass.
+
+Default skills are just preselected skills for new chat messages and new comment threads. They do not run in the background; they apply only when you send that message.
 
 You can also send a skill by itself:
 
@@ -93,13 +104,13 @@ Use chat for article-level discussion, skill-driven passes, and reviewable docum
 
 ### Diff Review
 
-Review proposed document changes inline, then accept, decline, rewrite, or comment on each change block.
+Review proposed document changes inline, then accept, decline, rewrite, or comment on each change block. Choose split view for side-by-side current/proposed text, or unified view for compact `-` and `+` lines.
 
 ![Skribe diff review](docs/screenshots/diff.png)
 
 ### Settings
 
-Persist writing preferences, theme, document font, agent runtime, model, effort, default skills, and workspace defaults.
+Persist writing preferences, theme, document font, agent runtime, model, effort, default skills, diff view, and workspace defaults.
 
 ![Skribe settings](docs/screenshots/settings.png)
 
@@ -217,7 +228,7 @@ Useful environment variables:
 | `SKRIBE_AGENT_TIMEOUT_MS` | Agent command timeout. Defaults to 10 minutes. |
 | `SKRIBE_SKILL_ROOTS` | Additional skill roots for slash-command style skills. |
 
-You can also change runtime, model, effort, language, document font, theme, tone, default skills, and review preferences from the settings panel.
+You can also change runtime, model, effort, language, document font, theme, tone, default skills, split/unified diff view, and review preferences from the settings panel.
 
 ## Storage Model
 
