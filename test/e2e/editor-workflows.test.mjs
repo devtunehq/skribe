@@ -5,6 +5,7 @@ import {
   browserTest,
   disableToneSetup,
   evaluate,
+  jsonRequest,
   makeMarkdownDoc,
   mouseDrag,
   navigate,
@@ -25,7 +26,13 @@ async function withApp(t, markdown, callback, options = {}) {
   const server = await startSkribeServer(markdownPath);
 
   try {
-    await disableToneSetup(server.baseUrl);
+    const baseSettings = await disableToneSetup(server.baseUrl);
+    if (options.settings) {
+      await jsonRequest(server.baseUrl, "/api/settings", {
+        method: "PUT",
+        body: JSON.stringify({ settings: { ...baseSettings, ...options.settings } })
+      });
+    }
     if (options.review) await seedReview(server.baseUrl, options.review);
     await navigate(browser.cdp, server.baseUrl, options.width ?? 1440, options.height ?? 1000);
     await callback({ browser, server, markdownPath });
@@ -445,6 +452,49 @@ test("accepting an inline proposal block hides it and preserves unrelated manual
   );
 });
 
+test("unified diff setting renders inline proposal blocks as unified lines", async (t) => {
+  const originalMarkdown = "# Draft\n\nOriginal one.\n\nOriginal two.\n";
+  const replacementMarkdown = "# Draft\n\nImproved one.\n\nOriginal two.\n";
+  await withApp(
+    t,
+    originalMarkdown,
+    async ({ browser }) => {
+      await waitFor(browser.cdp, "Boolean(document.querySelector('.proposal-change-preview.is-unified'))");
+      const preview = await evaluate(
+        browser.cdp,
+        `(() => ({
+          splitCount: document.querySelectorAll('.proposal-change-preview.is-split').length,
+          deleteText: document.querySelector('.proposal-unified-line.is-delete code')?.textContent ?? '',
+          addText: document.querySelector('.proposal-unified-line.is-add code')?.textContent ?? ''
+        }))()`
+      );
+      assert.equal(preview.splitCount, 0);
+      assert.equal(preview.deleteText, "Original one.");
+      assert.equal(preview.addText, "Improved one.");
+    },
+    {
+      settings: { diffViewMode: "unified" },
+      review: {
+        proposals: [
+          {
+            id: "proposal-unified-e2e",
+            source: "chat",
+            threadId: null,
+            title: "Unified proposal E2E",
+            summary: "Tests unified proposal rendering.",
+            originalMarkdown,
+            replacementMarkdown,
+            status: "open",
+            changeDecisions: {},
+            author: "agent",
+            createdAt: "2026-06-03T12:00:00.000Z"
+          }
+        ]
+      }
+    }
+  );
+});
+
 test("table image export uses a transparent PNG background", async (t) => {
   await withApp(
     t,
@@ -525,6 +575,19 @@ test("settings dialog persists language, theme, font, and collapsed panel defaul
           return true;
         })()`
       );
+      await evaluate(browser.cdp, "document.querySelector('#settings-tab-agent').click()");
+      await waitFor(browser.cdp, "document.querySelector('#settings-tab-agent')?.getAttribute('aria-selected') === 'true'");
+      await evaluate(
+        browser.cdp,
+        `(() => {
+          const diffView = Array.from(document.querySelectorAll('.settings-field')).find((field) => field.textContent.includes('Diff view')).querySelector('select');
+          Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(diffView, 'unified');
+          diffView.querySelector('option[value="unified"]').selected = true;
+          diffView.dispatchEvent(new Event('input', { bubbles: true }));
+          diffView.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        })()`
+      );
       await evaluate(browser.cdp, "document.querySelector('#settings-tab-workspace').click()");
       await waitFor(browser.cdp, "document.querySelector('#settings-tab-workspace')?.getAttribute('aria-selected') === 'true'");
       await evaluate(
@@ -540,7 +603,7 @@ test("settings dialog persists language, theme, font, and collapsed panel defaul
       assert.equal(await clickButtonByText(browser.cdp, ".settings-dialog-actions", "Save"), true);
       await waitFor(
         browser.cdp,
-        "fetch('/api/settings').then((response) => response.json()).then((payload) => payload.settings.editorLanguage === 'en-US')"
+        "fetch('/api/settings').then((response) => response.json()).then((payload) => payload.settings.editorLanguage === 'en-US' && payload.settings.diffViewMode === 'unified')"
       );
       await waitFor(browser.cdp, "document.querySelector('.app-shell')?.getAttribute('lang') === 'en-US'");
       await waitFor(browser.cdp, "document.querySelector('.app-shell')?.dataset.documentFont === 'serif'");

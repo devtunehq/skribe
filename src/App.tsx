@@ -120,6 +120,7 @@ import type {
   ChatMessage,
   ContextLedgerEvent,
   ContextLedgerEventType,
+  DiffViewMode,
   DocumentProposal,
   DocumentState,
   DocumentFont,
@@ -139,6 +140,7 @@ type SaveState = "loading" | "saved" | "saving" | "error";
 type SupportedEditorLanguage = EditorLanguage;
 type SupportedDocumentFont = DocumentFont;
 type SupportedAppTheme = AppTheme;
+type SupportedDiffViewMode = DiffViewMode;
 type ToneSetupInvocation = "first-run" | "settings";
 type SettingsTab = "writing" | "agent" | "workspace";
 type BlockDropPlacement = "before" | "after";
@@ -206,6 +208,11 @@ const appThemeOptions: Array<{ value: SupportedAppTheme; label: string; descript
   { value: "graphite", label: "Graphite", description: "Dark desk, bright controls." }
 ];
 
+const diffViewModeOptions: Array<{ value: SupportedDiffViewMode; label: string; description: string }> = [
+  { value: "split", label: "Split", description: "Show current and proposed text side by side." },
+  { value: "unified", label: "Unified", description: "Show removals and additions in one compact flow." }
+];
+
 const settingsTabOptions: Array<{ id: SettingsTab; label: string }> = [
   { id: "writing", label: "Writing" },
   { id: "agent", label: "Agent" },
@@ -269,23 +276,29 @@ const defaultAppSettings: AppSettings = {
     leftCollapsed: false,
     rightCollapsed: false
   },
-  proposalModeDefault: "conservative"
+  proposalModeDefault: "conservative",
+  diffViewMode: "split"
 };
 
 function mergeAppSettings(settings?: Partial<AppSettings> | null): AppSettings {
   const requestedDocumentFont = settings?.documentFont;
   const requestedTheme = settings?.theme;
+  const requestedDiffViewMode = settings?.diffViewMode;
   const documentFont: SupportedDocumentFont = documentFontOptions.some((option) => option.value === requestedDocumentFont)
     ? (requestedDocumentFont as SupportedDocumentFont)
     : defaultAppSettings.documentFont;
   const theme: SupportedAppTheme = appThemeOptions.some((option) => option.value === requestedTheme)
     ? (requestedTheme as SupportedAppTheme)
     : defaultAppSettings.theme;
+  const diffViewMode: SupportedDiffViewMode = diffViewModeOptions.some((option) => option.value === requestedDiffViewMode)
+    ? (requestedDiffViewMode as SupportedDiffViewMode)
+    : defaultAppSettings.diffViewMode;
   return {
     ...defaultAppSettings,
     ...(settings ?? {}),
     documentFont,
     theme,
+    diffViewMode,
     defaultSkills: Array.isArray(settings?.defaultSkills) ? settings.defaultSkills : defaultAppSettings.defaultSkills,
     panelState: {
       ...defaultAppSettings.panelState,
@@ -3404,6 +3417,7 @@ function App() {
               editorLanguage={editorLanguage}
               threads={threads}
               inlineProposal={activeInlineProposal}
+              diffViewMode={appSettings.diffViewMode}
               selectionPreview={selectionDraft ?? pendingSelectionDraft}
               blockResetKeys={blockResetKeys}
               activeBlockId={activeBlockId}
@@ -3497,6 +3511,7 @@ function App() {
               chatDraft={chatDraft}
               agentSkills={agentSkills}
               selectedSkillIds={chatSkillIds}
+              diffViewMode={appSettings.diffViewMode}
               onSetChatDraft={setChatDraft}
               onSetSelectedSkillIds={setChatSkillIds}
               onSend={addChatMessage}
@@ -3971,6 +3986,7 @@ function SettingsDialog({
       : "auto";
   const selectedDocumentFont = documentFontOptions.find((option) => option.value === settings.documentFont) ?? documentFontOptions[0];
   const selectedTheme = appThemeOptions.find((option) => option.value === settings.theme) ?? appThemeOptions[0];
+  const selectedDiffViewMode = diffViewModeOptions.find((option) => option.value === settings.diffViewMode) ?? diffViewModeOptions[0];
 
   return (
     <div className="settings-backdrop" role="presentation" onMouseDown={onCancel}>
@@ -4173,6 +4189,21 @@ function SettingsDialog({
                   <option value="conservative">Conservative</option>
                   <option value="bold">Bold</option>
                 </select>
+              </label>
+
+              <label className="settings-field">
+                <span>Diff view</span>
+                <select
+                  value={settings.diffViewMode}
+                  onChange={(event) => onChange({ diffViewMode: event.target.value as SupportedDiffViewMode })}
+                >
+                  {diffViewModeOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <small>{selectedDiffViewMode.description}</small>
               </label>
             </>
           ) : null}
@@ -4618,6 +4649,7 @@ interface MarkdownCanvasProps {
   editorLanguage: SupportedEditorLanguage;
   threads: ReviewThread[];
   inlineProposal: InlineProposalReview | null;
+  diffViewMode: SupportedDiffViewMode;
   selectionPreview: SelectionDraft | null;
   blockResetKeys: Record<string, number>;
   activeBlockId: string | null;
@@ -4771,6 +4803,7 @@ function EditableMarkdownCanvas({
   editorLanguage,
   threads,
   inlineProposal,
+  diffViewMode,
   selectionPreview,
   blockResetKeys,
   activeBlockId,
@@ -4903,6 +4936,7 @@ function EditableMarkdownCanvas({
         <InlineProposalChangeCard
           key={`${change.proposalId}:${change.key}`}
           change={change}
+          diffViewMode={diffViewMode}
           onProposalChangeDecision={onProposalChangeDecision}
           onRequestProposalRevision={onRequestProposalRevision}
         />
@@ -4979,6 +5013,7 @@ function EditableMarkdownCanvas({
                 <InlineProposalChangeCard
                   key={`${change.proposalId}:${change.key}`}
                   change={change}
+                  diffViewMode={diffViewMode}
                   onProposalChangeDecision={onProposalChangeDecision}
                   onRequestProposalRevision={onRequestProposalRevision}
                 />
@@ -5701,12 +5736,103 @@ function InlineProposalReviewBar({
   );
 }
 
+function diffLineText(line: string) {
+  return line.replace(/\r?\n$/, "") || " ";
+}
+
+function clippedDiffLines(lines: string[], maxCharacters?: number) {
+  if (!maxCharacters) return lines;
+
+  let remaining = maxCharacters;
+  const clipped: string[] = [];
+  for (const line of lines) {
+    if (remaining <= 0) break;
+    const text = diffLineText(line);
+    clipped.push(text.length > remaining ? `${text.slice(0, Math.max(0, remaining - 3))}...` : line);
+    remaining -= text.length;
+  }
+  return clipped;
+}
+
+function ProposalChangePreview({
+  change,
+  mode,
+  variant,
+  maxCharacters
+}: {
+  change: ProposalChangeBlock;
+  mode: SupportedDiffViewMode;
+  variant: "inline" | "panel";
+  maxCharacters?: number;
+}) {
+  if (mode === "unified") {
+    const deletions = clippedDiffLines(change.deletions, maxCharacters);
+    const additions = clippedDiffLines(change.additions, maxCharacters);
+    return (
+      <div className={`proposal-change-preview is-unified is-${variant}`}>
+        <span>Unified diff</span>
+        <div className="proposal-unified-lines">
+          {deletions.length > 0 ? (
+            deletions.map((line, index) => (
+              <div key={`delete-${index}`} className="proposal-unified-line is-delete">
+                <b>-</b>
+                <code>{diffLineText(line)}</code>
+              </div>
+            ))
+          ) : (
+            <div className="proposal-unified-line is-context">
+              <b> </b>
+              <code>(insert)</code>
+            </div>
+          )}
+          {additions.length > 0 ? (
+            additions.map((line, index) => (
+              <div key={`add-${index}`} className="proposal-unified-line is-add">
+                <b>+</b>
+                <code>{diffLineText(line)}</code>
+              </div>
+            ))
+          ) : (
+            <div className="proposal-unified-line is-context">
+              <b> </b>
+              <code>(delete)</code>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`proposal-change-preview is-split is-${variant}`}>
+      <div>
+        <span>{variant === "inline" ? "Current" : "Original"}</span>
+        {variant === "inline" ? (
+          <p>{trimBlockText(change.deletions)}</p>
+        ) : (
+          <pre>{trimBlockText(change.deletions).slice(0, maxCharacters ?? 900)}</pre>
+        )}
+      </div>
+      <div>
+        <span>Proposed</span>
+        {variant === "inline" ? (
+          <p>{trimBlockText(change.additions)}</p>
+        ) : (
+          <pre>{trimBlockText(change.additions).slice(0, maxCharacters ?? 900)}</pre>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function InlineProposalChangeCard({
   change,
+  diffViewMode,
   onProposalChangeDecision,
   onRequestProposalRevision
 }: {
   change: InlineProposalChange;
+  diffViewMode: SupportedDiffViewMode;
   onProposalChangeDecision: (proposalId: string, changeKey: string, decision: ProposalChangeDecision) => void;
   onRequestProposalRevision: (proposalId: string, change: ProposalChangeBlock, instruction: string) => void;
 }) {
@@ -5734,16 +5860,7 @@ function InlineProposalChangeCard({
           {lineRangeLabel(change.additionLineStart, change.additions.length)}
         </small>
       </div>
-      <div className="inline-proposal-body">
-        <div>
-          <span>Current</span>
-          <p>{trimBlockText(change.deletions)}</p>
-        </div>
-        <div>
-          <span>Proposed</span>
-          <p>{trimBlockText(change.additions)}</p>
-        </div>
-      </div>
+      <ProposalChangePreview change={change} mode={diffViewMode} variant="inline" />
       <div className="button-row compact">
         <button
           className={change.decision === "accepted" ? "primary-button" : "secondary-button"}
@@ -5813,6 +5930,7 @@ interface ChatPanelProps {
   chatDraft: string;
   agentSkills: AgentSkill[];
   selectedSkillIds: string[];
+  diffViewMode: SupportedDiffViewMode;
   onSetChatDraft: (value: string) => void;
   onSetSelectedSkillIds: (value: string[]) => void;
   onSend: () => void;
@@ -5829,6 +5947,7 @@ function ChatPanel({
   chatDraft,
   agentSkills,
   selectedSkillIds,
+  diffViewMode,
   onSetChatDraft,
   onSetSelectedSkillIds,
   onSend,
@@ -5875,6 +5994,7 @@ function ChatPanel({
               <DocumentProposalCard
                 key={proposal.id}
                 proposal={proposal}
+                diffViewMode={diffViewMode}
                 onProposalStatus={onProposalStatus}
                 onProposalChangeDecision={onProposalChangeDecision}
                 onRequestProposalRevision={onRequestProposalRevision}
@@ -5924,11 +6044,13 @@ function ChatPanel({
 
 function DocumentProposalCard({
   proposal,
+  diffViewMode,
   onProposalStatus,
   onProposalChangeDecision,
   onRequestProposalRevision
 }: {
   proposal: DocumentProposal;
+  diffViewMode: SupportedDiffViewMode;
   onProposalStatus: (proposalId: string, status: "accepted" | "rejected") => void;
   onProposalChangeDecision: (proposalId: string, changeKey: string, decision: ProposalChangeDecision) => void;
   onRequestProposalRevision: (proposalId: string, change: ProposalChangeBlock, instruction: string) => void;
@@ -5971,7 +6093,7 @@ function DocumentProposalCard({
               cacheKey: `${proposal.id}:new`
             }}
             options={{
-              diffStyle: "unified",
+              diffStyle: diffViewMode,
               disableFileHeader: true,
               hunkSeparators: "line-info-basic",
               lineDiffType: "word-alt",
@@ -6002,16 +6124,7 @@ function DocumentProposalCard({
                     {lineRangeLabel(change.additionLineStart, change.additions.length)}
                   </span>
                 </div>
-                <div className="change-block-preview">
-                  <div>
-                    <span>Original</span>
-                    <pre>{trimBlockText(change.deletions).slice(0, 900)}</pre>
-                  </div>
-                  <div>
-                    <span>Proposed</span>
-                    <pre>{trimBlockText(change.additions).slice(0, 900)}</pre>
-                  </div>
-                </div>
+                <ProposalChangePreview change={change} mode={diffViewMode} variant="panel" maxCharacters={900} />
                 <div className="button-row">
                   <button
                     className={decision === "accepted" ? "primary-button" : "secondary-button"}

@@ -55,6 +55,7 @@ const defaultSettings = {
     rightCollapsed: false
   },
   proposalModeDefault: "conservative",
+  diffViewMode: "split",
   updatedAt: new Date().toISOString()
 };
 
@@ -212,6 +213,10 @@ function normalizeProposalMode(value) {
   return value === "bold" || value === "conservative" ? value : defaultSettings.proposalModeDefault;
 }
 
+function normalizeDiffViewMode(value) {
+  return value === "unified" || value === "split" ? value : defaultSettings.diffViewMode;
+}
+
 function normalizeDefaultSkills(value) {
   if (!Array.isArray(value)) return [];
   return Array.from(
@@ -258,6 +263,7 @@ function normalizeAppSettings(settings) {
       typeof source.showResolvedThreads === "boolean" ? source.showResolvedThreads : defaultSettings.showResolvedThreads,
     panelState: normalizePanelState(source.panelState),
     proposalModeDefault: normalizeProposalMode(source.proposalModeDefault),
+    diffViewMode: normalizeDiffViewMode(source.diffViewMode),
     updatedAt: typeof source.updatedAt === "string" ? source.updatedAt : defaultSettings.updatedAt
   };
 }

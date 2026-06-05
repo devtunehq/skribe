@@ -118,6 +118,7 @@ test("settings API persists all global settings to the config directory", async 
     assert.equal(initial.payload.settings.editorLanguage, "en-GB");
     assert.equal(initial.payload.settings.documentFont, "default");
     assert.equal(initial.payload.settings.theme, "default");
+    assert.equal(initial.payload.settings.diffViewMode, "split");
     assert.equal(initial.payload.settings.agentRuntime, "stub");
     assert.equal(initial.payload.settings.toneOfVoiceSetupComplete, false);
 
@@ -142,7 +143,8 @@ test("settings API persists all global settings to the config directory", async 
         leftCollapsed: true,
         rightCollapsed: true
       },
-      proposalModeDefault: "bold"
+      proposalModeDefault: "bold",
+      diffViewMode: "unified"
     };
 
     const saved = await jsonRequest(server.baseUrl, "/api/settings", {
@@ -166,6 +168,7 @@ test("settings API persists all global settings to the config directory", async 
     assert.equal(saved.payload.settings.showResolvedThreads, true);
     assert.deepEqual(saved.payload.settings.panelState, { leftCollapsed: true, rightCollapsed: true });
     assert.equal(saved.payload.settings.proposalModeDefault, "bold");
+    assert.equal(saved.payload.settings.diffViewMode, "unified");
 
     const settingsFile = JSON.parse(await readFile(join(server.configDir, "settings.json"), "utf8"));
     assert.equal(settingsFile.toneOfVoice, longTone);
@@ -174,6 +177,7 @@ test("settings API persists all global settings to the config directory", async 
     assert.equal(settingsFile.documentFont, "serif");
     assert.equal(settingsFile.theme, "sage");
     assert.equal(settingsFile.proposalModeDefault, "bold");
+    assert.equal(settingsFile.diffViewMode, "unified");
 
     const health = await jsonRequest(server.baseUrl, "/api/health");
     assert.equal(health.response.status, 200);

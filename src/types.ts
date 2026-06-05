@@ -14,6 +14,8 @@ export type EditorLanguage = "en-GB" | "en-US";
 
 export type ProposalModeDefault = "conservative" | "bold";
 
+export type DiffViewMode = "split" | "unified";
+
 export type DocumentFont = "default" | "sans" | "serif" | "mono";
 
 export type AppTheme = "default" | "newsprint" | "sage" | "coral" | "graphite";
@@ -129,6 +131,7 @@ export interface AppSettings {
     rightCollapsed: boolean;
   };
   proposalModeDefault: ProposalModeDefault;
+  diffViewMode: DiffViewMode;
   updatedAt?: string;
 }
 

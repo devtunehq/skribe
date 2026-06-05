@@ -289,7 +289,7 @@ button {
 .rail-heading,
 .selection-label,
 .memory-card-header span,
-.change-block-preview span,
+.proposal-change-preview span,
 .panel-tabs button,
 .save-pill,
 .agent-pill,
@@ -2260,7 +2260,8 @@ select:focus,
 .inline-proposal-review-bar small,
 .inline-proposal-change-header span,
 .inline-proposal-change-header small,
-.inline-proposal-body span {
+.proposal-change-preview > span,
+.proposal-change-preview.is-split span {
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: 10px;
@@ -2335,27 +2336,27 @@ select:focus,
   text-transform: uppercase;
 }
 
-.inline-proposal-body {
+.proposal-change-preview {
   display: grid;
   gap: 8px;
   margin-top: 10px;
 }
 
-.inline-proposal-body div {
+.proposal-change-preview.is-split > div {
   border: 1px solid var(--line);
   background: var(--smoke-gray);
   padding: 9px 10px;
 }
 
-.inline-proposal-body div:first-child {
+.proposal-change-preview.is-inline.is-split > div:first-child {
   background: color-mix(in srgb, var(--coral-red) 8%, white);
 }
 
-.inline-proposal-body div:last-child {
+.proposal-change-preview.is-inline.is-split > div:last-child {
   background: color-mix(in srgb, var(--aqua-teal) 10%, white);
 }
 
-.inline-proposal-body p {
+.proposal-change-preview p {
   margin: 4px 0 0;
   color: var(--text);
   font-size: 14px;
@@ -2363,8 +2364,80 @@ select:focus,
   white-space: pre-wrap;
 }
 
+.proposal-change-preview pre {
+  max-height: 120px;
+  overflow: auto;
+  white-space: pre-wrap;
+  margin: 6px 0 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper-white);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.proposal-change-preview.is-unified {
+  border: 1px solid var(--line);
+  background: var(--smoke-gray);
+  padding: 9px 10px;
+}
+
+.proposal-unified-lines {
+  display: grid;
+  margin-top: 6px;
+  border: 1px solid var(--line);
+  background: var(--paper-white);
+  overflow: hidden;
+}
+
+.proposal-unified-line {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  min-height: 28px;
+}
+
+.proposal-unified-line:last-child {
+  border-bottom: 0;
+}
+
+.proposal-unified-line b {
+  display: grid;
+  place-items: center;
+  border-right: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.proposal-unified-line code {
+  min-width: 0;
+  padding: 5px 8px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.proposal-unified-line.is-delete {
+  background: color-mix(in srgb, var(--coral-red) 10%, white);
+}
+
+.proposal-unified-line.is-add {
+  background: color-mix(in srgb, var(--aqua-teal) 12%, white);
+}
+
+.proposal-unified-line.is-context {
+  background: var(--paper-white);
+}
+
 @media (min-width: 1180px) {
-  .inline-proposal-body {
+  .proposal-change-preview.is-inline.is-split {
     grid-template-columns: 1fr 1fr;
   }
 }
@@ -2444,34 +2517,6 @@ select:focus,
   color: var(--text-strong);
 }
 
-.change-block-preview {
-  display: grid;
-  gap: 10px;
-  margin-top: 10px;
-}
-
-.change-block-preview span {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-}
-
-.change-block-preview pre {
-  max-height: 120px;
-  overflow: auto;
-  white-space: pre-wrap;
-  margin: 6px 0 0;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--paper-white);
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
 .revision-composer {
   display: grid;
   gap: 8px;
@@ -2488,7 +2533,7 @@ select:focus,
 }
 
 @media (min-width: 1440px) {
-  .change-block-preview {
+  .proposal-change-preview.is-panel.is-split {
     grid-template-columns: 1fr 1fr;
   }
 }
