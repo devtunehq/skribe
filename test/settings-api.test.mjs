@@ -116,6 +116,8 @@ test("settings API persists all global settings to the config directory", async 
     assert.equal(initial.payload.storage.configDir, server.configDir);
     assert.equal(initial.payload.storage.dataDir, server.dataDir);
     assert.equal(initial.payload.settings.editorLanguage, "en-GB");
+    assert.equal(initial.payload.settings.documentFont, "default");
+    assert.equal(initial.payload.settings.theme, "default");
     assert.equal(initial.payload.settings.agentRuntime, "stub");
     assert.equal(initial.payload.settings.toneOfVoiceSetupComplete, false);
 
@@ -128,6 +130,8 @@ test("settings API persists all global settings to the config directory", async 
       toneOfVoice: longTone,
       toneOfVoiceSetupComplete: true,
       editorLanguage: "en-US",
+      documentFont: "serif",
+      theme: "sage",
       agentRuntime: "stub",
       agentModel: "auto",
       agentEffort: "auto",
@@ -152,6 +156,8 @@ test("settings API persists all global settings to the config directory", async 
     assert.ok(saved.payload.settings.toneOfVoice.endsWith("Preserve the author's voice."));
     assert.equal(saved.payload.settings.toneOfVoiceSetupComplete, true);
     assert.equal(saved.payload.settings.editorLanguage, "en-US");
+    assert.equal(saved.payload.settings.documentFont, "serif");
+    assert.equal(saved.payload.settings.theme, "sage");
     assert.equal(saved.payload.settings.agentRuntime, "stub");
     assert.equal(saved.payload.settings.agentModel, "auto");
     assert.equal(saved.payload.settings.agentEffort, "auto");
@@ -165,6 +171,8 @@ test("settings API persists all global settings to the config directory", async 
     assert.equal(settingsFile.toneOfVoice, longTone);
     assert.deepEqual(settingsFile.defaultSkills, ["humanizer", "plgeek-voice"]);
     assert.equal(settingsFile.toneOfVoiceSetupComplete, true);
+    assert.equal(settingsFile.documentFont, "serif");
+    assert.equal(settingsFile.theme, "sage");
     assert.equal(settingsFile.proposalModeDefault, "bold");
 
     const health = await jsonRequest(server.baseUrl, "/api/health");
@@ -202,6 +210,40 @@ test("a second invocation opens another document in the running server", async (
     const opened = await jsonRequest(server.baseUrl, "/api/document");
     assert.equal(opened.payload.fileInfo.markdownPath, secondPath);
     assert.match(opened.payload.markdown, /# Second/);
+  } finally {
+    await server.stop();
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("image asset uploads are stored beside an external Markdown document", async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), "skribe-image-doc-"));
+  const markdownPath = join(rootDir, "image-demo.md");
+  await writeFile(markdownPath, "# Image demo\n", "utf8");
+
+  const server = await startServer({ args: [markdownPath] });
+  try {
+    const uploaded = await jsonRequest(server.baseUrl, "/api/assets", {
+      method: "POST",
+      body: JSON.stringify({
+        filename: "diagram.png",
+        type: "image/png",
+        dataUrl:
+          "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+      })
+    });
+
+    assert.equal(uploaded.response.status, 201);
+    assert.match(uploaded.payload.src, /^image-demo\.assets\/diagram-[a-f0-9]{10}\.png$/);
+    assert.match(uploaded.payload.markdown, /^!\[diagram\]\(image-demo\.assets\/diagram-[a-f0-9]{10}\.png\)$/);
+
+    const storedBytes = await readFile(join(rootDir, uploaded.payload.src));
+    assert.ok(storedBytes.length > 0);
+
+    const assetResponse = await fetch(`${server.baseUrl}/api/assets?src=${encodeURIComponent(uploaded.payload.src)}`);
+    assert.equal(assetResponse.status, 200);
+    assert.equal(assetResponse.headers.get("content-type"), "image/png");
+    assert.ok((await assetResponse.arrayBuffer()).byteLength > 0);
   } finally {
     await server.stop();
     await rm(rootDir, { recursive: true, force: true });

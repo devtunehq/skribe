@@ -5,7 +5,9 @@ import {
   looksLikeMarkdownPaste,
   markdownBlockIdFromIndex,
   normalizeMarkdownPaste,
+  parseMarkdownImage,
   parseMarkdownBlocks,
+  serializeMarkdownBlocks,
   shouldPasteAsMarkdownBlocks,
   spliceMarkdownPaste,
   updateMarkdownBlock
@@ -25,6 +27,20 @@ test("markdown paste helpers detect and normalize Markdown blocks", () => {
   assert.equal(looksLikeMarkdownPaste(markdown), true);
   assert.equal(shouldPasteAsMarkdownBlocks(markdown), true);
   assert.equal(normalizeMarkdownPaste(markdown), "# Heading\n\n| A | B |\n| --- | --- |\n| one | two |");
+});
+
+test("standalone Markdown images become editable image blocks", () => {
+  const markdown = "# Draft\n\n![Architecture diagram](assets/diagram.png)\n\nBody.";
+  const blocks = parseMarkdownBlocks(markdown);
+
+  assert.equal(blocks[1].type, "image");
+  assert.deepEqual(parseMarkdownImage(blocks[1].text), {
+    alt: "Architecture diagram",
+    src: "assets/diagram.png",
+    title: undefined
+  });
+  assert.equal(shouldPasteAsMarkdownBlocks("![Screenshot](draft.assets/screenshot.png)"), true);
+  assert.equal(serializeMarkdownBlocks(blocks), "# Draft\n\n![Architecture diagram](assets/diagram.png)\n\nBody.\n");
 });
 
 test("markdown paste helpers splice block Markdown into the document", () => {

@@ -1,6 +1,14 @@
 import type { ReviewThread, SelectionDraft } from "./types";
 
-export type MarkdownBlockType = "heading" | "paragraph" | "ordered-list" | "unordered-list" | "quote" | "code" | "table";
+export type MarkdownBlockType =
+  | "heading"
+  | "paragraph"
+  | "ordered-list"
+  | "unordered-list"
+  | "quote"
+  | "code"
+  | "table"
+  | "image";
 
 export interface MarkdownBlock {
   id: string;
@@ -9,6 +17,12 @@ export interface MarkdownBlock {
   level?: number;
   marker?: string;
   language?: string;
+}
+
+export interface MarkdownImage {
+  alt: string;
+  src: string;
+  title?: string;
 }
 
 export type MarkdownBlockIdentity = Omit<MarkdownBlock, "id">;
@@ -223,6 +237,33 @@ function isTableStart(lines: string[], index: number) {
   return isTableRow(lines[index] ?? "") && isTableSeparator(lines[index + 1] ?? "");
 }
 
+export function parseMarkdownImage(markdown: string): MarkdownImage | null {
+  const match = markdown.trim().match(/^!\[([^\]\n]*)\]\((.*?)\)$/);
+  if (!match) return null;
+
+  const alt = match[1].replace(/\\\]/g, "]");
+  let target = match[2].trim();
+  if (!target) return null;
+
+  let title: string | undefined;
+  const titleMatch = target.match(/^(<[^>]+>|[^\s]+)\s+(?:"([^"]*)"|'([^']*)')$/);
+  if (titleMatch) {
+    target = titleMatch[1];
+    title = titleMatch[2] ?? titleMatch[3];
+  }
+
+  const src = target.startsWith("<") && target.endsWith(">") ? target.slice(1, -1).trim() : target;
+  if (!src) return null;
+  return { alt, src, title };
+}
+
+export function serializeMarkdownImage(image: MarkdownImage) {
+  const alt = image.alt.replace(/\]/g, "\\]");
+  const src = /[\s)]/.test(image.src) ? `<${image.src}>` : image.src.replace(/\)/g, "%29");
+  const title = image.title ? ` "${image.title.replace(/"/g, '\\"')}"` : "";
+  return `![${alt}](${src}${title})`;
+}
+
 export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
   const lines = markdown.replace(/\r\n/g, "\n").split("\n");
   const blocks: MarkdownBlock[] = [];
@@ -287,6 +328,15 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       continue;
     }
 
+    if (parseMarkdownImage(trimmed)) {
+      flushParagraph();
+      pushBlock({
+        type: "image",
+        text: trimmed
+      });
+      continue;
+    }
+
     const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
     if (heading) {
       flushParagraph();
@@ -346,6 +396,7 @@ export function serializeMarkdownBlocks(blocks: MarkdownBlock[]) {
       if (block.type === "quote") return text.split("\n").map((line) => `> ${line}`).join("\n");
       if (block.type === "code") return `\`\`\`${block.language ?? ""}\n${block.text}\n\`\`\``;
       if (block.type === "table") return text;
+      if (block.type === "image") return text;
       return text;
     })
     .join("\n\n")
@@ -364,6 +415,7 @@ export function looksLikeMarkdownPaste(value: string) {
   return (
     /^#{1,6}\s+\S/m.test(text) ||
     /^```/m.test(text) ||
+    /^!\[[^\]\n]*\]\([^)]+\)$/m.test(text) ||
     /^\s*(?:[-*+]\s+|\d+\.\s+)/m.test(text) ||
     /^\s*>\s+\S/m.test(text) ||
     /\|.+\|\s*\n\s*\|?\s*:?-{3,}:?\s*(?:\||$)/m.test(text) ||
@@ -561,6 +613,11 @@ export function htmlToInlineMarkdown(html: string) {
 
     const tag = node.tagName.toLowerCase();
     if (tag === "br") return "\n";
+    if (tag === "img") {
+      const src = node.getAttribute("src")?.trim();
+      if (!src) return "";
+      return serializeMarkdownImage({ alt: node.getAttribute("alt") ?? "", src });
+    }
     if (tag === "table") return tableToMarkdown(node as HTMLTableElement);
 
     const body = Array.from(node.childNodes).map(walk).join("");

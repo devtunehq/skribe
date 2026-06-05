@@ -14,6 +14,10 @@ export type EditorLanguage = "en-GB" | "en-US";
 
 export type ProposalModeDefault = "conservative" | "bold";
 
+export type DocumentFont = "default" | "sans" | "serif" | "mono";
+
+export type AppTheme = "default" | "newsprint" | "sage" | "coral" | "graphite";
+
 export type ToneSetupMode = "manual" | "interview" | "links" | "archetype";
 
 export type ContextLedgerEventType =
@@ -112,6 +116,8 @@ export interface AppSettings {
   toneOfVoice: string;
   toneOfVoiceSetupComplete: boolean;
   editorLanguage: EditorLanguage;
+  documentFont: DocumentFont;
+  theme: AppTheme;
   agentRuntime: string;
   agentModel: string;
   agentEffort: string;

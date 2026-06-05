@@ -12,6 +12,15 @@ import type {
   ToneGenerateResponse
 } from "./types";
 
+export interface UploadedImageAsset {
+  filename: string;
+  src: string;
+  url: string;
+  markdown: string;
+  contentType: string;
+  size: number;
+}
+
 export async function fetchDocument(): Promise<DocumentState> {
   const response = await fetch("/api/document", { cache: "no-store" });
   if (!response.ok) throw new Error(`Unable to load document: ${response.status}`);
@@ -67,6 +76,30 @@ export async function saveDocument(state: DocumentState): Promise<DocumentState>
   });
   if (!response.ok) throw new Error(`Unable to save document: ${response.status}`);
   return response.json();
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+    reader.onerror = () => reject(reader.error || new Error("Unable to read image file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+export async function uploadImageAsset(file: File): Promise<UploadedImageAsset> {
+  const response = await fetch("/api/assets", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      filename: file.name,
+      type: file.type,
+      dataUrl: await readFileAsDataUrl(file)
+    })
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error || `Unable to upload image: ${response.status}`);
+  return payload;
 }
 
 export async function fetchRevisionHistory(): Promise<RevisionState> {

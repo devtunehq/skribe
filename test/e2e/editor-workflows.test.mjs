@@ -245,6 +245,52 @@ test("pasted Markdown renders headings, links, and tables in the editor", async 
   });
 });
 
+test("pasted image files are saved locally and rendered as image blocks", async (t) => {
+  await withApp(t, "Intro.\n", async ({ browser, server, markdownPath }) => {
+    const prevented = await evaluate(
+      browser.cdp,
+      `(() => {
+        const editable = document.querySelector('.editable-text');
+        editable.focus();
+        const range = document.createRange();
+        range.selectNodeContents(editable);
+        range.collapse(false);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+
+        const bytes = Uint8Array.from(
+          atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII='),
+          (character) => character.charCodeAt(0)
+        );
+        const data = new DataTransfer();
+        data.items.add(new File([bytes], 'diagram.png', { type: 'image/png' }));
+        const event = new ClipboardEvent('paste', { bubbles: true, cancelable: true });
+        Object.defineProperty(event, 'clipboardData', { value: data });
+        document.querySelector('.markdown-canvas').dispatchEvent(event);
+        return event.defaultPrevented;
+      })()`
+    );
+    assert.equal(prevented, true);
+
+    const saved = await waitForFileText(markdownPath, /!\[diagram\]\(.*\.png\)/);
+    assert.match(saved, /!\[diagram\]\(draft\.assets\/diagram-[a-f0-9]{10}\.png\)/);
+    await waitFor(browser.cdp, "Boolean(document.querySelector('.editable-image-block img'))");
+
+    const imageSrc = await evaluate(browser.cdp, "document.querySelector('.editable-image-block img')?.getAttribute('src') || ''");
+    assert.match(imageSrc, /^\/api\/assets\?src=/);
+
+    const assetResponse = await fetch(`${server.baseUrl}${imageSrc}`);
+    assert.equal(assetResponse.status, 200);
+    assert.equal(assetResponse.headers.get("content-type"), "image/png");
+
+    assert.equal(await setEditableText(browser.cdp, "block-0", "Intro edited."), true);
+    const edited = await waitForFileText(markdownPath, /Intro edited\./);
+    assert.match(edited, /!\[diagram\]\(draft\.assets\/diagram-[a-f0-9]{10}\.png\)/);
+    assert.doesNotMatch(edited, /\/api\/assets/);
+  });
+});
+
 test("insert-link popover applies a Markdown link to selected text", async (t) => {
   await withApp(
     t,
@@ -437,13 +483,27 @@ test("table image export uses a transparent PNG background", async (t) => {
   );
 });
 
-test("settings dialog persists language and collapsed panel defaults", async (t) => {
+test("settings dialog persists language, theme, font, and collapsed panel defaults", async (t) => {
   await withApp(
     t,
     "# Draft\n\nSettings test.\n",
     async ({ browser, server }) => {
       await evaluate(browser.cdp, "document.querySelector('button[title=\"Settings\"]').click()");
       await waitFor(browser.cdp, "Boolean(document.querySelector('.settings-dialog'))");
+      const selectLayout = await evaluate(
+        browser.cdp,
+        `(() => {
+          const field = (label) => Array.from(document.querySelectorAll('.settings-field')).find((candidate) => candidate.textContent.includes(label));
+          const language = field('Language')?.querySelector('select')?.getBoundingClientRect();
+          const font = field('Document font')?.querySelector('select')?.getBoundingClientRect();
+          return {
+            topDelta: language && font ? Math.abs(language.top - font.top) : 999,
+            heightDelta: language && font ? Math.abs(language.height - font.height) : 999
+          };
+        })()`
+      );
+      assert.ok(selectLayout.topDelta <= 1, `select tops differ by ${selectLayout.topDelta}px`);
+      assert.ok(selectLayout.heightDelta <= 1, `select heights differ by ${selectLayout.heightDelta}px`);
       await evaluate(
         browser.cdp,
         `(() => {
@@ -452,6 +512,24 @@ test("settings dialog persists language and collapsed panel defaults", async (t)
           language.querySelector('option[value="en-US"]').selected = true;
           language.dispatchEvent(new Event('input', { bubbles: true }));
           language.dispatchEvent(new Event('change', { bubbles: true }));
+          const font = Array.from(document.querySelectorAll('.settings-field')).find((field) => field.textContent.includes('Document font')).querySelector('select');
+          Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(font, 'serif');
+          font.querySelector('option[value="serif"]').selected = true;
+          font.dispatchEvent(new Event('input', { bubbles: true }));
+          font.dispatchEvent(new Event('change', { bubbles: true }));
+          const theme = Array.from(document.querySelectorAll('.settings-field')).find((field) => field.textContent.includes('Theme')).querySelector('select');
+          Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(theme, 'sage');
+          theme.querySelector('option[value="sage"]').selected = true;
+          theme.dispatchEvent(new Event('input', { bubbles: true }));
+          theme.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        })()`
+      );
+      await evaluate(browser.cdp, "document.querySelector('#settings-tab-workspace').click()");
+      await waitFor(browser.cdp, "document.querySelector('#settings-tab-workspace')?.getAttribute('aria-selected') === 'true'");
+      await evaluate(
+        browser.cdp,
+        `(() => {
           const left = Array.from(document.querySelectorAll('.settings-check')).find((field) => field.textContent.includes('Collapse left panel')).querySelector('input');
           const right = Array.from(document.querySelectorAll('.settings-check')).find((field) => field.textContent.includes('Collapse right panel')).querySelector('input');
           if (!left.checked) left.click();
@@ -465,11 +543,19 @@ test("settings dialog persists language and collapsed panel defaults", async (t)
         "fetch('/api/settings').then((response) => response.json()).then((payload) => payload.settings.editorLanguage === 'en-US')"
       );
       await waitFor(browser.cdp, "document.querySelector('.app-shell')?.getAttribute('lang') === 'en-US'");
+      await waitFor(browser.cdp, "document.querySelector('.app-shell')?.dataset.documentFont === 'serif'");
+      await waitFor(browser.cdp, "document.querySelector('.app-shell')?.dataset.theme === 'sage'");
       assert.equal(await evaluate(browser.cdp, "document.querySelector('.app-shell').classList.contains('left-collapsed')"), true);
       assert.equal(await evaluate(browser.cdp, "document.querySelector('.app-shell').classList.contains('right-collapsed')"), true);
+      assert.match(
+        await evaluate(browser.cdp, "getComputedStyle(document.querySelector('.markdown-canvas p')).fontFamily"),
+        /Georgia|Iowan|Palatino/i
+      );
 
       await navigate(browser.cdp, `${server.baseUrl}/?settingsReload=${Date.now()}`);
       await waitFor(browser.cdp, "document.querySelector('.app-shell')?.getAttribute('lang') === 'en-US'");
+      await waitFor(browser.cdp, "document.querySelector('.app-shell')?.dataset.documentFont === 'serif'");
+      await waitFor(browser.cdp, "document.querySelector('.app-shell')?.dataset.theme === 'sage'");
       assert.equal(await evaluate(browser.cdp, "document.querySelector('.app-shell').classList.contains('left-collapsed')"), true);
       assert.equal(await evaluate(browser.cdp, "document.querySelector('.app-shell').classList.contains('right-collapsed')"), true);
     }

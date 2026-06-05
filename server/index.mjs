@@ -42,6 +42,8 @@ const defaultSettings = {
   toneOfVoice: "",
   toneOfVoiceSetupComplete: false,
   editorLanguage: "en-GB",
+  documentFont: "default",
+  theme: "default",
   agentRuntime: defaultConfiguredRuntime,
   agentModel: defaultConfiguredModel,
   agentEffort: defaultConfiguredEffort,
@@ -105,6 +107,10 @@ const contentTypes = {
   ".css": "text/css; charset=utf-8",
   ".svg": "image/svg+xml",
   ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
   ".json": "application/json; charset=utf-8",
   ".webmanifest": "application/manifest+json; charset=utf-8",
   ".ico": "image/x-icon",
@@ -114,6 +120,14 @@ const contentTypes = {
 const subscribers = new Set();
 const agentQueue = [];
 const maxContextLedgerEvents = 240;
+const maxImageAssetBytes = 12 * 1024 * 1024;
+const imageMimeExtensions = new Map([
+  ["image/png", ".png"],
+  ["image/jpeg", ".jpg"],
+  ["image/gif", ".gif"],
+  ["image/webp", ".webp"],
+  ["image/svg+xml", ".svg"]
+]);
 const falseProposalDisabledPattern =
   /\b(?:document proposals?\s+(?:are|is)\s+disabled|can't\s+(?:show|return|create)[^.]*\b(?:diff|proposal)[^.]*\b(?:mode|disabled)|can't\s+return\s+a\s+reviewable\s+full[- ]document\s+diff\s+in\s+this\s+mode)\b/i;
 let checkpointTimer = null;
@@ -141,6 +155,7 @@ async function ensureAppStorage() {
 async function ensureDocumentFiles() {
   await mkdir(activeDocument.docDir, { recursive: true });
   await mkdir(activeDocument.snapshotsDir, { recursive: true });
+  await mkdir(activeDocument.assetsDir, { recursive: true });
   await mkdir(dirname(activeDocument.markdownPath), { recursive: true });
 
   if (!existsSync(activeDocument.markdownPath)) {
@@ -185,6 +200,14 @@ function normalizeEditorLanguage(value) {
   return value === "en-US" || value === "en-GB" ? value : defaultSettings.editorLanguage;
 }
 
+function normalizeDocumentFont(value) {
+  return ["default", "sans", "serif", "mono"].includes(value) ? value : defaultSettings.documentFont;
+}
+
+function normalizeAppTheme(value) {
+  return ["default", "newsprint", "sage", "coral", "graphite"].includes(value) ? value : defaultSettings.theme;
+}
+
 function normalizeProposalMode(value) {
   return value === "bold" || value === "conservative" ? value : defaultSettings.proposalModeDefault;
 }
@@ -221,6 +244,8 @@ function normalizeAppSettings(settings) {
     toneOfVoiceSetupComplete:
       typeof source.toneOfVoiceSetupComplete === "boolean" ? source.toneOfVoiceSetupComplete : Boolean(toneOfVoice.trim()),
     editorLanguage: normalizeEditorLanguage(source.editorLanguage),
+    documentFont: normalizeDocumentFont(source.documentFont),
+    theme: normalizeAppTheme(source.theme),
     agentRuntime: normalizeConfiguredRuntime(source.agentRuntime ?? defaultSettings.agentRuntime),
     agentModel: normalizeConfiguredModel(source.agentModel ?? defaultSettings.agentModel),
     agentEffort: normalizeConfiguredEffort(source.agentEffort ?? defaultSettings.agentEffort),
@@ -330,18 +355,31 @@ function titleFromPath(path) {
 function buildDocumentPaths({ id, source, markdownPath, title }) {
   const docDir = source === "internal" ? join(docsDir, id) : join(dataDir, "external", id);
   const snapshotsDir = join(docDir, "snapshots");
+  const assetDirectoryName = `${safeFileStem(basename(markdownPath, extname(markdownPath)) || "draft")}.assets`;
+  const assetsDir = source === "internal" ? join(docDir, "assets") : join(dirname(markdownPath), assetDirectoryName);
   return {
     id,
     source,
     title,
     markdownPath,
     docDir,
+    assetsDir,
+    assetMarkdownPrefix: source === "internal" ? "assets" : assetDirectoryName,
     reviewPath: join(docDir, "review.json"),
     sessionPath: join(docDir, "session.json"),
     eventsPath: join(docDir, "events.jsonl"),
     snapshotsDir,
     revisionsPath: join(snapshotsDir, "revisions.json")
   };
+}
+
+function safeFileStem(value) {
+  const stem = String(value || "")
+    .normalize("NFKD")
+    .replace(/[^\w.-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return stem && !/^\.+$/.test(stem) ? stem : "asset";
 }
 
 function resolveActiveDocument(markdownArg) {
@@ -978,6 +1016,7 @@ async function loadDocumentIntoMemory() {
       markdownPath: activeDocument.markdownPath,
       displayPath: activeDocument.markdownPath,
       docDir: activeDocument.docDir,
+      assetsDir: activeDocument.assetsDir,
       draftPath: activeDocument.markdownPath,
       reviewPath: activeDocument.reviewPath,
       sessionPath: activeDocument.sessionPath,
@@ -1782,6 +1821,89 @@ function sendText(res, status, body, type = "text/plain; charset=utf-8") {
   res.end(body);
 }
 
+function isRemoteOrDataAsset(src) {
+  return /^(?:https?:|data:|blob:)/i.test(String(src || "").trim());
+}
+
+function imageContentTypeForPath(path) {
+  const ext = extname(path).toLowerCase();
+  return contentTypes[ext] && contentTypes[ext].startsWith("image/") ? contentTypes[ext] : null;
+}
+
+function normalizeUploadMimeType(type, filename) {
+  const requestedType = String(type || "").toLowerCase();
+  if (imageMimeExtensions.has(requestedType)) return requestedType;
+
+  const ext = extname(String(filename || "")).toLowerCase();
+  for (const [mimeType, extension] of imageMimeExtensions.entries()) {
+    if (extension === ext || (ext === ".jpeg" && mimeType === "image/jpeg")) return mimeType;
+  }
+  return "";
+}
+
+function markdownImageLiteral({ alt, src }) {
+  const safeAlt = String(alt || "").replace(/\]/g, "\\]");
+  const safeSrc = /[\s)]/.test(src) ? `<${src}>` : src.replace(/\)/g, "%29");
+  return `![${safeAlt}](${safeSrc})`;
+}
+
+async function saveImageAsset(body) {
+  const filename = typeof body.filename === "string" ? body.filename : "image";
+  const dataUrl = typeof body.dataUrl === "string" ? body.dataUrl : "";
+  const dataMatch = dataUrl.match(/^data:([^;,]+);base64,([\s\S]+)$/);
+  const mimeType = normalizeUploadMimeType(dataMatch?.[1] || body.type, filename);
+  if (!mimeType || !imageMimeExtensions.has(mimeType)) {
+    throw new Error("Unsupported image type.");
+  }
+  if (!dataMatch) throw new Error("Image upload must use a base64 data URL.");
+
+  const buffer = Buffer.from(dataMatch[2], "base64");
+  if (buffer.length === 0) throw new Error("Image file is empty.");
+  if (buffer.length > maxImageAssetBytes) throw new Error("Image file is too large.");
+
+  const extension = imageMimeExtensions.get(mimeType) || ".png";
+  const stem = safeFileStem(basename(filename, extname(filename)) || "image");
+  const hash = createHash("sha256").update(buffer).digest("hex").slice(0, 10);
+  const storedName = `${stem}-${hash}${extension}`;
+  await mkdir(activeDocument.assetsDir, { recursive: true });
+  await writeFile(join(activeDocument.assetsDir, storedName), buffer);
+
+  const src = `${activeDocument.assetMarkdownPrefix}/${storedName}`;
+  const alt = safeFileStem(basename(filename, extname(filename)) || "image").replace(/[-_]+/g, " ");
+  return {
+    filename: storedName,
+    src,
+    url: `/api/assets?src=${encodeURIComponent(src)}`,
+    markdown: markdownImageLiteral({ alt, src }),
+    contentType: mimeType,
+    size: buffer.length
+  };
+}
+
+function resolveImageAssetPath(src) {
+  const raw = String(src || "").trim();
+  if (!raw || isRemoteOrDataAsset(raw)) return null;
+  const normalized = normalize(raw).replace(/^(\.\.[/\\])+/, "");
+  if (normalized.startsWith("/") || /^[A-Za-z]:[\\/]/.test(normalized)) return null;
+  const filePath = resolve(dirname(activeDocument.markdownPath), normalized);
+  const contentType = imageContentTypeForPath(filePath);
+  if (!contentType) return null;
+  return { filePath, contentType };
+}
+
+function serveImageAsset(res, src) {
+  const asset = resolveImageAssetPath(src);
+  if (!asset || !existsSync(asset.filePath)) {
+    sendJson(res, 404, { error: "Image asset not found." });
+    return;
+  }
+  res.writeHead(200, {
+    "content-type": asset.contentType,
+    "cache-control": "no-store"
+  });
+  createReadStream(asset.filePath).pipe(res);
+}
+
 function streamEvents(req, res) {
   res.writeHead(200, {
     "content-type": "text/event-stream; charset=utf-8",
@@ -1881,6 +2003,23 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/document") {
     sendJson(res, 200, getDocument());
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/assets") {
+    const body = await parseBody(req);
+    try {
+      const asset = await saveImageAsset(body);
+      await appendEvent({ type: "asset:image", at: nowIso(), src: asset.src, filename: asset.filename });
+      sendJson(res, 201, asset);
+    } catch (error) {
+      sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/assets") {
+    serveImageAsset(res, url.searchParams.get("src") || "");
     return true;
   }
 

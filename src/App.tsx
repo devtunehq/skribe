@@ -19,6 +19,7 @@ import {
   Heading3,
   Highlighter,
   History,
+  Image as ImageIcon,
   Italic,
   Eye,
   EyeOff,
@@ -53,7 +54,8 @@ import {
   sendToneInterviewMessage,
   subscribeToDocumentEvents,
   updateAgentConfig,
-  updateAppSettings
+  updateAppSettings,
+  uploadImageAsset
 } from "./api";
 import {
   applySuggestion,
@@ -71,6 +73,7 @@ import {
   markdownBlockIdFromIndex,
   normalizeMarkdownPaste,
   parseMarkdownTable,
+  parseMarkdownImage,
   parseMarkdownBlocks,
   moveMarkdownBlock,
   serializeMarkdownBlocks,
@@ -119,8 +122,10 @@ import type {
   ContextLedgerEventType,
   DocumentProposal,
   DocumentState,
+  DocumentFont,
   EditorLanguage,
   FileInfo,
+  AppTheme,
   RevisionState,
   ProposalChangeDecision,
   ReviewThread,
@@ -132,7 +137,10 @@ import type {
 type PanelMode = "threads" | "chat";
 type SaveState = "loading" | "saved" | "saving" | "error";
 type SupportedEditorLanguage = EditorLanguage;
+type SupportedDocumentFont = DocumentFont;
+type SupportedAppTheme = AppTheme;
 type ToneSetupInvocation = "first-run" | "settings";
+type SettingsTab = "writing" | "agent" | "workspace";
 type BlockDropPlacement = "before" | "after";
 type FloatingToolbarState = {
   left: number;
@@ -183,6 +191,27 @@ const editorLanguageOptions: Array<{ value: SupportedEditorLanguage; label: stri
   { value: "en-US", label: "EN-US" }
 ];
 
+const documentFontOptions: Array<{ value: SupportedDocumentFont; label: string; description: string }> = [
+  { value: "default", label: "Skribe default", description: "Mono headings, clean sans body." },
+  { value: "sans", label: "Clean sans", description: "Sans throughout the document." },
+  { value: "serif", label: "Editorial serif", description: "Warmer long-form reading." },
+  { value: "mono", label: "Mono draft", description: "Technical, precise drafting." }
+];
+
+const appThemeOptions: Array<{ value: SupportedAppTheme; label: string; description: string }> = [
+  { value: "default", label: "Skribe", description: "Oat paper, yellow mark, blue actions." },
+  { value: "newsprint", label: "Newsprint", description: "Quiet editorial monochrome with red notes." },
+  { value: "sage", label: "Sage", description: "Soft green workspace with mint actions." },
+  { value: "coral", label: "Coral", description: "Warm paper, coral accents, blue links." },
+  { value: "graphite", label: "Graphite", description: "Dark desk, bright controls." }
+];
+
+const settingsTabOptions: Array<{ id: SettingsTab; label: string }> = [
+  { id: "writing", label: "Writing" },
+  { id: "agent", label: "Agent" },
+  { id: "workspace", label: "Workspace" }
+];
+
 const toneSetupModes: Array<{ id: ToneSetupMode; label: string }> = [
   { id: "manual", label: "Manual" },
   { id: "interview", label: "Interview" },
@@ -228,6 +257,8 @@ const defaultAppSettings: AppSettings = {
   toneOfVoice: "",
   toneOfVoiceSetupComplete: false,
   editorLanguage: "en-GB",
+  documentFont: "default",
+  theme: "default",
   agentRuntime: "auto",
   agentModel: "auto",
   agentEffort: "auto",
@@ -242,9 +273,19 @@ const defaultAppSettings: AppSettings = {
 };
 
 function mergeAppSettings(settings?: Partial<AppSettings> | null): AppSettings {
+  const requestedDocumentFont = settings?.documentFont;
+  const requestedTheme = settings?.theme;
+  const documentFont: SupportedDocumentFont = documentFontOptions.some((option) => option.value === requestedDocumentFont)
+    ? (requestedDocumentFont as SupportedDocumentFont)
+    : defaultAppSettings.documentFont;
+  const theme: SupportedAppTheme = appThemeOptions.some((option) => option.value === requestedTheme)
+    ? (requestedTheme as SupportedAppTheme)
+    : defaultAppSettings.theme;
   return {
     ...defaultAppSettings,
     ...(settings ?? {}),
+    documentFont,
+    theme,
     defaultSkills: Array.isArray(settings?.defaultSkills) ? settings.defaultSkills : defaultAppSettings.defaultSkills,
     panelState: {
       ...defaultAppSettings.panelState,
@@ -426,6 +467,16 @@ async function downloadTableAsPng(table: HTMLTableElement, filename: string) {
 function clipText(text: string, maxLength = 260) {
   const compact = text.replace(/\s+/g, " ").trim();
   return compact.length > maxLength ? `${compact.slice(0, maxLength - 1)}...` : compact;
+}
+
+function imagePreviewSrc(src: string) {
+  if (/^(?:https?:|data:|blob:)/i.test(src)) return src;
+  return `/api/assets?src=${encodeURIComponent(src)}`;
+}
+
+function imageDisplayName(src: string) {
+  const clean = src.split(/[?#]/)[0] || src;
+  return decodeURIComponent(clean.split("/").filter(Boolean).at(-1) || "image");
 }
 
 function createLedgerEvent({
@@ -733,6 +784,7 @@ function App() {
   const [blockResetKeys, setBlockResetKeys] = useState<Record<string, number>>({});
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
   const linkInputRef = useRef<HTMLInputElement | null>(null);
   const blockRefs = useRef<Record<string, HTMLElement | null>>({});
   const selectionRangeRef = useRef<Range | null>(null);
@@ -1205,6 +1257,7 @@ function App() {
 
     return serializeMarkdownBlocks(
       blocks.flatMap((block) => {
+        if (block.type === "image") return [block];
         const node = blockRefs.current[block.id];
         if (!node) return [block];
         const text = blockNodeToMarkdown(node, block.type);
@@ -1953,6 +2006,60 @@ function App() {
     return true;
   }
 
+  function insertMarkdownBlockAtCurrentRange(insertion: string, label: string) {
+    const current = stateRef.current;
+    if (!current || !insertion.trim()) return false;
+
+    const liveState = stateWithLiveCanvasEdit(current);
+    const range = currentMarkdownEditRange(liveState.markdown) ?? {
+      start: liveState.markdown.length,
+      end: liveState.markdown.length
+    };
+    const markdown = spliceMarkdownPaste(liveState.markdown, range.start, range.end, insertion, true);
+    if (markdown === liveState.markdown) return false;
+
+    commit(() => ({
+      ...liveState,
+      markdown,
+      review: {
+        ...liveState.review,
+        updatedAt: nowIso()
+      }
+    }));
+    clearCanvasSelectionState();
+    showTransientToast(label);
+    return true;
+  }
+
+  function isImageFile(file: File | null | undefined) {
+    return Boolean(file && file.type.startsWith("image/"));
+  }
+
+  async function insertImageFile(file: File) {
+    if (!isImageFile(file)) {
+      showTransientToast("Unsupported image file");
+      return false;
+    }
+
+    try {
+      const asset = await uploadImageAsset(file);
+      return insertMarkdownBlockAtCurrentRange(asset.markdown, "Image inserted");
+    } catch (error) {
+      console.error("Unable to insert image", error);
+      showTransientToast("Image insert failed");
+      return false;
+    }
+  }
+
+  async function insertImageFiles(files: FileList | File[]) {
+    const images = Array.from(files).filter(isImageFile);
+    if (images.length === 0) return false;
+    for (const image of images) {
+      await insertImageFile(image);
+    }
+    return true;
+  }
+
   async function pasteClipboardFromMenu(asMarkdown: boolean) {
     try {
       const text = await navigator.clipboard.readText();
@@ -2029,6 +2136,13 @@ function App() {
   }
 
   function handleCanvasPaste(event: React.ClipboardEvent<HTMLElement>) {
+    const imageFiles = Array.from(event.clipboardData.files).filter(isImageFile);
+    if (imageFiles.length > 0) {
+      event.preventDefault();
+      void insertImageFiles(imageFiles);
+      return;
+    }
+
     const explicitMarkdown = event.clipboardData.getData("text/markdown");
     const plainText = event.clipboardData.getData("text/plain");
     const text = explicitMarkdown || plainText;
@@ -2043,6 +2157,24 @@ function App() {
     if (!applyClipboardTextPaste(text, { asMarkdown })) {
       showTransientToast("Paste failed");
     }
+  }
+
+  function handleCanvasDragOver(event: React.DragEvent<HTMLElement>) {
+    if (!Array.from(event.dataTransfer.items ?? []).some((item) => item.kind === "file" && item.type.startsWith("image/"))) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }
+
+  function handleCanvasDrop(event: React.DragEvent<HTMLElement>) {
+    const imageFiles = Array.from(event.dataTransfer.files).filter(isImageFile);
+    if (imageFiles.length === 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    placeCaretAtPoint(event.clientX, event.clientY);
+    void insertImageFiles(imageFiles);
   }
 
   function handleCanvasContextMenu(event: React.MouseEvent<HTMLElement>) {
@@ -2928,6 +3060,8 @@ function App() {
       className={`app-shell ${isLeftRailCollapsed ? "left-collapsed" : ""} ${
         isRightPanelCollapsed ? "right-collapsed" : ""
       }`}
+      data-theme={appSettings.theme}
+      data-document-font={appSettings.documentFont}
       lang={editorLanguage}
     >
       <header className="topbar">
@@ -3114,6 +3248,17 @@ function App() {
               event.target.value = "";
             }}
           />
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+            hidden
+            onChange={(event) => {
+              const files = event.target.files;
+              if (files) void insertImageFiles(files);
+              event.target.value = "";
+            }}
+          />
         </div>
       </header>
 
@@ -3208,6 +3353,9 @@ function App() {
               <button title="Insert link (Ctrl/Cmd+K)" onMouseDown={(event) => { event.preventDefault(); openLinkPopover(); }}>
                 <LinkIcon size={16} />
               </button>
+              <button title="Insert image" onMouseDown={(event) => { event.preventDefault(); imageInputRef.current?.click(); }}>
+                <ImageIcon size={16} />
+              </button>
               <span className="toolbar-divider" />
               <button title="Bulleted list (Ctrl/Cmd+Shift+8)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "unordered-list" }); }}>
                 <List size={16} />
@@ -3240,6 +3388,8 @@ function App() {
             onCopy={handleCanvasCopy}
             onCut={handleCanvasCut}
             onPaste={handleCanvasPaste}
+            onDragOver={handleCanvasDragOver}
+            onDrop={handleCanvasDrop}
             onContextMenu={handleCanvasContextMenu}
             onScroll={updateFloatingToolbarPosition}
           >
@@ -3369,6 +3519,7 @@ function App() {
           onItalic={() => applyInlineCommand("italic")}
           onInlineCode={applyInlineCode}
           onLink={openLinkPopover}
+          onImage={() => imageInputRef.current?.click()}
           onComment={startCommentFromSelection}
         />
       ) : null}
@@ -3805,6 +3956,7 @@ function SettingsDialog({
   onSave: () => void;
   onCancel: () => void;
 }) {
+  const [activeTab, setActiveTab] = useState<SettingsTab>("writing");
   const selectedRuntimeId = settings.agentRuntime === "auto" ? resolvedRuntime : settings.agentRuntime;
   const selectedRuntimeStatus = runtimeOptions.find((runtime) => runtime.id === selectedRuntimeId) ?? null;
   const modelOptions = selectedRuntimeStatus?.models ?? [];
@@ -3817,6 +3969,8 @@ function SettingsDialog({
     settings.agentEffort === "auto" || effortOptions.some((effort) => effort.id === settings.agentEffort)
       ? settings.agentEffort
       : "auto";
+  const selectedDocumentFont = documentFontOptions.find((option) => option.value === settings.documentFont) ?? documentFontOptions[0];
+  const selectedTheme = appThemeOptions.find((option) => option.value === settings.theme) ?? appThemeOptions[0];
 
   return (
     <div className="settings-backdrop" role="presentation" onMouseDown={onCancel}>
@@ -3830,176 +3984,245 @@ function SettingsDialog({
         <header className="settings-dialog-header">
           <div>
             <span>Settings</span>
-            <h2 id="settings-title">Workspace</h2>
+            <h2 id="settings-title">Settings</h2>
           </div>
           <button className="icon-button mini" onClick={onCancel} title="Close settings">
             <X size={15} />
           </button>
         </header>
 
-        <div className="settings-form">
-          <div className="settings-field">
-            <div className="settings-field-header">
-              <span>Tone of voice</span>
-              <button className="secondary-button small" onClick={onOpenToneSetup}>
-                <Sparkles size={14} />
-                Build tone
-              </button>
-            </div>
-            <textarea
-              value={settings.toneOfVoice}
-              onChange={(event) => onChange({ toneOfVoice: event.target.value })}
-              placeholder="Direct, plainspoken, founder-to-founder, no hype."
-              rows={5}
-            />
-          </div>
-
-          <label className="settings-field">
-            <span>Language</span>
-            <select
-              value={settings.editorLanguage}
-              onChange={(event) => onChange({ editorLanguage: event.target.value as SupportedEditorLanguage })}
+        <div className="settings-tabs" role="tablist" aria-label="Settings sections">
+          {settingsTabOptions.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              id={`settings-tab-${tab.id}`}
+              role="tab"
+              aria-selected={activeTab === tab.id}
+              aria-controls={`settings-panel-${tab.id}`}
+              className={activeTab === tab.id ? "is-active" : ""}
+              onClick={() => setActiveTab(tab.id)}
             >
-              {editorLanguageOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
+              {tab.label}
+            </button>
+          ))}
+        </div>
 
-          <div className="settings-grid">
-            <label className="settings-field">
-              <span>Agent provider</span>
-              <select
-                value={settings.agentRuntime}
-                onChange={(event) =>
-                  onChange({
-                    agentRuntime: event.target.value,
-                    agentModel: "auto",
-                    agentEffort: "auto"
-                  })
-                }
-              >
-                <option value="auto">Auto</option>
-                {runtimeOptions.map((runtime) => (
-                  <option key={runtime.id} value={runtime.id} disabled={!runtime.available}>
-                    {runtime.label}{runtime.available ? "" : " unavailable"}
-                  </option>
-                ))}
-              </select>
-            </label>
+        <div
+          id={`settings-panel-${activeTab}`}
+          className="settings-form settings-tab-panel"
+          role="tabpanel"
+          aria-labelledby={`settings-tab-${activeTab}`}
+        >
+          {activeTab === "writing" ? (
+            <>
+              <div className="settings-field">
+                <div className="settings-field-header">
+                  <span>Tone of voice</span>
+                  <button className="secondary-button small" onClick={onOpenToneSetup}>
+                    <Sparkles size={14} />
+                    Build tone
+                  </button>
+                </div>
+                <textarea
+                  value={settings.toneOfVoice}
+                  onChange={(event) => onChange({ toneOfVoice: event.target.value })}
+                  placeholder="Direct, plainspoken, founder-to-founder, no hype."
+                  rows={5}
+                />
+              </div>
 
-            <label className="settings-field">
-              <span>Agent model</span>
-              <select
-                value={modelSelectValue}
-                disabled={Boolean(selectedRuntimeStatus && !selectedRuntimeStatus.supportsManualModel)}
-                onChange={(event) => {
-                  if (event.target.value === "__custom") return;
-                  onChange({ agentModel: event.target.value });
-                }}
-              >
-                <option value="auto">Default model</option>
-                {modelOptions.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.label}
-                  </option>
-                ))}
-                {modelSelectValue === "__custom" ? <option value="__custom">{settings.agentModel}</option> : null}
-              </select>
-            </label>
-          </div>
+              <div className="settings-grid">
+                <label className="settings-field">
+                  <span>Language</span>
+                  <select
+                    value={settings.editorLanguage}
+                    onChange={(event) => onChange({ editorLanguage: event.target.value as SupportedEditorLanguage })}
+                  >
+                    {editorLanguageOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <small className="is-placeholder" aria-hidden="true">
+                    Language helper
+                  </small>
+                </label>
 
-          <label className="settings-field">
-            <span>Agent effort</span>
-            <select
-              value={effortSelectValue}
-              disabled={Boolean(selectedRuntimeStatus && !selectedRuntimeStatus.supportsEffort)}
-              onChange={(event) => onChange({ agentEffort: event.target.value })}
-            >
-              <option value="auto">Default effort</option>
-              {effortOptions.map((effort) => (
-                <option key={effort.id} value={effort.id}>
-                  {effort.label}
-                </option>
-              ))}
-            </select>
-          </label>
+                <label className="settings-field">
+                  <span>Document font</span>
+                  <select
+                    value={settings.documentFont}
+                    onChange={(event) => onChange({ documentFont: event.target.value as SupportedDocumentFont })}
+                  >
+                    {documentFontOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <small>{selectedDocumentFont.description}</small>
+                </label>
+              </div>
 
-          <div className="settings-field">
-            <span>Default skills</span>
-            <SettingsSkillPicker
-              skills={skills}
-              selectedSkillIds={settings.defaultSkills}
-              onChange={(defaultSkills) => onChange({ defaultSkills })}
-            />
-          </div>
+              <label className="settings-field">
+                <span>Theme</span>
+                <select
+                  value={settings.theme}
+                  onChange={(event) => onChange({ theme: event.target.value as SupportedAppTheme })}
+                >
+                  {appThemeOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <small>{selectedTheme.description}</small>
+              </label>
+            </>
+          ) : null}
 
-          <label className="settings-check">
-            <input
-              type="checkbox"
-              checked={settings.autoReplyToComments}
-              onChange={(event) => onChange({ autoReplyToComments: event.target.checked })}
-            />
-            <span>Auto-reply to new comments</span>
-          </label>
-
-          <label className="settings-check">
-            <input
-              type="checkbox"
-              checked={settings.showResolvedThreads}
-              onChange={(event) => onChange({ showResolvedThreads: event.target.checked })}
-            />
-            <span>Show resolved threads</span>
-          </label>
-
-          <div className="settings-grid">
-            <label className="settings-check">
-              <input
-                type="checkbox"
-                checked={settings.panelState.leftCollapsed}
-                onChange={(event) =>
-                  onChange({
-                    panelState: {
-                      ...settings.panelState,
-                      leftCollapsed: event.target.checked
+          {activeTab === "agent" ? (
+            <>
+              <div className="settings-grid">
+                <label className="settings-field">
+                  <span>Agent provider</span>
+                  <select
+                    value={settings.agentRuntime}
+                    onChange={(event) =>
+                      onChange({
+                        agentRuntime: event.target.value,
+                        agentModel: "auto",
+                        agentEffort: "auto"
+                      })
                     }
-                  })
-                }
-              />
-              <span>Collapse left panel</span>
-            </label>
+                  >
+                    <option value="auto">Auto</option>
+                    {runtimeOptions.map((runtime) => (
+                      <option key={runtime.id} value={runtime.id} disabled={!runtime.available}>
+                        {runtime.label}{runtime.available ? "" : " unavailable"}
+                      </option>
+                    ))}
+                  </select>
+                </label>
 
-            <label className="settings-check">
-              <input
-                type="checkbox"
-                checked={settings.panelState.rightCollapsed}
-                onChange={(event) =>
-                  onChange({
-                    panelState: {
-                      ...settings.panelState,
-                      rightCollapsed: event.target.checked
+                <label className="settings-field">
+                  <span>Agent model</span>
+                  <select
+                    value={modelSelectValue}
+                    disabled={Boolean(selectedRuntimeStatus && !selectedRuntimeStatus.supportsManualModel)}
+                    onChange={(event) => {
+                      if (event.target.value === "__custom") return;
+                      onChange({ agentModel: event.target.value });
+                    }}
+                  >
+                    <option value="auto">Default model</option>
+                    {modelOptions.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.label}
+                      </option>
+                    ))}
+                    {modelSelectValue === "__custom" ? <option value="__custom">{settings.agentModel}</option> : null}
+                  </select>
+                </label>
+              </div>
+
+              <label className="settings-field">
+                <span>Agent effort</span>
+                <select
+                  value={effortSelectValue}
+                  disabled={Boolean(selectedRuntimeStatus && !selectedRuntimeStatus.supportsEffort)}
+                  onChange={(event) => onChange({ agentEffort: event.target.value })}
+                >
+                  <option value="auto">Default effort</option>
+                  {effortOptions.map((effort) => (
+                    <option key={effort.id} value={effort.id}>
+                      {effort.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="settings-field">
+                <span>Default skills</span>
+                <SettingsSkillPicker
+                  skills={skills}
+                  selectedSkillIds={settings.defaultSkills}
+                  onChange={(defaultSkills) => onChange({ defaultSkills })}
+                />
+              </div>
+
+              <label className="settings-check">
+                <input
+                  type="checkbox"
+                  checked={settings.autoReplyToComments}
+                  onChange={(event) => onChange({ autoReplyToComments: event.target.checked })}
+                />
+                <span>Auto-reply to new comments</span>
+              </label>
+
+              <label className="settings-field">
+                <span>Proposal mode</span>
+                <select
+                  value={settings.proposalModeDefault}
+                  onChange={(event) =>
+                    onChange({ proposalModeDefault: event.target.value === "bold" ? "bold" : "conservative" })
+                  }
+                >
+                  <option value="conservative">Conservative</option>
+                  <option value="bold">Bold</option>
+                </select>
+              </label>
+            </>
+          ) : null}
+
+          {activeTab === "workspace" ? (
+            <>
+              <label className="settings-check">
+                <input
+                  type="checkbox"
+                  checked={settings.showResolvedThreads}
+                  onChange={(event) => onChange({ showResolvedThreads: event.target.checked })}
+                />
+                <span>Show resolved threads</span>
+              </label>
+
+              <div className="settings-grid">
+                <label className="settings-check">
+                  <input
+                    type="checkbox"
+                    checked={settings.panelState.leftCollapsed}
+                    onChange={(event) =>
+                      onChange({
+                        panelState: {
+                          ...settings.panelState,
+                          leftCollapsed: event.target.checked
+                        }
+                      })
                     }
-                  })
-                }
-              />
-              <span>Collapse right panel</span>
-            </label>
-          </div>
+                  />
+                  <span>Collapse left panel</span>
+                </label>
 
-          <label className="settings-field">
-            <span>Proposal mode</span>
-            <select
-              value={settings.proposalModeDefault}
-              onChange={(event) =>
-                onChange({ proposalModeDefault: event.target.value === "bold" ? "bold" : "conservative" })
-              }
-            >
-              <option value="conservative">Conservative</option>
-              <option value="bold">Bold</option>
-            </select>
-          </label>
+                <label className="settings-check">
+                  <input
+                    type="checkbox"
+                    checked={settings.panelState.rightCollapsed}
+                    onChange={(event) =>
+                      onChange({
+                        panelState: {
+                          ...settings.panelState,
+                          rightCollapsed: event.target.checked
+                        }
+                      })
+                    }
+                  />
+                  <span>Collapse right panel</span>
+                </label>
+              </div>
+            </>
+          ) : null}
         </div>
 
         <footer className="settings-dialog-actions">
@@ -4423,6 +4646,7 @@ function FloatingFormatToolbar({
   onItalic,
   onInlineCode,
   onLink,
+  onImage,
   onComment
 }: {
   position: FloatingToolbarState;
@@ -4433,6 +4657,7 @@ function FloatingFormatToolbar({
   onItalic: () => void;
   onInlineCode: () => void;
   onLink: () => void;
+  onImage: () => void;
   onComment: () => void;
 }) {
   const keepSelection = (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -4470,6 +4695,9 @@ function FloatingFormatToolbar({
       </button>
       <button title="Insert link" onMouseDown={keepSelection} onClick={onLink}>
         <LinkIcon size={15} />
+      </button>
+      <button title="Insert image" onMouseDown={keepSelection} onClick={onImage}>
+        <ImageIcon size={15} />
       </button>
       <span className="toolbar-divider" />
       <button title="Comment on selected text" onMouseDown={keepSelection} onClick={onComment}>
@@ -4925,6 +5153,10 @@ const EditableBlock = React.memo(function EditableBlock({
     );
   }
 
+  if (block.type === "image") {
+    return <EditableImageBlock block={block} onRegisterBlock={onRegisterBlock} onFocusBlock={onFocusBlock} />;
+  }
+
   if (block.type === "table") {
     return <EditableTableBlock block={block} editableProps={editableProps} onTableImageExported={onTableImageExported} />;
   }
@@ -4935,6 +5167,52 @@ const EditableBlock = React.memo(function EditableBlock({
     </p>
   );
 }, areEditableBlockPropsEqual);
+
+function EditableImageBlock({
+  block,
+  onRegisterBlock,
+  onFocusBlock
+}: {
+  block: ReturnType<typeof parseMarkdownBlocks>[number];
+  onRegisterBlock: (blockId: string, node: HTMLElement | null) => void;
+  onFocusBlock: (blockId: string) => void;
+}) {
+  const image = parseMarkdownImage(block.text);
+  if (!image) {
+    return (
+      <p
+        data-block-id={block.id}
+        className="editable-text"
+        contentEditable
+        suppressContentEditableWarning
+        ref={(node) => onRegisterBlock(block.id, node)}
+      >
+        {block.text}
+      </p>
+    );
+  }
+
+  return (
+    <figure
+      id={block.id}
+      data-block-id={block.id}
+      className="editable-image-block"
+      contentEditable={false}
+      tabIndex={0}
+      ref={(node) => onRegisterBlock(block.id, node)}
+      onClick={() => onFocusBlock(block.id)}
+      onFocus={() => onFocusBlock(block.id)}
+    >
+      <div className="editable-image-frame">
+        <img src={imagePreviewSrc(image.src)} alt={image.alt} title={image.title} loading="lazy" />
+      </div>
+      <figcaption>
+        <span>{image.alt || imageDisplayName(image.src)}</span>
+        <small>{image.src}</small>
+      </figcaption>
+    </figure>
+  );
+}
 
 function EditableTableBlock({
   block,

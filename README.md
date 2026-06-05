@@ -20,13 +20,14 @@ Most AI writing tools treat long-form editing as a chat transcript. That gets cl
 
 Skribe is built around the document:
 
-- **Editable rendered Markdown canvas** with headings, links, lists, quotes, code, GFM tables, copy/paste, and keyboard shortcuts.
+- **Editable rendered Markdown canvas** with headings, links, images, lists, quotes, code, GFM tables, copy/paste, and keyboard shortcuts.
 - **Anchored comment threads** for paragraph-level or selection-level review.
 - **Document chat** for broader passes, structural edits, and agent collaboration.
 - **Agent skills** for reusable writing passes such as voice, humanising, copyediting, newsletter review, or any local skill your CLI runtime already knows about.
 - **Reviewable diffs** so agent edits can be accepted, declined, or revised before they touch the draft.
 - **Per-document context memory** so previous comments, decisions, accepted changes, and revision requests stay available to the agent.
 - **Local-only storage** for the Markdown file, review state, settings, revisions, and sidecars.
+- **Local image assets** from inserted, pasted, or dropped images, stored beside the active Markdown document and referenced with normal Markdown image syntax.
 - **Provider-agnostic agent runtime** with support for Codex CLI, Claude Code, or automatic runtime selection using your existing CLI authentication and provider plan.
 
 ## Threads vs Chat
@@ -98,7 +99,7 @@ Review proposed document changes inline, then accept, decline, rewrite, or comme
 
 ### Settings
 
-Persist tone of voice, language, agent runtime, model, effort, default skills, and review preferences.
+Persist writing preferences, theme, document font, agent runtime, model, effort, default skills, and workspace defaults.
 
 ![Skribe settings](docs/screenshots/settings.png)
 
@@ -216,7 +217,7 @@ Useful environment variables:
 | `SKRIBE_AGENT_TIMEOUT_MS` | Agent command timeout. Defaults to 10 minutes. |
 | `SKRIBE_SKILL_ROOTS` | Additional skill roots for slash-command style skills. |
 
-You can also change runtime, model, effort, language, tone, default skills, and review preferences from the settings panel.
+You can also change runtime, model, effort, language, document font, theme, tone, default skills, and review preferences from the settings panel.
 
 ## Storage Model
 
