@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { use, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { MultiFileDiff } from "@pierre/diffs/react";
 import {
   Bold,
@@ -117,13 +117,25 @@ import {
   resolveSelectionDraftRange
 } from "./selection";
 import { AgentTypingIndicator } from "./AgentTypingIndicator";
+import {
+  appControllerReducer,
+  createAppControllerSetters,
+  createAppControllerState
+} from "./appControllerState";
+import type {
+  FloatingToolbarState,
+  LinkPopoverState,
+  PanelMode,
+  SaveState,
+  SelectionContextMenuState
+} from "./appControllerState";
 import { SettingsDialog } from "./SettingsDialog";
 import {
   appThemeOptions,
   diffViewModeOptions,
   documentFontOptions
 } from "./settingsOptions";
-import { ToneSetupDialog, type ToneSetupInvocation } from "./ToneSetupDialog";
+import { ToneSetupDialog } from "./ToneSetupDialog";
 import type {
   AgentSession,
   AgentRuntimeConfig,
@@ -147,27 +159,11 @@ import type {
   SelectionDraft
 } from "./types";
 
-type PanelMode = "threads" | "chat";
-type SaveState = "loading" | "saved" | "saving" | "error";
 type SupportedEditorLanguage = EditorLanguage;
 type SupportedDocumentFont = DocumentFont;
 type SupportedAppTheme = AppTheme;
 type SupportedDiffViewMode = DiffViewMode;
 type BlockDropPlacement = "before" | "after";
-type FloatingToolbarState = {
-  left: number;
-  top: number;
-  placement: "above" | "below";
-};
-type LinkPopoverState = {
-  left: number;
-  top: number;
-};
-type SelectionContextMenuState = {
-  left: number;
-  top: number;
-  hasSelection: boolean;
-};
 type LinkTargetState = {
   blockId: string;
   selectedText: string;
@@ -811,41 +807,81 @@ function isOlderDocument(candidate: DocumentState, current: DocumentState | null
   return Number.isFinite(candidateTime) && Number.isFinite(currentTime) && candidateTime < currentTime;
 }
 
-function App() {
-  const [documentState, setDocumentState] = useState<DocumentState | null>(null);
-  const [appSettings, setAppSettings] = useState<AppSettings>(defaultAppSettings);
-  const [settingsDraft, setSettingsDraft] = useState<AppSettings>(defaultAppSettings);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [toneSetupInvocation, setToneSetupInvocation] = useState<ToneSetupInvocation | null>(null);
-  const [settingsSaveState, setSettingsSaveState] = useState<SaveState>("saved");
-  const [revisionState, setRevisionState] = useState<RevisionState>({ revisions: [], currentRevisionId: null });
-  const [agentSkills, setAgentSkills] = useState<AgentSkill[]>([]);
-  const [agentRuntimeConfig, setAgentRuntimeConfig] = useState<AgentRuntimeConfig | null>(null);
-  const [agentModelDraft, setAgentModelDraft] = useState("");
-  const [isAgentConfigOpen, setIsAgentConfigOpen] = useState(false);
-  const [isAgentModelMenuOpen, setIsAgentModelMenuOpen] = useState(false);
-  const [saveState, setSaveState] = useState<SaveState>("loading");
-  const [panelMode, setPanelMode] = useState<PanelMode>("threads");
-  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
-  const [activeBlockId, setActiveBlockId] = useState<string | null>(null);
-  const [isLeftRailCollapsed, setIsLeftRailCollapsed] = useState(false);
-  const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
-  const [isRestoringRevision, setIsRestoringRevision] = useState(false);
-  const [isRevisionHistoryOpen, setIsRevisionHistoryOpen] = useState(false);
-  const [selectionDraft, setSelectionDraft] = useState<SelectionDraft | null>(null);
-  const [pendingSelectionDraft, setPendingSelectionDraft] = useState<SelectionDraft | null>(null);
-  const [newComment, setNewComment] = useState("");
-  const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
-  const [newThreadSkillIds, setNewThreadSkillIds] = useState<string[]>([]);
-  const [threadSkillIds, setThreadSkillIds] = useState<Record<string, string[]>>({});
-  const [chatDraft, setChatDraft] = useState("");
-  const [chatSkillIds, setChatSkillIds] = useState<string[]>([]);
-  const [floatingToolbar, setFloatingToolbar] = useState<FloatingToolbarState | null>(null);
-  const [linkPopover, setLinkPopover] = useState<LinkPopoverState | null>(null);
-  const [selectionContextMenu, setSelectionContextMenu] = useState<SelectionContextMenuState | null>(null);
-  const [linkDraft, setLinkDraft] = useState("");
-  const [lastCopied, setLastCopied] = useState<string | null>(null);
-  const [blockResetKeys, setBlockResetKeys] = useState<Record<string, number>>({});
+function useSkribeController() {
+  const [controllerState, dispatchController] = useReducer(appControllerReducer, defaultAppSettings, createAppControllerState);
+  const controllerSetters = useMemo(() => createAppControllerSetters(dispatchController), []);
+  const {
+    documentState,
+    appSettings,
+    settingsDraft,
+    isSettingsOpen,
+    toneSetupInvocation,
+    settingsSaveState,
+    revisionState,
+    agentSkills,
+    agentRuntimeConfig,
+    agentModelDraft,
+    isAgentConfigOpen,
+    isAgentModelMenuOpen,
+    saveState,
+    panelMode,
+    activeThreadId,
+    activeBlockId,
+    isLeftRailCollapsed,
+    isRightPanelCollapsed,
+    isRestoringRevision,
+    isRevisionHistoryOpen,
+    selectionDraft,
+    pendingSelectionDraft,
+    newComment,
+    replyDrafts,
+    newThreadSkillIds,
+    threadSkillIds,
+    chatDraft,
+    chatSkillIds,
+    floatingToolbar,
+    linkPopover,
+    selectionContextMenu,
+    linkDraft,
+    lastCopied,
+    blockResetKeys
+  } = controllerState;
+  const {
+    setDocumentState,
+    setAppSettings,
+    setSettingsDraft,
+    setIsSettingsOpen,
+    setToneSetupInvocation,
+    setSettingsSaveState,
+    setRevisionState,
+    setAgentSkills,
+    setAgentRuntimeConfig,
+    setAgentModelDraft,
+    setIsAgentConfigOpen,
+    setIsAgentModelMenuOpen,
+    setSaveState,
+    setPanelMode,
+    setActiveThreadId,
+    setActiveBlockId,
+    setIsLeftRailCollapsed,
+    setIsRightPanelCollapsed,
+    setIsRestoringRevision,
+    setIsRevisionHistoryOpen,
+    setSelectionDraft,
+    setPendingSelectionDraft,
+    setNewComment,
+    setReplyDrafts,
+    setNewThreadSkillIds,
+    setThreadSkillIds,
+    setChatDraft,
+    setChatSkillIds,
+    setFloatingToolbar,
+    setLinkPopover,
+    setSelectionContextMenu,
+    setLinkDraft,
+    setLastCopied,
+    setBlockResetKeys
+  } = controllerSetters;
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
@@ -896,7 +932,15 @@ function App() {
         setSaveState("error");
       }
     },
-    [agentSession?.status]
+    [
+      agentSession?.status,
+      setAgentModelDraft,
+      setAgentRuntimeConfig,
+      setAppSettings,
+      setDocumentState,
+      setSaveState,
+      setSettingsDraft
+    ]
   );
 
   useEffect(() => {
@@ -919,7 +963,21 @@ function App() {
         setSaveState("saved");
       })
       .catch(() => setSaveState("error"));
-  }, []);
+  }, [
+    setAgentModelDraft,
+    setAgentRuntimeConfig,
+    setAgentSkills,
+    setAppSettings,
+    setChatSkillIds,
+    setDocumentState,
+    setIsLeftRailCollapsed,
+    setIsRightPanelCollapsed,
+    setNewThreadSkillIds,
+    setRevisionState,
+    setSaveState,
+    setSettingsDraft,
+    setToneSetupInvocation
+  ]);
 
   useEffect(() => {
     saveRef.current = saveState;
@@ -932,6 +990,12 @@ function App() {
       linkInputRef.current?.select();
     });
   }, [linkPopover]);
+
+  const refreshRevisions = useCallback(() => {
+    fetchRevisionHistory()
+      .then((revisions) => setRevisionState(revisions))
+      .catch(() => undefined);
+  }, [setRevisionState]);
 
   const handleRemoteDocument = useCallback(
     (remote: DocumentState) => {
@@ -966,7 +1030,23 @@ function App() {
       }
       if (saveRef.current !== "saving") setSaveState("saved");
     },
-    [clearPendingEditTimers]
+    [
+      clearPendingEditTimers,
+      refreshRevisions,
+      setActiveBlockId,
+      setActiveThreadId,
+      setAgentRuntimeConfig,
+      setBlockResetKeys,
+      setDocumentState,
+      setFloatingToolbar,
+      setLinkPopover,
+      setPendingSelectionDraft,
+      setReplyDrafts,
+      setSaveState,
+      setSelectionContextMenu,
+      setSelectionDraft,
+      setThreadSkillIds
+    ]
   );
 
   useEffect(() => subscribeToDocumentEvents(handleRemoteDocument), [handleRemoteDocument]);
@@ -985,7 +1065,7 @@ function App() {
 
     window.addEventListener("resize", reposition);
     return () => window.removeEventListener("resize", reposition);
-  }, []);
+  }, [setFloatingToolbar]);
 
   const outline = useMemo(() => extractOutline(documentState?.markdown ?? ""), [documentState?.markdown]);
   const words = useMemo(() => wordCount(documentState?.markdown ?? ""), [documentState?.markdown]);
@@ -1015,12 +1095,6 @@ function App() {
   const activeThread = visibleThreads.find((thread) => thread.id === activeThreadId) ?? visibleThreads[0] ?? null;
   const openThreadCount = openThreads(threads).length;
   const resolvedThreadCount = threads.filter((thread) => thread.status === "resolved").length;
-  function refreshRevisions() {
-    fetchRevisionHistory()
-      .then((revisions) => setRevisionState(revisions))
-      .catch(() => undefined);
-  }
-
   async function persistSettings(nextSettings: AppSettings, options: { closeDialog?: boolean } = {}) {
     const normalizedSettings = mergeAppSettings(nextSettings);
     setAppSettings(normalizedSettings);
@@ -2859,7 +2933,7 @@ function App() {
   const notifyTableImageExported = useCallback((status: "success" | "error") => {
     setLastCopied(status === "success" ? "Table image downloaded" : "Table image export failed");
     window.setTimeout(() => setLastCopied(null), 1600);
-  }, []);
+  }, [setLastCopied]);
 
   async function importMarkdown(file: File) {
     const markdown = await file.text();
@@ -2929,15 +3003,6 @@ function App() {
     }
   }
 
-  if (!documentState) {
-    return (
-      <main className="loading-screen">
-        <div className="loading-mark" />
-        <p>Opening local writing workspace...</p>
-      </main>
-    );
-  }
-
   const editorLanguage = appSettings.editorLanguage;
   const configuredRuntime = currentConfiguredRuntime();
   const resolvedRuntime =
@@ -2974,6 +3039,213 @@ function App() {
     ? `${agentSession.status}${agentSession.queueDepth > 0 ? ` · ${agentSession.queueDepth}` : ""}`
     : "idle";
 
+
+  return {
+    documentState,
+    appSettings,
+    settingsDraft,
+    isSettingsOpen,
+    toneSetupInvocation,
+    settingsSaveState,
+    revisionState,
+    agentSkills,
+    agentRuntimeConfig,
+    agentModelDraft,
+    isAgentConfigOpen,
+    isAgentModelMenuOpen,
+    saveState,
+    panelMode,
+    activeThreadId,
+    activeBlockId,
+    isLeftRailCollapsed,
+    isRightPanelCollapsed,
+    isRestoringRevision,
+    isRevisionHistoryOpen,
+    selectionDraft,
+    pendingSelectionDraft,
+    newComment,
+    replyDrafts,
+    newThreadSkillIds,
+    threadSkillIds,
+    chatDraft,
+    chatSkillIds,
+    floatingToolbar,
+    linkPopover,
+    selectionContextMenu,
+    linkDraft,
+    lastCopied,
+    blockResetKeys,
+    agentSession,
+    canvasRef,
+    fileInputRef,
+    imageInputRef,
+    linkInputRef,
+    selectionRangeRef,
+    linkRangeRef,
+    linkTargetRef,
+    setIsAgentConfigOpen,
+    setIsAgentModelMenuOpen,
+    setAgentModelDraft,
+    setIsLeftRailCollapsed,
+    setIsRightPanelCollapsed,
+    setIsRevisionHistoryOpen,
+    setPanelMode,
+    setNewComment,
+    setNewThreadSkillIds,
+    setSelectionDraft,
+    setPendingSelectionDraft,
+    setFloatingToolbar,
+    setReplyDrafts,
+    setThreadSkillIds,
+    setChatDraft,
+    setChatSkillIds,
+    setLinkPopover,
+    setLinkDraft,
+    setToneSetupInvocation,
+    setSelectionContextMenu,
+    outline,
+    words,
+    threads,
+    showResolvedThreads,
+    visibleThreads,
+    proposals,
+    reviewableProposals,
+    activeInlineProposal,
+    contextLedger,
+    activeThread,
+    openThreadCount,
+    resolvedThreadCount,
+    editorLanguage,
+    configuredRuntime,
+    resolvedRuntime,
+    configuredModel,
+    configuredEffort,
+    runtimeOptions,
+    providerOptions,
+    providerSelectValue,
+    selectedRuntimeStatus,
+    modelOptions,
+    effortOptions,
+    effortSelectValue,
+    agentConfigDisabled,
+    modelControlDisabled,
+    effortControlVisible,
+    agentRuntimeTitle,
+    selectedRuntimeLabel,
+    selectedModelOption,
+    selectedModelLabel,
+    selectedEffortOption,
+    selectedEffortLabel,
+    agentStatusLabel,
+    updateAgentRuntime,
+    commitAgentModel,
+    selectAgentModel,
+    updateAgentEffort,
+    persistSettings,
+    updateSettingsDraft,
+    saveSettingsDraft,
+    toneSettingsBase,
+    saveToneOfVoiceSetup,
+    skipToneOfVoiceSetup,
+    updatePanelState,
+    restoreRevision,
+    updateActiveBlockShape,
+    applyInlineCommand,
+    applyInlineCode,
+    openLinkPopover,
+    startCommentFromSelection,
+    handleCanvasPointerDown,
+    handleCanvasPointerMove,
+    handleCanvasPointerUp,
+    handleCanvasPointerCancel,
+    handleCanvasKeyDown,
+    handleCanvasSelectionEvent,
+    handleCanvasCopy,
+    handleCanvasCut,
+    handleCanvasPaste,
+    handleCanvasDrop,
+    handleCanvasContextMenu,
+    updateFloatingToolbarPosition,
+    updateProposalStatus,
+    requestProposalRewrite,
+    activateThread,
+    updateCanvasBlock,
+    registerBlockRef,
+    focusCanvasBlock,
+    rememberCanvasSelection,
+    handleEditorShortcut,
+    commitCanvasDom,
+    scheduleLiveCanvasCommit,
+    moveCanvasBlock,
+    deleteCanvasBlock,
+    updateProposalChangeDecision,
+    requestProposalRevision,
+    notifyTableImageExported,
+    addThread,
+    addThreadMessage,
+    requestThreadAgentReply,
+    updateThreadStatus,
+    updateSuggestionStatus,
+    addChatMessage,
+    applyLink,
+    copyActiveSelectionToClipboard,
+    cutActiveSelectionToClipboard,
+    pasteClipboardFromMenu,
+    copyText,
+    exportMarkdown,
+    importMarkdown,
+    insertImageFiles,
+    openSettingsDialog,
+    cancelSettingsDialog
+  };
+}
+
+type SkribeController = ReturnType<typeof useSkribeController>;
+
+const SkribeControllerContext = React.createContext<SkribeController | null>(null);
+
+function useSkribeControllerContext() {
+  const controller = use(SkribeControllerContext);
+  if (!controller) throw new Error("Skribe controller context is missing");
+  return controller;
+}
+
+function App() {
+  const controller = useSkribeController();
+  return (
+    <SkribeControllerContext.Provider value={controller}>
+      <SkribeView />
+    </SkribeControllerContext.Provider>
+  );
+}
+
+function SkribeView() {
+  const { documentState } = useSkribeControllerContext();
+  if (!documentState) return <SkribeLoadingScreen />;
+  return <SkribeShell />;
+}
+
+function SkribeLoadingScreen() {
+  return (
+    <main className="loading-screen">
+      <div className="loading-mark" />
+      <p>Opening local writing workspace...</p>
+    </main>
+  );
+}
+
+function SkribeShell() {
+  const {
+    appSettings,
+    documentState,
+    editorLanguage,
+    isLeftRailCollapsed,
+    isRightPanelCollapsed,
+    lastCopied
+  } = useSkribeControllerContext();
+
+  if (!documentState) return <SkribeLoadingScreen />;
+
   return (
     <main
       className={`app-shell ${isLeftRailCollapsed ? "left-collapsed" : ""} ${
@@ -2983,467 +3255,708 @@ function App() {
       data-document-font={appSettings.documentFont}
       lang={editorLanguage}
     >
-      <header className="topbar">
-        <div className="brand">
-          <div className="brand-mark" aria-hidden="true">
-            <img src="/skribe-icon.png?v=2" alt="" />
+      <Topbar />
+      <section className="workspace">
+        <LeftRail />
+        <CenterPane />
+        <RightPanel />
+      </section>
+      <SkribeOverlays />
+      {lastCopied ? <div className="toast">{lastCopied}</div> : null}
+    </main>
+  );
+}
+
+function Topbar() {
+  const {
+    documentState,
+    fileInputRef,
+    imageInputRef,
+    saveState,
+    copyText,
+    exportMarkdown,
+    importMarkdown,
+    insertImageFiles,
+    openSettingsDialog
+  } = useSkribeControllerContext();
+
+  if (!documentState) return null;
+
+  return (
+    <header className="topbar">
+      <div className="brand">
+        <div className="brand-mark" aria-hidden="true">
+          <img src="/skribe-icon.png?v=2" alt="" />
+        </div>
+        <div>
+          <strong>Skribe</strong>
+          <span title={documentState.fileInfo?.displayPath || documentState.fileInfo?.markdownPath}>
+            {documentSourceLabel(documentState.fileInfo)}
+          </span>
+        </div>
+      </div>
+
+      <div className="topbar-actions">
+        <AgentConfigControl />
+        <span className={`save-pill is-${saveState}`}>
+          {saveState === "saving" ? <RefreshCw size={14} /> : <Save size={14} />}
+          {saveState}
+        </span>
+        <button type="button" className="icon-button" onClick={openSettingsDialog} title="Settings" aria-label="Settings">
+          <Settings size={17} />
+        </button>
+        <button
+          type="button"
+          className="icon-button"
+          onClick={() => fileInputRef.current?.click()}
+          title="Import Markdown"
+          aria-label="Import Markdown"
+        >
+          <Upload size={17} />
+        </button>
+        <button
+          type="button"
+          className="icon-button"
+          onClick={() => copyText(documentState.markdown, "Markdown copied")}
+          title="Copy Markdown"
+          aria-label="Copy Markdown"
+        >
+          <Copy size={17} />
+        </button>
+        <button type="button" className="icon-button" onClick={exportMarkdown} title="Export Markdown" aria-label="Export Markdown">
+          <Download size={17} />
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".md,.markdown,text/markdown,text/plain"
+          aria-label="Import Markdown file"
+          hidden
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) void importMarkdown(file);
+            event.target.value = "";
+          }}
+        />
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+          aria-label="Insert image file"
+          hidden
+          onChange={(event) => {
+            const files = event.target.files;
+            if (files) void insertImageFiles(files);
+            event.target.value = "";
+          }}
+        />
+      </div>
+    </header>
+  );
+}
+
+function AgentConfigControl() {
+  const {
+    agentConfigDisabled,
+    agentModelDraft,
+    agentRuntimeTitle,
+    agentSession,
+    agentStatusLabel,
+    configuredModel,
+    effortControlVisible,
+    effortOptions,
+    effortSelectValue,
+    isAgentConfigOpen,
+    isAgentModelMenuOpen,
+    modelControlDisabled,
+    modelOptions,
+    providerOptions,
+    providerSelectValue,
+    selectedEffortLabel,
+    selectedModelLabel,
+    selectedRuntimeLabel,
+    selectedRuntimeStatus,
+    commitAgentModel,
+    selectAgentModel,
+    setAgentModelDraft,
+    setIsAgentConfigOpen,
+    setIsAgentModelMenuOpen,
+    updateAgentEffort,
+    updateAgentRuntime
+  } = useSkribeControllerContext();
+
+  return (
+    <div className={`agent-config-shell ${isAgentConfigOpen ? "is-open" : ""}`}>
+      <button
+        type="button"
+        className={`agent-config-button is-${agentSession?.status ?? "idle"}`}
+        onClick={() => {
+          setIsAgentConfigOpen((open) => !open);
+          setIsAgentModelMenuOpen(false);
+        }}
+        title={`${agentRuntimeTitle}. ${selectedModelLabel}. ${selectedEffortLabel}. Status: ${agentStatusLabel}.`}
+        aria-expanded={isAgentConfigOpen}
+        aria-label="Agent settings"
+      >
+        <Sparkles size={15} />
+        <span>
+          <strong>{selectedRuntimeLabel}</strong>
+          <small>
+            {selectedModelLabel} · {selectedEffortLabel}
+          </small>
+        </span>
+        <em>{agentStatusLabel}</em>
+        <ChevronDown size={14} />
+      </button>
+      {isAgentConfigOpen ? (
+        <div className="agent-config-popover">
+          <div className="agent-config-field">
+            <span>Provider</span>
+            <label className="agent-runtime-select-shell" title={agentRuntimeTitle}>
+              <select
+                value={providerSelectValue}
+                onChange={(event) => updateAgentRuntime(event.target.value)}
+                disabled={agentConfigDisabled}
+                aria-label="Agent runtime"
+              >
+                {providerOptions.map((runtime) => (
+                  <option key={runtime.id} value={runtime.id} disabled={!runtime.available}>
+                    {runtime.label}{runtime.available ? "" : " unavailable"}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="agent-config-field">
+            <span>Model</span>
+            <div
+              className="agent-model-shell"
+              title={
+                selectedRuntimeStatus?.supportsManualModel
+                  ? "Agent model. Use Default model to let the selected CLI choose."
+                  : "Selected runtime does not expose model selection."
+              }
+            >
+              <input
+                value={agentModelDraft}
+                placeholder={configuredModel === "auto" ? "Default model" : configuredModel}
+                disabled={modelControlDisabled}
+                onChange={(event) => setAgentModelDraft(event.target.value)}
+                onFocus={() => setIsAgentModelMenuOpen(true)}
+                onClick={() => setIsAgentModelMenuOpen(true)}
+                onBlur={(event) => {
+                  window.setTimeout(() => setIsAgentModelMenuOpen(false), 120);
+                  commitAgentModel(event.target.value);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  event.preventDefault();
+                  commitAgentModel(event.currentTarget.value);
+                  setIsAgentModelMenuOpen(false);
+                  event.currentTarget.blur();
+                }}
+                aria-label="Agent model"
+              />
+              <button
+                type="button"
+                aria-label="Show model options"
+                disabled={modelControlDisabled}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => setIsAgentModelMenuOpen((open) => !open)}
+              >
+                <ChevronDown size={14} />
+              </button>
+              {isAgentModelMenuOpen && !modelControlDisabled ? (
+                <menu className="agent-model-menu">
+                  <button
+                    type="button"
+                    className={configuredModel === "auto" ? "is-selected" : ""}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => selectAgentModel("auto")}
+                    aria-pressed={configuredModel === "auto"}
+                  >
+                    <strong>Default model</strong>
+                    <span>{selectedRuntimeStatus?.label || "Selected CLI"} decides</span>
+                  </button>
+                  {modelOptions.map((model) => (
+                    <button
+                      key={model.id}
+                      type="button"
+                      className={configuredModel === model.id ? "is-selected" : ""}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => selectAgentModel(model.id)}
+                      aria-pressed={configuredModel === model.id}
+                    >
+                      <strong>{model.label}</strong>
+                      <span>
+                        {model.description || (model.label !== model.id ? model.id : model.source || "detected")}
+                      </span>
+                    </button>
+                  ))}
+                </menu>
+              ) : null}
+            </div>
+          </div>
+          {effortControlVisible ? (
+            <div className="agent-config-field">
+              <span>Effort</span>
+              <label
+                className="agent-effort-select-shell"
+                title={
+                  selectedRuntimeStatus?.defaultEffort
+                    ? `Reasoning effort. Default: ${selectedRuntimeStatus.defaultEffort}.`
+                    : "Reasoning effort. Use Default effort to let the selected CLI choose."
+                }
+              >
+                <select
+                  value={effortSelectValue}
+                  onChange={(event) => updateAgentEffort(event.target.value)}
+                  disabled={agentConfigDisabled}
+                  aria-label="Agent reasoning effort"
+                >
+                  <option value="auto">Default effort</option>
+                  {effortOptions.map((level) => (
+                    <option key={level.id} value={level.id}>
+                      {level.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function LeftRail() {
+  const {
+    isLeftRailCollapsed,
+    isRestoringRevision,
+    isRevisionHistoryOpen,
+    openThreadCount,
+    outline,
+    revisionState,
+    words,
+    restoreRevision,
+    setIsRevisionHistoryOpen,
+    updatePanelState
+  } = useSkribeControllerContext();
+
+  return (
+    <aside className="left-rail">
+      <button
+        type="button"
+        className="rail-collapse-button"
+        onClick={() => updatePanelState({ leftCollapsed: !isLeftRailCollapsed })}
+        title={isLeftRailCollapsed ? "Show left sidebar" : "Hide left sidebar"}
+      >
+        {isLeftRailCollapsed ? <ChevronsRight size={16} /> : <ChevronsLeft size={16} />}
+      </button>
+      <div className="rail-content">
+        <div className="metric-row">
+          <div>
+            <strong>{words.toLocaleString()}</strong>
+            <span>words</span>
           </div>
           <div>
-            <strong>Skribe</strong>
-            <span title={documentState.fileInfo?.displayPath || documentState.fileInfo?.markdownPath}>
-              {documentSourceLabel(documentState.fileInfo)}
+            <strong>{openThreadCount}</strong>
+            <span>open</span>
+          </div>
+        </div>
+
+        <div className="rail-section">
+          <div className="rail-heading">
+            <FileText size={15} />
+            Outline
+          </div>
+          <nav className="outline-list">
+            {outline.length === 0 ? (
+              <p className="empty-note">Add Markdown headings to build an outline.</p>
+            ) : (
+              outline.map((item) => (
+                <a key={item.id} href={`#${item.id}`} className={`outline-item level-${item.level}`}>
+                  {item.title}
+                </a>
+              ))
+            )}
+          </nav>
+        </div>
+
+        <div className="rail-section rail-section-compact">
+          <button
+            type="button"
+            className="rail-heading rail-toggle-heading"
+            onClick={() => setIsRevisionHistoryOpen((value) => !value)}
+            title={isRevisionHistoryOpen ? "Collapse revision history" : "Expand revision history"}
+          >
+            <span>
+              <History size={15} />
+              Revisions
             </span>
-          </div>
-        </div>
-
-        <div className="topbar-actions">
-          <div className={`agent-config-shell ${isAgentConfigOpen ? "is-open" : ""}`}>
-            <button
-              type="button"
-              className={`agent-config-button is-${agentSession?.status ?? "idle"}`}
-              onClick={() => {
-                setIsAgentConfigOpen((open) => !open);
-                setIsAgentModelMenuOpen(false);
-              }}
-              title={`${agentRuntimeTitle}. ${selectedModelLabel}. ${selectedEffortLabel}. Status: ${agentStatusLabel}.`}
-              aria-expanded={isAgentConfigOpen}
-              aria-label="Agent settings"
-            >
-              <Sparkles size={15} />
-              <span>
-                <strong>{selectedRuntimeLabel}</strong>
-                <small>
-                  {selectedModelLabel} · {selectedEffortLabel}
-                </small>
-              </span>
-              <em>{agentStatusLabel}</em>
-              <ChevronDown size={14} />
-            </button>
-            {isAgentConfigOpen ? (
-              <div className="agent-config-popover">
-                <div className="agent-config-field">
-                  <span>Provider</span>
-                  <label className="agent-runtime-select-shell" title={agentRuntimeTitle}>
-                    <select
-                      value={providerSelectValue}
-                      onChange={(event) => updateAgentRuntime(event.target.value)}
-                      disabled={agentConfigDisabled}
-                      aria-label="Agent runtime"
-                    >
-                      {providerOptions.map((runtime) => (
-                        <option key={runtime.id} value={runtime.id} disabled={!runtime.available}>
-                          {runtime.label}{runtime.available ? "" : " unavailable"}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-                <div className="agent-config-field">
-                  <span>Model</span>
-                  <div
-                    className="agent-model-shell"
-                    title={
-                      selectedRuntimeStatus?.supportsManualModel
-                        ? "Agent model. Use Default model to let the selected CLI choose."
-                        : "Selected runtime does not expose model selection."
-                    }
-                  >
-                    <input
-                      value={agentModelDraft}
-                      placeholder={configuredModel === "auto" ? "Default model" : configuredModel}
-                      disabled={modelControlDisabled}
-                      onChange={(event) => setAgentModelDraft(event.target.value)}
-                      onFocus={() => setIsAgentModelMenuOpen(true)}
-                      onClick={() => setIsAgentModelMenuOpen(true)}
-                      onBlur={(event) => {
-                        window.setTimeout(() => setIsAgentModelMenuOpen(false), 120);
-                        commitAgentModel(event.target.value);
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key !== "Enter") return;
-                        event.preventDefault();
-                        commitAgentModel(event.currentTarget.value);
-                        setIsAgentModelMenuOpen(false);
-                        event.currentTarget.blur();
-                      }}
-                      aria-label="Agent model"
-                    />
-                    <button
-                      type="button"
-                      aria-label="Show model options"
-                      disabled={modelControlDisabled}
-                      onMouseDown={(event) => event.preventDefault()}
-                      onClick={() => setIsAgentModelMenuOpen((open) => !open)}
-                    >
-                      <ChevronDown size={14} />
-                    </button>
-                    {isAgentModelMenuOpen && !modelControlDisabled ? (
-                      <menu className="agent-model-menu">
-                        <button
-                          type="button"
-                          className={configuredModel === "auto" ? "is-selected" : ""}
-                          onMouseDown={(event) => event.preventDefault()}
-                          onClick={() => selectAgentModel("auto")}
-                          aria-pressed={configuredModel === "auto"}
-                        >
-                          <strong>Default model</strong>
-                          <span>{selectedRuntimeStatus?.label || "Selected CLI"} decides</span>
-                        </button>
-                        {modelOptions.map((model) => (
-                          <button
-                            key={model.id}
-                            type="button"
-                            className={configuredModel === model.id ? "is-selected" : ""}
-                            onMouseDown={(event) => event.preventDefault()}
-                            onClick={() => selectAgentModel(model.id)}
-                            aria-pressed={configuredModel === model.id}
-                          >
-                            <strong>{model.label}</strong>
-                            <span>
-                              {model.description || (model.label !== model.id ? model.id : model.source || "detected")}
-                            </span>
-                          </button>
-                        ))}
-                      </menu>
-                    ) : null}
-                  </div>
-                </div>
-                {effortControlVisible ? (
-                  <div className="agent-config-field">
-                    <span>Effort</span>
-                    <label
-                      className="agent-effort-select-shell"
-                      title={
-                        selectedRuntimeStatus?.defaultEffort
-                          ? `Reasoning effort. Default: ${selectedRuntimeStatus.defaultEffort}.`
-                          : "Reasoning effort. Use Default effort to let the selected CLI choose."
-                      }
-                    >
-                      <select
-                        value={effortSelectValue}
-                        onChange={(event) => updateAgentEffort(event.target.value)}
-                        disabled={agentConfigDisabled}
-                        aria-label="Agent reasoning effort"
-                      >
-                        <option value="auto">Default effort</option>
-                        {effortOptions.map((level) => (
-                          <option key={level.id} value={level.id}>
-                            {level.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
-          <span className={`save-pill is-${saveState}`}>
-            {saveState === "saving" ? <RefreshCw size={14} /> : <Save size={14} />}
-            {saveState}
-          </span>
-          <button type="button" className="icon-button" onClick={openSettingsDialog} title="Settings" aria-label="Settings">
-            <Settings size={17} />
+            <span className="rail-heading-count">{revisionState.revisions.length}</span>
+            {isRevisionHistoryOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           </button>
-          <button
-            type="button"
-            className="icon-button"
-            onClick={() => fileInputRef.current?.click()}
-            title="Import Markdown"
-            aria-label="Import Markdown"
-          >
-            <Upload size={17} />
-          </button>
-          <button
-            type="button"
-            className="icon-button"
-            onClick={() => copyText(documentState.markdown, "Markdown copied")}
-            title="Copy Markdown"
-            aria-label="Copy Markdown"
-          >
-            <Copy size={17} />
-          </button>
-          <button type="button" className="icon-button" onClick={exportMarkdown} title="Export Markdown" aria-label="Export Markdown">
-            <Download size={17} />
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".md,.markdown,text/markdown,text/plain"
-            aria-label="Import Markdown file"
-            hidden
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) void importMarkdown(file);
-              event.target.value = "";
-            }}
-          />
-          <input
-            ref={imageInputRef}
-            type="file"
-            accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
-            aria-label="Insert image file"
-            hidden
-            onChange={(event) => {
-              const files = event.target.files;
-              if (files) void insertImageFiles(files);
-              event.target.value = "";
-            }}
+          <RevisionHistoryPanel
+            revisionState={revisionState}
+            isOpen={isRevisionHistoryOpen}
+            isRestoring={isRestoringRevision}
+            onRestore={restoreRevision}
           />
         </div>
-      </header>
+      </div>
+    </aside>
+  );
+}
 
-      <section className="workspace">
-        <aside className="left-rail">
-          <button type="button"
-            className="rail-collapse-button"
-            onClick={() => updatePanelState({ leftCollapsed: !isLeftRailCollapsed })}
-            title={isLeftRailCollapsed ? "Show left sidebar" : "Hide left sidebar"}
-          >
-            {isLeftRailCollapsed ? <ChevronsRight size={16} /> : <ChevronsLeft size={16} />}
+function CenterPane() {
+  const {
+    activeBlockId,
+    activeInlineProposal,
+    activeThread,
+    appSettings,
+    blockResetKeys,
+    canvasRef,
+    documentState,
+    editorLanguage,
+    pendingSelectionDraft,
+    reviewableProposals,
+    selectionDraft,
+    threads,
+    activateThread,
+    commitCanvasDom,
+    deleteCanvasBlock,
+    focusCanvasBlock,
+    handleCanvasContextMenu,
+    handleCanvasCopy,
+    handleCanvasCut,
+    handleCanvasKeyDown,
+    handleCanvasPaste,
+    handleCanvasPointerCancel,
+    handleCanvasPointerDown,
+    handleCanvasPointerMove,
+    handleCanvasPointerUp,
+    handleCanvasSelectionEvent,
+    handleCanvasDrop,
+    handleEditorShortcut,
+    moveCanvasBlock,
+    notifyTableImageExported,
+    registerBlockRef,
+    rememberCanvasSelection,
+    requestProposalRevision,
+    requestProposalRewrite,
+    scheduleLiveCanvasCommit,
+    setPanelMode,
+    updateCanvasBlock,
+    updateFloatingToolbarPosition,
+    updateProposalChangeDecision,
+    updateProposalStatus
+  } = useSkribeControllerContext();
+
+  if (!documentState) return null;
+
+  return (
+    <section className="center-pane">
+      <CanvasToolbar />
+      <div
+        ref={canvasRef}
+        className="markdown-canvas"
+        lang={editorLanguage}
+        role="application"
+        aria-label="Markdown editor"
+        tabIndex={-1}
+        onPointerDown={handleCanvasPointerDown}
+        onPointerMove={handleCanvasPointerMove}
+        onPointerUp={handleCanvasPointerUp}
+        onPointerCancel={handleCanvasPointerCancel}
+        onKeyDown={handleCanvasKeyDown}
+        onMouseUp={handleCanvasSelectionEvent}
+        onKeyUp={handleCanvasSelectionEvent}
+        onCopy={handleCanvasCopy}
+        onCut={handleCanvasCut}
+        onPaste={handleCanvasPaste}
+        onDragOver={handleCanvasDragOver}
+        onDrop={handleCanvasDrop}
+        onContextMenu={handleCanvasContextMenu}
+        onScroll={updateFloatingToolbarPosition}
+      >
+        <InlineProposalReviewBar
+          review={activeInlineProposal}
+          proposalCount={reviewableProposals.length}
+          onProposalStatus={updateProposalStatus}
+          onRequestProposalRewrite={requestProposalRewrite}
+        />
+        <EditableMarkdownCanvas
+          markdown={documentState.markdown}
+          editorLanguage={editorLanguage}
+          threads={threads}
+          inlineProposal={activeInlineProposal}
+          diffViewMode={appSettings.diffViewMode}
+          selectionPreview={selectionDraft ?? pendingSelectionDraft}
+          blockResetKeys={blockResetKeys}
+          activeBlockId={activeBlockId}
+          activeThreadId={activeThread?.id ?? null}
+          onActivateThread={(threadId) => {
+            activateThread(threadId);
+            setPanelMode("threads");
+          }}
+          onUpdateBlock={updateCanvasBlock}
+          onRegisterBlock={registerBlockRef}
+          onFocusBlock={focusCanvasBlock}
+          onRememberSelection={rememberCanvasSelection}
+          onShortcut={handleEditorShortcut}
+          onCommitDocument={commitCanvasDom}
+          onDocumentInput={scheduleLiveCanvasCommit}
+          onMoveBlock={moveCanvasBlock}
+          onDeleteBlock={deleteCanvasBlock}
+          onProposalChangeDecision={updateProposalChangeDecision}
+          onRequestProposalRevision={requestProposalRevision}
+          onTableImageExported={notifyTableImageExported}
+        />
+      </div>
+    </section>
+  );
+}
+
+function CanvasToolbar() {
+  const {
+    activeBlockId,
+    imageInputRef,
+    applyInlineCode,
+    applyInlineCommand,
+    openLinkPopover,
+    startCommentFromSelection,
+    updateActiveBlockShape
+  } = useSkribeControllerContext();
+
+  return (
+    <div className="canvas-toolbar">
+      <div className="format-toolbar" aria-label="Formatting toolbar">
+        <button type="button" title="Paragraph (Ctrl/Cmd+Alt+0)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "paragraph", level: undefined }); }}>
+          <Pilcrow size={16} />
+        </button>
+        <button type="button" title="Heading 1 (Ctrl/Cmd+Alt+1)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "heading", level: 1 }); }}>
+          <Heading1 size={16} />
+        </button>
+        <button type="button" title="Heading 2 (Ctrl/Cmd+Alt+2)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "heading", level: 2 }); }}>
+          <Heading2 size={16} />
+        </button>
+        <button type="button" title="Heading 3 (Ctrl/Cmd+Alt+3)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "heading", level: 3 }); }}>
+          <Heading3 size={16} />
+        </button>
+        <span className="toolbar-divider" />
+        <button type="button" title="Bold (Ctrl/Cmd+B)" onMouseDown={(event) => { event.preventDefault(); applyInlineCommand("bold"); }}>
+          <Bold size={16} />
+        </button>
+        <button type="button" title="Italic (Ctrl/Cmd+I)" onMouseDown={(event) => { event.preventDefault(); applyInlineCommand("italic"); }}>
+          <Italic size={16} />
+        </button>
+        <button type="button" title="Inline code (Ctrl/Cmd+`)" onMouseDown={(event) => { event.preventDefault(); applyInlineCode(); }}>
+          <Code2 size={16} />
+        </button>
+        <button type="button" title="Insert link (Ctrl/Cmd+K)" onMouseDown={(event) => { event.preventDefault(); openLinkPopover(); }}>
+          <LinkIcon size={16} />
+        </button>
+        <button type="button" title="Insert image" onMouseDown={(event) => { event.preventDefault(); imageInputRef.current?.click(); }}>
+          <ImageIcon size={16} />
+        </button>
+        <span className="toolbar-divider" />
+        <button type="button" title="Bulleted list (Ctrl/Cmd+Shift+8)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "unordered-list" }); }}>
+          <List size={16} />
+        </button>
+        <button type="button" title="Numbered list (Ctrl/Cmd+Shift+7)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "ordered-list", marker: "1" }); }}>
+          <ListOrdered size={16} />
+        </button>
+        <button type="button" title="Quote" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "quote" }); }}>
+          <Quote size={16} />
+        </button>
+        <span className="toolbar-divider" />
+        <button type="button" title="Comment on selected text" onMouseDown={(event) => { event.preventDefault(); startCommentFromSelection(); }}>
+          <MessageSquare size={16} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function RightPanel() {
+  const {
+    activeThread,
+    activeThreadId,
+    agentSession,
+    agentSkills,
+    appSettings,
+    chatDraft,
+    chatSkillIds,
+    contextLedger,
+    documentState,
+    newComment,
+    newThreadSkillIds,
+    panelMode,
+    pendingSelectionDraft,
+    proposals,
+    replyDrafts,
+    resolvedThreadCount,
+    selectionDraft,
+    showResolvedThreads,
+    threadSkillIds,
+    visibleThreads,
+    activateThread,
+    addChatMessage,
+    addThread,
+    addThreadMessage,
+    persistSettings,
+    requestProposalRevision,
+    requestThreadAgentReply,
+    setChatDraft,
+    setChatSkillIds,
+    setFloatingToolbar,
+    setNewComment,
+    setNewThreadSkillIds,
+    setPanelMode,
+    setPendingSelectionDraft,
+    setReplyDrafts,
+    setSelectionDraft,
+    setThreadSkillIds,
+    updatePanelState,
+    updateProposalChangeDecision,
+    updateProposalStatus,
+    updateSuggestionStatus,
+    updateThreadStatus,
+    isRightPanelCollapsed,
+    selectionRangeRef
+  } = useSkribeControllerContext();
+
+  if (!documentState) return null;
+
+  return (
+    <aside className="right-panel">
+      <button
+        type="button"
+        className="right-collapse-button"
+        onClick={() => updatePanelState({ rightCollapsed: !isRightPanelCollapsed })}
+        title={isRightPanelCollapsed ? "Show right sidebar" : "Hide right sidebar"}
+      >
+        {isRightPanelCollapsed ? <ChevronsLeft size={16} /> : <ChevronsRight size={16} />}
+      </button>
+      <div className="right-panel-content">
+        <div className="panel-tabs">
+          <button type="button" className={panelMode === "threads" ? "active" : ""} onClick={() => setPanelMode("threads")}>
+            <MessageSquare size={15} />
+            Threads
           </button>
-          <div className="rail-content">
-          <div className="metric-row">
-            <div>
-              <strong>{words.toLocaleString()}</strong>
-              <span>words</span>
-            </div>
-            <div>
-              <strong>{openThreadCount}</strong>
-              <span>open</span>
-            </div>
-          </div>
-
-          <div className="rail-section">
-            <div className="rail-heading">
-              <FileText size={15} />
-              Outline
-            </div>
-            <nav className="outline-list">
-              {outline.length === 0 ? (
-                <p className="empty-note">Add Markdown headings to build an outline.</p>
-              ) : (
-                outline.map((item) => (
-                  <a key={item.id} href={`#${item.id}`} className={`outline-item level-${item.level}`}>
-                    {item.title}
-                  </a>
-                ))
-              )}
-            </nav>
-          </div>
-
-          <div className="rail-section rail-section-compact">
-            <button type="button"
-              className="rail-heading rail-toggle-heading"
-              onClick={() => setIsRevisionHistoryOpen((value) => !value)}
-              title={isRevisionHistoryOpen ? "Collapse revision history" : "Expand revision history"}
-            >
-              <span>
-                <History size={15} />
-                Revisions
-              </span>
-              <span className="rail-heading-count">{revisionState.revisions.length}</span>
-              {isRevisionHistoryOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-            </button>
-            <RevisionHistoryPanel
-              revisionState={revisionState}
-              isOpen={isRevisionHistoryOpen}
-              isRestoring={isRestoringRevision}
-              onRestore={restoreRevision}
-            />
-          </div>
-
-          </div>
-        </aside>
-
-        <section className="center-pane">
-          <div className="canvas-toolbar">
-            <div className="format-toolbar" aria-label="Formatting toolbar">
-              <button type="button" title="Paragraph (Ctrl/Cmd+Alt+0)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "paragraph", level: undefined }); }}>
-                <Pilcrow size={16} />
-              </button>
-              <button type="button" title="Heading 1 (Ctrl/Cmd+Alt+1)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "heading", level: 1 }); }}>
-                <Heading1 size={16} />
-              </button>
-              <button type="button" title="Heading 2 (Ctrl/Cmd+Alt+2)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "heading", level: 2 }); }}>
-                <Heading2 size={16} />
-              </button>
-              <button type="button" title="Heading 3 (Ctrl/Cmd+Alt+3)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "heading", level: 3 }); }}>
-                <Heading3 size={16} />
-              </button>
-              <span className="toolbar-divider" />
-              <button type="button" title="Bold (Ctrl/Cmd+B)" onMouseDown={(event) => { event.preventDefault(); applyInlineCommand("bold"); }}>
-                <Bold size={16} />
-              </button>
-              <button type="button" title="Italic (Ctrl/Cmd+I)" onMouseDown={(event) => { event.preventDefault(); applyInlineCommand("italic"); }}>
-                <Italic size={16} />
-              </button>
-              <button type="button" title="Inline code (Ctrl/Cmd+`)" onMouseDown={(event) => { event.preventDefault(); applyInlineCode(); }}>
-                <Code2 size={16} />
-              </button>
-              <button type="button" title="Insert link (Ctrl/Cmd+K)" onMouseDown={(event) => { event.preventDefault(); openLinkPopover(); }}>
-                <LinkIcon size={16} />
-              </button>
-              <button type="button" title="Insert image" onMouseDown={(event) => { event.preventDefault(); imageInputRef.current?.click(); }}>
-                <ImageIcon size={16} />
-              </button>
-              <span className="toolbar-divider" />
-              <button type="button" title="Bulleted list (Ctrl/Cmd+Shift+8)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "unordered-list" }); }}>
-                <List size={16} />
-              </button>
-              <button type="button" title="Numbered list (Ctrl/Cmd+Shift+7)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "ordered-list", marker: "1" }); }}>
-                <ListOrdered size={16} />
-              </button>
-              <button type="button" title="Quote" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "quote" }); }}>
-                <Quote size={16} />
-              </button>
-              <span className="toolbar-divider" />
-              <button type="button" title="Comment on selected text" onMouseDown={(event) => { event.preventDefault(); startCommentFromSelection(); }}>
-                <MessageSquare size={16} />
-              </button>
-            </div>
-          </div>
-
-          <div
-            ref={canvasRef}
-            className="markdown-canvas"
-            lang={editorLanguage}
-            role="application"
-            aria-label="Markdown editor"
-            tabIndex={-1}
-            onPointerDown={handleCanvasPointerDown}
-            onPointerMove={handleCanvasPointerMove}
-            onPointerUp={handleCanvasPointerUp}
-            onPointerCancel={handleCanvasPointerCancel}
-            onKeyDown={handleCanvasKeyDown}
-            onMouseUp={handleCanvasSelectionEvent}
-            onKeyUp={handleCanvasSelectionEvent}
-            onCopy={handleCanvasCopy}
-            onCut={handleCanvasCut}
-            onPaste={handleCanvasPaste}
-            onDragOver={handleCanvasDragOver}
-            onDrop={handleCanvasDrop}
-            onContextMenu={handleCanvasContextMenu}
-            onScroll={updateFloatingToolbarPosition}
-          >
-            <InlineProposalReviewBar
-              review={activeInlineProposal}
-              proposalCount={reviewableProposals.length}
-              onProposalStatus={updateProposalStatus}
-              onRequestProposalRewrite={requestProposalRewrite}
-            />
-            <EditableMarkdownCanvas
-              markdown={documentState.markdown}
-              editorLanguage={editorLanguage}
-              threads={threads}
-              inlineProposal={activeInlineProposal}
-              diffViewMode={appSettings.diffViewMode}
-              selectionPreview={selectionDraft ?? pendingSelectionDraft}
-              blockResetKeys={blockResetKeys}
-              activeBlockId={activeBlockId}
-              activeThreadId={activeThread?.id ?? null}
-              onActivateThread={(threadId) => {
-                activateThread(threadId);
-                setPanelMode("threads");
-              }}
-              onUpdateBlock={updateCanvasBlock}
-              onRegisterBlock={registerBlockRef}
-              onFocusBlock={focusCanvasBlock}
-              onRememberSelection={rememberCanvasSelection}
-              onShortcut={handleEditorShortcut}
-              onCommitDocument={commitCanvasDom}
-              onDocumentInput={scheduleLiveCanvasCommit}
-              onMoveBlock={moveCanvasBlock}
-              onDeleteBlock={deleteCanvasBlock}
-              onProposalChangeDecision={updateProposalChangeDecision}
-              onRequestProposalRevision={requestProposalRevision}
-              onTableImageExported={notifyTableImageExported}
-            />
-          </div>
-        </section>
-
-        <aside className="right-panel">
-          <button type="button"
-            className="right-collapse-button"
-            onClick={() => updatePanelState({ rightCollapsed: !isRightPanelCollapsed })}
-            title={isRightPanelCollapsed ? "Show right sidebar" : "Hide right sidebar"}
-          >
-            {isRightPanelCollapsed ? <ChevronsLeft size={16} /> : <ChevronsRight size={16} />}
+          <button type="button" className={panelMode === "chat" ? "active" : ""} onClick={() => setPanelMode("chat")}>
+            <Sparkles size={15} />
+            Chat
           </button>
-          <div className="right-panel-content">
-          <div className="panel-tabs">
-            <button type="button" className={panelMode === "threads" ? "active" : ""} onClick={() => setPanelMode("threads")}>
-              <MessageSquare size={15} />
-              Threads
-            </button>
-            <button type="button" className={panelMode === "chat" ? "active" : ""} onClick={() => setPanelMode("chat")}>
-              <Sparkles size={15} />
-              Chat
-            </button>
-          </div>
+        </div>
 
-          {panelMode === "threads" ? (
-            <ThreadPanel
-              markdown={documentState.markdown}
-              threads={visibleThreads}
-              activeThread={activeThread}
-              activeThreadId={activeThread?.id ?? activeThreadId}
-              selectionDraft={selectionDraft}
-              newComment={newComment}
-              replyDrafts={replyDrafts}
-              agentSkills={agentSkills}
-              newThreadSkillIds={newThreadSkillIds}
-              threadSkillIds={threadSkillIds}
-              defaultSkillIds={appSettings.defaultSkills}
-              showResolvedThreads={showResolvedThreads}
-              resolvedThreadCount={resolvedThreadCount}
-              onSetNewComment={setNewComment}
-              onSetNewThreadSkillIds={setNewThreadSkillIds}
-              onAddThread={addThread}
-              onClearSelection={() => {
-                setSelectionDraft(null);
-                setPendingSelectionDraft(null);
-                selectionRangeRef.current = null;
-                setFloatingToolbar(null);
-                window.getSelection()?.removeAllRanges();
-              }}
-              onActivateThread={(threadId) => activateThread(threadId, { scroll: true })}
-              onSetReplyDrafts={setReplyDrafts}
-              onSetThreadSkillIds={setThreadSkillIds}
-              onAddMessage={addThreadMessage}
-              onRequestAgentReply={requestThreadAgentReply}
-              onSetStatus={updateThreadStatus}
-              onSuggestionStatus={updateSuggestionStatus}
-              onToggleResolvedThreads={() =>
-                void persistSettings({
-                  ...appSettings,
-                  showResolvedThreads: !appSettings.showResolvedThreads
-                })
-              }
-              agentSession={agentSession}
-            />
-          ) : (
-            <ChatPanel
-              messages={documentState.review.chat}
-              proposals={proposals}
-              contextLedger={contextLedger}
-              agentSession={agentSession}
-              chatDraft={chatDraft}
-              agentSkills={agentSkills}
-              selectedSkillIds={chatSkillIds}
-              diffViewMode={appSettings.diffViewMode}
-              onSetChatDraft={setChatDraft}
-              onSetSelectedSkillIds={setChatSkillIds}
-              onSend={addChatMessage}
-              onProposalStatus={updateProposalStatus}
-              onProposalChangeDecision={updateProposalChangeDecision}
-              onRequestProposalRevision={requestProposalRevision}
-            />
-          )}
-          </div>
-        </aside>
-      </section>
+        {panelMode === "threads" ? (
+          <ThreadPanel
+            markdown={documentState.markdown}
+            threads={visibleThreads}
+            activeThread={activeThread}
+            activeThreadId={activeThread?.id ?? activeThreadId}
+            selectionDraft={selectionDraft}
+            newComment={newComment}
+            replyDrafts={replyDrafts}
+            agentSkills={agentSkills}
+            newThreadSkillIds={newThreadSkillIds}
+            threadSkillIds={threadSkillIds}
+            defaultSkillIds={appSettings.defaultSkills}
+            showResolvedThreads={showResolvedThreads}
+            resolvedThreadCount={resolvedThreadCount}
+            onSetNewComment={setNewComment}
+            onSetNewThreadSkillIds={setNewThreadSkillIds}
+            onAddThread={addThread}
+            onClearSelection={() => {
+              setSelectionDraft(null);
+              setPendingSelectionDraft(null);
+              selectionRangeRef.current = null;
+              setFloatingToolbar(null);
+              window.getSelection()?.removeAllRanges();
+            }}
+            onActivateThread={(threadId) => activateThread(threadId, { scroll: true })}
+            onSetReplyDrafts={setReplyDrafts}
+            onSetThreadSkillIds={setThreadSkillIds}
+            onAddMessage={addThreadMessage}
+            onRequestAgentReply={requestThreadAgentReply}
+            onSetStatus={updateThreadStatus}
+            onSuggestionStatus={updateSuggestionStatus}
+            onToggleResolvedThreads={() =>
+              void persistSettings({
+                ...appSettings,
+                showResolvedThreads: !appSettings.showResolvedThreads
+              })
+            }
+            agentSession={agentSession}
+          />
+        ) : (
+          <ChatPanel
+            messages={documentState.review.chat}
+            proposals={proposals}
+            contextLedger={contextLedger}
+            agentSession={agentSession}
+            chatDraft={chatDraft}
+            agentSkills={agentSkills}
+            selectedSkillIds={chatSkillIds}
+            diffViewMode={appSettings.diffViewMode}
+            onSetChatDraft={setChatDraft}
+            onSetSelectedSkillIds={setChatSkillIds}
+            onSend={addChatMessage}
+            onProposalStatus={updateProposalStatus}
+            onProposalChangeDecision={updateProposalChangeDecision}
+            onRequestProposalRevision={requestProposalRevision}
+          />
+        )}
+      </div>
+    </aside>
+  );
+}
 
+function SkribeOverlays() {
+  const {
+    activeBlockId,
+    agentSkills,
+    appSettings,
+    floatingToolbar,
+    isSettingsOpen,
+    linkDraft,
+    linkInputRef,
+    linkPopover,
+    linkRangeRef,
+    linkTargetRef,
+    providerOptions,
+    resolvedRuntime,
+    selectionContextMenu,
+    settingsDraft,
+    settingsSaveState,
+    toneSetupInvocation,
+    applyInlineCode,
+    applyInlineCommand,
+    applyLink,
+    cancelSettingsDialog,
+    copyActiveSelectionToClipboard,
+    cutActiveSelectionToClipboard,
+    openLinkPopover,
+    pasteClipboardFromMenu,
+    saveSettingsDraft,
+    saveToneOfVoiceSetup,
+    setLinkDraft,
+    setLinkPopover,
+    setSelectionContextMenu,
+    setToneSetupInvocation,
+    skipToneOfVoiceSetup,
+    startCommentFromSelection,
+    toneSettingsBase,
+    updateActiveBlockShape,
+    updateSettingsDraft,
+    imageInputRef
+  } = useSkribeControllerContext();
+
+  return (
+    <>
       {floatingToolbar ? (
         <FloatingFormatToolbar
           position={floatingToolbar}
@@ -3548,11 +4061,10 @@ function App() {
           </button>
         </div>
       ) : null}
-
-      {lastCopied ? <div className="toast">{lastCopied}</div> : null}
-    </main>
+    </>
   );
 }
+
 
 function formatRevisionTime(value: string) {
   const date = new Date(value);
