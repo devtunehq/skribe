@@ -3687,6 +3687,59 @@ function toneModeIcon(mode: ToneSetupMode) {
   return <BookOpen size={15} />;
 }
 
+function ModalDialogShell({
+  className,
+  labelledBy,
+  preventCancel,
+  onCancel,
+  children
+}: {
+  className: string;
+  labelledBy: string;
+  preventCancel?: boolean;
+  onCancel: () => void;
+  children: React.ReactNode;
+}) {
+  const dialogRef = useRef<HTMLDialogElement | null>(null);
+  const onCancelRef = useRef(onCancel);
+  const preventCancelRef = useRef(preventCancel);
+
+  onCancelRef.current = onCancel;
+  preventCancelRef.current = preventCancel;
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog || dialog.open) return;
+
+    const requestCancel = () => {
+      if (!preventCancelRef.current) onCancelRef.current();
+    };
+    const handleCancel = (event: Event) => {
+      event.preventDefault();
+      requestCancel();
+    };
+    const handleMouseDown = (event: MouseEvent) => {
+      if (event.target === event.currentTarget) requestCancel();
+    };
+
+    dialog.addEventListener("cancel", handleCancel);
+    dialog.addEventListener("mousedown", handleMouseDown);
+    dialog.showModal();
+
+    return () => {
+      dialog.removeEventListener("cancel", handleCancel);
+      dialog.removeEventListener("mousedown", handleMouseDown);
+      if (dialog.open) dialog.close();
+    };
+  }, []);
+
+  return (
+    <dialog ref={dialogRef} className={className} aria-labelledby={labelledBy}>
+      {children}
+    </dialog>
+  );
+}
+
 function ToneSetupDialog({
   invocation,
   currentTone,
@@ -3810,14 +3863,13 @@ function ToneSetupDialog({
   }
 
   return (
-    <div className="settings-backdrop tone-setup-backdrop" role="presentation" onMouseDown={() => !isBusy && onCancel()}>
-      <section
-        className="settings-dialog tone-setup-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="tone-setup-title"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
+    <ModalDialogShell
+      className="settings-backdrop tone-setup-backdrop"
+      labelledBy="tone-setup-title"
+      preventCancel={isBusy}
+      onCancel={onCancel}
+    >
+      <section className="settings-dialog tone-setup-dialog">
         <header className="settings-dialog-header">
           <div>
             <span>{invocation === "first-run" ? "First run" : "Settings"}</span>
@@ -3991,7 +4043,7 @@ function ToneSetupDialog({
           </button>
         </footer>
       </section>
-    </div>
+    </ModalDialogShell>
   );
 }
 
@@ -4034,14 +4086,8 @@ function SettingsDialog({
   const selectedDiffViewMode = diffViewModeOptions.find((option) => option.value === settings.diffViewMode) ?? diffViewModeOptions[0];
 
   return (
-    <div className="settings-backdrop" role="presentation" onMouseDown={onCancel}>
-      <section
-        className="settings-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="settings-title"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
+    <ModalDialogShell className="settings-backdrop" labelledBy="settings-title" onCancel={onCancel}>
+      <section className="settings-dialog">
         <header className="settings-dialog-header">
           <div>
             <span>Settings</span>
@@ -4313,7 +4359,7 @@ function SettingsDialog({
           </button>
         </footer>
       </section>
-    </div>
+    </ModalDialogShell>
   );
 }
 

@@ -2847,9 +2847,19 @@ select:focus,
   z-index: 100;
   display: grid;
   place-items: start center;
+  width: auto;
+  max-width: none;
+  max-height: none;
+  margin: 0;
   padding: 72px 20px 24px;
+  border: 0;
   background: color-mix(in srgb, var(--coal) 24%, transparent);
+  color: inherit;
   overflow-y: auto;
+}
+
+.settings-backdrop::backdrop {
+  background: transparent;
 }
 
 .settings-dialog {

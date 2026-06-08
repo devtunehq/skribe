@@ -536,6 +536,33 @@ test("table image export uses a transparent PNG background", async (t) => {
   );
 });
 
+test("first-run tone setup uses a native dialog and can be skipped", async (t) => {
+  const browser = await browserTest(t);
+  if (!browser) return;
+
+  const { rootDir, markdownPath } = await makeMarkdownDoc("first-run.md", "# Draft\n\nBody.\n");
+  const server = await startSkribeServer(markdownPath);
+
+  try {
+    await navigate(browser.cdp, server.baseUrl);
+    await waitFor(browser.cdp, "Boolean(document.querySelector('dialog.tone-setup-backdrop[open]'))");
+    assert.equal(
+      await evaluate(browser.cdp, "document.querySelector('dialog.tone-setup-backdrop')?.getAttribute('aria-labelledby')"),
+      "tone-setup-title"
+    );
+    assert.equal(await clickButtonByText(browser.cdp, ".tone-setup-dialog", "Skip"), true);
+    await waitFor(browser.cdp, "!document.querySelector('dialog.tone-setup-backdrop[open]')");
+    await waitFor(
+      browser.cdp,
+      "fetch('/api/settings').then((response) => response.json()).then((payload) => payload.settings.toneOfVoiceSetupComplete === true)"
+    );
+  } finally {
+    await browser.stop();
+    await server.stop();
+    await removeTempDir(rootDir);
+  }
+});
+
 test("settings dialog persists language, theme, font, and collapsed panel defaults", async (t) => {
   await withApp(
     t,
