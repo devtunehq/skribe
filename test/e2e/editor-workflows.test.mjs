@@ -272,6 +272,7 @@ test("pasted image files are saved locally and rendered as image blocks", async 
         );
         const data = new DataTransfer();
         data.items.add(new File([bytes], 'diagram.png', { type: 'image/png' }));
+        data.items.add(new File([bytes], 'chart.png', { type: 'image/png' }));
         const event = new ClipboardEvent('paste', { bubbles: true, cancelable: true });
         Object.defineProperty(event, 'clipboardData', { value: data });
         document.querySelector('.markdown-canvas').dispatchEvent(event);
@@ -280,9 +281,10 @@ test("pasted image files are saved locally and rendered as image blocks", async 
     );
     assert.equal(prevented, true);
 
-    const saved = await waitForFileText(markdownPath, /!\[diagram\]\(.*\.png\)/);
+    const saved = await waitForFileText(markdownPath, /!\[chart\]\(.*\.png\)/);
     assert.match(saved, /!\[diagram\]\(draft\.assets\/diagram-[a-f0-9]{10}\.png\)/);
-    await waitFor(browser.cdp, "Boolean(document.querySelector('.editable-image-block img'))");
+    assert.match(saved, /!\[chart\]\(draft\.assets\/chart-[a-f0-9]{10}\.png\)/);
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-image-block img').length === 2");
 
     const imageSrc = await evaluate(browser.cdp, "document.querySelector('.editable-image-block img')?.getAttribute('src') || ''");
     assert.match(imageSrc, /^\/api\/assets\?src=/);
@@ -294,6 +296,7 @@ test("pasted image files are saved locally and rendered as image blocks", async 
     assert.equal(await setEditableText(browser.cdp, "block-0", "Intro edited."), true);
     const edited = await waitForFileText(markdownPath, /Intro edited\./);
     assert.match(edited, /!\[diagram\]\(draft\.assets\/diagram-[a-f0-9]{10}\.png\)/);
+    assert.match(edited, /!\[chart\]\(draft\.assets\/chart-[a-f0-9]{10}\.png\)/);
     assert.doesNotMatch(edited, /\/api\/assets/);
   });
 });

@@ -78,7 +78,7 @@ export function getProposalChangeBlocks(fileDiff: FileDiffMetadata | null): Prop
 }
 
 function sortChangesForReverseApply(changes: ProposalChangeBlock[]) {
-  return [...changes].sort(
+  return changes.toSorted(
     (a, b) => b.deletionLineStart - a.deletionLineStart || b.hunkIndex - a.hunkIndex || b.changeIndex - a.changeIndex
   );
 }

@@ -1495,8 +1495,16 @@ button {
 }
 
 .editable-image-block {
+  display: block;
   width: min(100%, 720px);
   margin: 26px auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
   outline: none;
 }
 
@@ -1534,7 +1542,7 @@ button {
   height: auto;
 }
 
-.editable-image-block figcaption {
+.editable-image-caption {
   display: grid;
   gap: 3px;
   margin-top: 8px;
@@ -1543,12 +1551,12 @@ button {
   line-height: 1.35;
 }
 
-.editable-image-block figcaption span {
+.editable-image-caption span {
   color: var(--text);
   font-size: 14px;
 }
 
-.editable-image-block figcaption small {
+.editable-image-caption small {
   overflow-wrap: anywhere;
   font-family: var(--font-mono);
   font-size: 10px;

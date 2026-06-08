@@ -358,6 +358,14 @@ const toneSetupModes: Array<{ id: ToneSetupMode; label: string }> = [
   { id: "archetype", label: "Archetypes" }
 ];
 
+const toneLinkSlots = [
+  { id: "tone-link-1", label: "Link 1", position: 0 },
+  { id: "tone-link-2", label: "Link 2", position: 1 },
+  { id: "tone-link-3", label: "Link 3", position: 2 },
+  { id: "tone-link-4", label: "Link 4", position: 3 },
+  { id: "tone-link-5", label: "Link 5", position: 4 }
+];
+
 const toneArchetypeOptions = [
   {
     id: "direct-founder",
@@ -476,6 +484,8 @@ interface BlockAnchorRange {
   start: number;
   end: number;
 }
+
+const emptyBlockAnchorRanges: BlockAnchorRange[] = [];
 
 function numericCssValue(value: string, fallback = 0) {
   const parsed = Number.parseFloat(value);
@@ -680,6 +690,28 @@ function escapeMarkdownLinkLabel(value: string) {
 
 function escapeMarkdownLinkHref(value: string) {
   return value.replace(/\s+/g, "%20").replace(/\)/g, "%29");
+}
+
+function renderKeyHash(value: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function keyedRenderItems<T>(items: T[], prefix: string, signature: (item: T) => string) {
+  const occurrences = new Map<string, number>();
+  return items.map((item) => {
+    const compact = signature(item).replace(/\s+/g, " ").trim() || "blank";
+    const occurrence = occurrences.get(compact) ?? 0;
+    occurrences.set(compact, occurrence + 1);
+    return {
+      item,
+      key: `${prefix}-${renderKeyHash(compact)}-${occurrence}`
+    };
+  });
 }
 
 function closestEditableBlock(node: Node) {
@@ -2053,29 +2085,22 @@ function App() {
     return true;
   }
 
-  async function insertImageFile(file: File) {
-    if (!isImageFile(file)) {
-      showTransientToast("Unsupported image file");
-      return false;
-    }
+  async function insertImageFiles(files: FileList | File[]) {
+    const images = Array.from(files).filter(isImageFile);
+    if (images.length === 0) return false;
 
     try {
-      const asset = await uploadImageAsset(file);
-      return insertMarkdownBlockAtCurrentRange(asset.markdown, "Image inserted");
+      const assets = await Promise.all(images.map((image) => uploadImageAsset(image)));
+      const markdown = assets.map((asset) => asset.markdown).join("\n\n");
+      return insertMarkdownBlockAtCurrentRange(
+        markdown,
+        assets.length === 1 ? "Image inserted" : "Images inserted"
+      );
     } catch (error) {
       console.error("Unable to insert image", error);
       showTransientToast("Image insert failed");
       return false;
     }
-  }
-
-  async function insertImageFiles(files: FileList | File[]) {
-    const images = Array.from(files).filter(isImageFile);
-    if (images.length === 0) return false;
-    for (const image of images) {
-      await insertImageFile(image);
-    }
-    return true;
   }
 
   async function pasteClipboardFromMenu(asMarkdown: boolean) {
@@ -3880,12 +3905,12 @@ function ToneSetupDialog({
 
           {mode === "links" ? (
             <div className="tone-link-list">
-              {urls.map((url, index) => (
-                <label key={index} className="settings-field">
-                  <span>Link {index + 1}</span>
+              {toneLinkSlots.map((slot) => (
+                <label key={slot.id} className="settings-field">
+                  <span>{slot.label}</span>
                   <input
-                    value={url}
-                    onChange={(event) => updateUrl(index, event.target.value)}
+                    value={urls[slot.position] ?? ""}
+                    onChange={(event) => updateUrl(slot.position, event.target.value)}
                     placeholder="https://example.com/post"
                   />
                 </label>
@@ -4870,6 +4895,36 @@ function EditableMarkdownCanvas({
     [threads, selectionPreviewThread]
   );
   const canvasActiveThreadId = selectionPreviewThread?.id ?? activeThreadId;
+  const anchorRangesByBlock = useMemo(() => {
+    const byBlock = new Map<string, BlockAnchorRange[]>();
+    const spansByBlock = new Map(blockSpans.map((span) => [span.id, span]));
+    for (const block of visibleBlocks) {
+      const blockSpan = spansByBlock.get(block.id) ?? null;
+      if (blockSpan === null) continue;
+
+      const blockAnchorRanges: BlockAnchorRange[] = [];
+      for (const thread of canvasThreads) {
+        if (
+          (thread.status !== "open" && thread.id !== canvasActiveThreadId) ||
+          thread.anchor.kind !== "markdown-range" ||
+          thread.anchor.end <= blockSpan.textStart ||
+          thread.anchor.start >= blockSpan.textEnd
+        ) {
+          continue;
+        }
+
+        const range = {
+          thread,
+          start: clamp(thread.anchor.start - blockSpan.textStart, 0, block.text.length),
+          end: clamp(thread.anchor.end - blockSpan.textStart, 0, block.text.length)
+        };
+        if (range.end > range.start) blockAnchorRanges.push(range);
+      }
+
+      if (blockAnchorRanges.length > 0) byBlock.set(block.id, blockAnchorRanges);
+    }
+    return byBlock;
+  }, [blockSpans, canvasActiveThreadId, canvasThreads, visibleBlocks]);
   const inlineChangesByBlock = useMemo(() => {
     const byBlock = new Map<string, InlineProposalChange[]>();
     inlineProposal?.changes.forEach((change) => {
@@ -4965,26 +5020,7 @@ function EditableMarkdownCanvas({
         onMouseUp={handleDocumentMouseUp}
       >
         {visibleBlocks.map((block) => {
-          const blockSpan = blockSpans.find((span) => span.id === block.id) ?? null;
-          const blockAnchorRanges: BlockAnchorRange[] = [];
-          if (blockSpan !== null) {
-            for (const thread of canvasThreads) {
-              if (
-                (thread.status !== "open" && thread.id !== canvasActiveThreadId) ||
-                thread.anchor.kind !== "markdown-range" ||
-                thread.anchor.end <= blockSpan.textStart ||
-                thread.anchor.start >= blockSpan.textEnd
-              ) {
-                continue;
-              }
-              const range = {
-                thread,
-                start: clamp(thread.anchor.start - blockSpan.textStart, 0, block.text.length),
-                end: clamp(thread.anchor.end - blockSpan.textStart, 0, block.text.length)
-              };
-              if (range.end > range.start) blockAnchorRanges.push(range);
-            }
-          }
+          const blockAnchorRanges = anchorRangesByBlock.get(block.id) ?? emptyBlockAnchorRanges;
 
           return (
             <React.Fragment key={block.id}>
@@ -5244,31 +5280,25 @@ function EditableImageBlock({
   }
 
   return (
-    <figure
+    <button
+      type="button"
       id={block.id}
       data-block-id={block.id}
       className="editable-image-block"
       contentEditable={false}
-      role="button"
       aria-label={image?.alt ? `Image block: ${image.alt}` : "Image block"}
-      tabIndex={0}
       ref={(node) => onRegisterBlock(block.id, node)}
       onClick={() => onFocusBlock(block.id)}
       onFocus={() => onFocusBlock(block.id)}
-      onKeyDown={(event) => {
-        if (event.key !== "Enter" && event.key !== " ") return;
-        event.preventDefault();
-        onFocusBlock(block.id);
-      }}
     >
       <div className="editable-image-frame">
         <img src={imagePreviewSrc(image.src)} alt={image.alt} title={image.title} loading="lazy" />
       </div>
-      <figcaption>
+      <span className="editable-image-caption">
         <span>{image.alt || imageDisplayName(image.src)}</span>
         <small>{image.src}</small>
-      </figcaption>
-    </figure>
+      </span>
+    </button>
   );
 }
 
@@ -5294,6 +5324,8 @@ function EditableTableBlock({
   const columnCount = Math.max(table.headers.length, ...table.rows.map((row) => row.length), 2);
   const headers = Array.from({ length: columnCount }, (_, index) => table.headers[index] ?? "");
   const rows = table.rows.length > 0 ? table.rows : [Array.from({ length: columnCount }, () => "")];
+  const headerCells = keyedRenderItems(headers, `header-${block.id}`, (cell) => cell);
+  const rowEntries = keyedRenderItems(rows, `row-${block.id}`, (row) => row.join("\u001f"));
   const cellStyle = (index: number): React.CSSProperties => {
     const textAlign = table.alignments[index];
     return textAlign ? { textAlign: textAlign as React.CSSProperties["textAlign"] } : {};
@@ -5336,23 +5368,27 @@ function EditableTableBlock({
       <table {...editableProps} ref={registerTable} id={block.id} className="editable-text editable-table">
         <thead>
           <tr>
-            {headers.map((cell, index) => (
-              <th key={`header-${index}`} style={cellStyle(index)}>
-                <InlineMarkdown markdown={cell} keyPrefix={`header-${index}`} />
+            {headerCells.map(({ item: cell, key }, columnIndex) => (
+              <th key={key} style={cellStyle(columnIndex)}>
+                <InlineMarkdown markdown={cell} keyPrefix={key} />
               </th>
             ))}
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, rowIndex) => (
-            <tr key={`row-${rowIndex}`}>
-              {Array.from({ length: columnCount }, (_, index) => (
-                <td key={`cell-${rowIndex}-${index}`} style={cellStyle(index)}>
-                  <InlineMarkdown markdown={row[index] ?? ""} keyPrefix={`cell-${rowIndex}-${index}`} />
-                </td>
-              ))}
-            </tr>
-          ))}
+          {rowEntries.map(({ item: row, key: rowKey }) => {
+            const cells = Array.from({ length: columnCount }, (_, columnIndex) => row[columnIndex] ?? "");
+            const rowCells = keyedRenderItems(cells, `cell-${rowKey}`, (cell) => cell);
+            return (
+              <tr key={rowKey}>
+                {rowCells.map(({ item: cell, key }, columnIndex) => (
+                  <td key={key} style={cellStyle(columnIndex)}>
+                    <InlineMarkdown markdown={cell} keyPrefix={key} />
+                  </td>
+                ))}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -5806,13 +5842,15 @@ function ProposalChangePreview({
   if (mode === "unified") {
     const deletions = clippedDiffLines(change.deletions, maxCharacters);
     const additions = clippedDiffLines(change.additions, maxCharacters);
+    const deletionLines = keyedRenderItems(deletions, "delete", diffLineText);
+    const additionLines = keyedRenderItems(additions, "add", diffLineText);
     return (
       <div className={`proposal-change-preview is-unified is-${variant}`}>
         <span>Unified diff</span>
         <div className="proposal-unified-lines">
-          {deletions.length > 0 ? (
-            deletions.map((line, index) => (
-              <div key={`delete-${index}`} className="proposal-unified-line is-delete">
+          {deletionLines.length > 0 ? (
+            deletionLines.map(({ item: line, key }) => (
+              <div key={key} className="proposal-unified-line is-delete">
                 <b>-</b>
                 <code>{diffLineText(line)}</code>
               </div>
@@ -5823,9 +5861,9 @@ function ProposalChangePreview({
               <code>(insert)</code>
             </div>
           )}
-          {additions.length > 0 ? (
-            additions.map((line, index) => (
-              <div key={`add-${index}`} className="proposal-unified-line is-add">
+          {additionLines.length > 0 ? (
+            additionLines.map(({ item: line, key }) => (
+              <div key={key} className="proposal-unified-line is-add">
                 <b>+</b>
                 <code>{diffLineText(line)}</code>
               </div>
