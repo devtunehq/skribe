@@ -66,6 +66,10 @@ import {
   uniqueSkillIds
 } from "./agentDrafts";
 import {
+  agentModelDraftFromConfiguredModel,
+  mergeRuntimeConfigFromSession
+} from "./agentRuntimeState";
+import {
   applySuggestion,
   buildSelection,
   deleteMarkdownBlock,
@@ -466,19 +470,6 @@ function documentSourceLabel(fileInfo?: FileInfo) {
 
 function safeDownloadName(value: string) {
   return value.trim().replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "") || "skribe";
-}
-
-function modelIsAdvertisedByDifferentRuntime(
-  model: string,
-  runtimeId: string | null | undefined,
-  runtimes: AgentRuntimeConfig["runtimes"]
-) {
-  if (!model || model === "auto" || !runtimeId) return false;
-
-  const runtimesAdvertisingModel = runtimes.filter((runtime) => runtime.models.some((option) => option.id === model));
-  if (runtimesAdvertisingModel.length === 0) return false;
-
-  return !runtimesAdvertisingModel.some((runtime) => runtime.id === runtimeId);
 }
 
 const maxContextLedgerEvents = 240;
@@ -978,7 +969,7 @@ function App() {
         stateRef.current = updated.document;
         setDocumentState(updated.document);
         setAgentRuntimeConfig(updated.config);
-        setAgentModelDraft(updated.config.configuredModel === "auto" ? "" : updated.config.configuredModel);
+        setAgentModelDraft(agentModelDraftFromConfiguredModel(updated.config.configuredModel));
         if (updated.settings) {
           const savedSettings = mergeAppSettings(updated.settings);
           setAppSettings(savedSettings);
@@ -1007,7 +998,7 @@ function App() {
         setRevisionState(revisions);
         setAgentSkills(skills);
         setAgentRuntimeConfig(runtimeConfig);
-        setAgentModelDraft(runtimeConfig.configuredModel === "auto" ? "" : runtimeConfig.configuredModel);
+        setAgentModelDraft(agentModelDraftFromConfiguredModel(runtimeConfig.configuredModel));
         if (!loadedSettings.toneOfVoiceSetupComplete) setToneSetupInvocation("first-run");
         setSaveState("saved");
       })
@@ -1019,41 +1010,6 @@ function App() {
   }, [saveState]);
 
   useEffect(() => {
-    if (!isSettingsOpen) return;
-    setSettingsDraft(appSettings);
-    setSettingsSaveState("saved");
-  }, [appSettings, isSettingsOpen]);
-
-  useEffect(() => {
-    const configuredModel = agentRuntimeConfig?.configuredModel ?? documentState?.agentSession?.configuredModel ?? "auto";
-    const configuredRuntime = agentRuntimeConfig?.configuredRuntime ?? documentState?.agentSession?.configuredRuntime ?? "auto";
-    const resolvedRuntime =
-      agentRuntimeConfig?.resolvedRuntime ??
-      (configuredRuntime === "auto" ? documentState?.agentSession?.runtime ?? null : configuredRuntime);
-
-    if (
-      agentRuntimeConfig &&
-      modelIsAdvertisedByDifferentRuntime(configuredModel, resolvedRuntime, agentRuntimeConfig.runtimes)
-    ) {
-      setAgentModelDraft("");
-      void saveAgentRuntimeConfig({
-        runtime: configuredRuntime,
-        model: "auto",
-        effort: agentRuntimeConfig.configuredEffort ?? "auto"
-      });
-      return;
-    }
-
-    setAgentModelDraft(configuredModel === "auto" ? "" : configuredModel);
-  }, [
-    agentRuntimeConfig,
-    documentState?.agentSession?.configuredModel,
-    documentState?.agentSession?.configuredRuntime,
-    documentState?.agentSession?.runtime,
-    saveAgentRuntimeConfig
-  ]);
-
-  useEffect(() => {
     if (!linkPopover) return;
     window.requestAnimationFrame(() => {
       linkInputRef.current?.focus();
@@ -1061,8 +1017,8 @@ function App() {
     });
   }, [linkPopover]);
 
-  useEffect(() => {
-    return subscribeToDocumentEvents((remote) => {
+  const handleRemoteDocument = useCallback(
+    (remote: DocumentState) => {
       const current = stateRef.current;
       const switchedDocument = Boolean(current && remote.id !== current.id);
       if (isOlderDocument(remote, current)) return;
@@ -1090,23 +1046,14 @@ function App() {
       stateRef.current = remote;
       if (!shouldSkipRender) setDocumentState(remote);
       if (remote.agentSession) {
-        setAgentRuntimeConfig((current) =>
-          current
-            ? {
-                ...current,
-                configuredRuntime: remote.agentSession?.configuredRuntime ?? current.configuredRuntime,
-                resolvedRuntime: remote.agentSession?.runtime ?? current.resolvedRuntime,
-                configuredModel: remote.agentSession?.configuredModel ?? current.configuredModel,
-                resolvedModel: remote.agentSession?.model ?? current.resolvedModel,
-                configuredEffort: remote.agentSession?.configuredEffort ?? current.configuredEffort,
-                resolvedEffort: remote.agentSession?.effort ?? current.resolvedEffort
-              }
-            : current
-        );
+        setAgentRuntimeConfig((current) => mergeRuntimeConfigFromSession(current, remote.agentSession));
       }
       if (saveRef.current !== "saving") setSaveState("saved");
-    });
-  }, [clearPendingEditTimers]);
+    },
+    [clearPendingEditTimers]
+  );
+
+  useEffect(() => subscribeToDocumentEvents(handleRemoteDocument), [handleRemoteDocument]);
 
   useEffect(() => {
     return clearPendingEditTimers;
@@ -1174,7 +1121,7 @@ function App() {
       setAppSettings(savedSettings);
       setSettingsDraft(savedSettings);
       setAgentRuntimeConfig(runtimeConfig);
-      setAgentModelDraft(runtimeConfig.configuredModel === "auto" ? "" : runtimeConfig.configuredModel);
+      setAgentModelDraft(agentModelDraftFromConfiguredModel(runtimeConfig.configuredModel));
       setIsLeftRailCollapsed(savedSettings.panelState.leftCollapsed);
       setIsRightPanelCollapsed(savedSettings.panelState.rightCollapsed);
       if (!newComment.trim()) setNewThreadSkillIds(savedSettings.defaultSkills);
@@ -1228,6 +1175,18 @@ function App() {
         ...patch
       }
     });
+  }
+
+  function openSettingsDialog() {
+    setSettingsDraft(appSettings);
+    setSettingsSaveState("saved");
+    setIsSettingsOpen(true);
+  }
+
+  function cancelSettingsDialog() {
+    setSettingsDraft(appSettings);
+    setSettingsSaveState("saved");
+    setIsSettingsOpen(false);
   }
 
   function currentConfiguredRuntime() {
@@ -3035,17 +2994,18 @@ function App() {
     setSaveState("saving");
     try {
       const restored = await restoreDocumentRevision(revisionId);
-      if (restoreEpoch !== stateEpochRef.current) return;
-      stateRef.current = restored.document;
-      setDocumentState(restored.document);
-      setRevisionState(restored.revisions);
-      setActiveThreadId(null);
-      setSelectionDraft(null);
-      setPendingSelectionDraft(null);
-      selectionRangeRef.current = null;
-      setFloatingToolbar(null);
-      window.getSelection()?.removeAllRanges();
-      setSaveState("saved");
+      if (restoreEpoch === stateEpochRef.current) {
+        stateRef.current = restored.document;
+        setDocumentState(restored.document);
+        setRevisionState(restored.revisions);
+        setActiveThreadId(null);
+        setSelectionDraft(null);
+        setPendingSelectionDraft(null);
+        selectionRangeRef.current = null;
+        setFloatingToolbar(null);
+        window.getSelection()?.removeAllRanges();
+        setSaveState("saved");
+      }
     } catch {
       setSaveState("error");
     } finally {
@@ -3266,7 +3226,7 @@ function App() {
             {saveState === "saving" ? <RefreshCw size={14} /> : <Save size={14} />}
             {saveState}
           </span>
-          <button type="button" className="icon-button" onClick={() => setIsSettingsOpen(true)} title="Settings" aria-label="Settings">
+          <button type="button" className="icon-button" onClick={openSettingsDialog} title="Settings" aria-label="Settings">
             <Settings size={17} />
           </button>
           <button
@@ -3607,11 +3567,7 @@ function App() {
           onChange={updateSettingsDraft}
           onOpenToneSetup={() => setToneSetupInvocation("settings")}
           onSave={saveSettingsDraft}
-          onCancel={() => {
-            setSettingsDraft(appSettings);
-            setSettingsSaveState("saved");
-            setIsSettingsOpen(false);
-          }}
+          onCancel={cancelSettingsDialog}
         />
       ) : null}
 
