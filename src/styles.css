@@ -578,7 +578,9 @@ button {
   gap: 3px;
   border: 1px solid var(--ink);
   background: var(--paper-white);
+  margin: 0;
   padding: 4px;
+  list-style: none;
   border-radius: var(--radius);
   box-shadow: var(--hard-shadow);
 }
@@ -2620,7 +2622,9 @@ select:focus,
   display: grid;
   max-height: 240px;
   overflow: auto;
+  margin: 0;
   padding: 4px;
+  list-style: none;
 }
 
 .skill-autocomplete button,

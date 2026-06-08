@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { MultiFileDiff } from "@pierre/diffs/react";
 import {
   BookOpen,
@@ -117,6 +117,10 @@ import {
   deleteSelectionDraftFromMarkdown,
   resolveSelectionDraftRange
 } from "./selection";
+import {
+  createToneSetupState,
+  toneSetupReducer
+} from "./toneSetupState";
 import type {
   AgentSession,
   AgentRuntimeConfig,
@@ -3198,14 +3202,13 @@ function App() {
                       <ChevronDown size={14} />
                     </button>
                     {isAgentModelMenuOpen && !modelControlDisabled ? (
-                      <div className="agent-model-menu" role="listbox">
+                      <menu className="agent-model-menu">
                         <button
                           type="button"
                           className={configuredModel === "auto" ? "is-selected" : ""}
                           onMouseDown={(event) => event.preventDefault()}
                           onClick={() => selectAgentModel("auto")}
-                          role="option"
-                          aria-selected={configuredModel === "auto"}
+                          aria-pressed={configuredModel === "auto"}
                         >
                           <strong>Default model</strong>
                           <span>{selectedRuntimeStatus?.label || "Selected CLI"} decides</span>
@@ -3217,8 +3220,7 @@ function App() {
                             className={configuredModel === model.id ? "is-selected" : ""}
                             onMouseDown={(event) => event.preventDefault()}
                             onClick={() => selectAgentModel(model.id)}
-                            role="option"
-                            aria-selected={configuredModel === model.id}
+                            aria-pressed={configuredModel === model.id}
                           >
                             <strong>{model.label}</strong>
                             <span>
@@ -3226,7 +3228,7 @@ function App() {
                             </span>
                           </button>
                         ))}
-                      </div>
+                      </menu>
                     ) : null}
                   </div>
                 </div>
@@ -3700,28 +3702,28 @@ function ToneSetupDialog({
   onSkip: () => void | Promise<void>;
   onCancel: () => void;
 }) {
-  const [mode, setMode] = useState<ToneSetupMode>(currentTone.trim() ? "manual" : "interview");
-  const [manualText, setManualText] = useState(currentTone);
-  const [interviewMessages, setInterviewMessages] = useState<ToneInterviewMessage[]>([]);
-  const [interviewDraft, setInterviewDraft] = useState("");
-  const [interviewState, setInterviewState] = useState<"idle" | "thinking" | "error">("idle");
-  const [urls, setUrls] = useState(() => Array.from({ length: 5 }, () => ""));
-  const [selectedArchetypeId, setSelectedArchetypeId] = useState(toneArchetypeOptions[0]?.id ?? "direct-founder");
-  const [generatedTone, setGeneratedTone] = useState(currentTone);
-  const [warnings, setWarnings] = useState<string[]>([]);
-  const [builderState, setBuilderState] = useState<"idle" | "generating" | "saving" | "error">("idle");
-  const [errorMessage, setErrorMessage] = useState("");
+  const defaultToneArchetypeId = toneArchetypeOptions[0]?.id ?? "direct-founder";
+  const [toneState, dispatchTone] = useReducer(toneSetupReducer, currentTone, (tone) =>
+    createToneSetupState(tone, defaultToneArchetypeId)
+  );
+  const {
+    mode,
+    manualText,
+    interviewMessages,
+    interviewDraft,
+    interviewState,
+    urls,
+    selectedArchetypeId,
+    generatedTone,
+    warnings,
+    builderState,
+    errorMessage
+  } = toneState;
   const previewTone = mode === "manual" ? manualText : generatedTone;
   const isBusy = builderState === "generating" || builderState === "saving" || interviewState === "thinking";
 
-  function updateUrl(index: number, value: string) {
-    setUrls((currentUrls) => currentUrls.map((url, urlIndex) => (urlIndex === index ? value : url)));
-  }
-
   const requestInterviewTurn = useCallback(async (nextMessages: ToneInterviewMessage[], options: { forceGenerate?: boolean } = {}) => {
-    setInterviewState("thinking");
-    setErrorMessage("");
-    setWarnings([]);
+    dispatchTone({ type: "interview-request-start" });
     try {
       const response = await sendToneInterviewMessage({
         messages: nextMessages,
@@ -3731,14 +3733,18 @@ function ToneSetupDialog({
       });
       const reply = response.reply.trim();
       const messagesWithReply = reply ? [...nextMessages, { role: "agent" as const, body: reply }] : nextMessages;
-      setInterviewMessages(messagesWithReply);
-      if (response.toneOfVoice) setGeneratedTone(response.toneOfVoice);
-      setWarnings(response.warnings);
-      setInterviewState("idle");
+      dispatchTone({
+        type: "interview-request-success",
+        messages: messagesWithReply,
+        toneOfVoice: response.toneOfVoice || undefined,
+        warnings: response.warnings
+      });
       return response;
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
-      setInterviewState("error");
+      dispatchTone({
+        type: "interview-request-error",
+        errorMessage: error instanceof Error ? error.message : String(error)
+      });
       return null;
     }
   }, [currentTone, editorLanguage, generatedTone]);
@@ -3752,33 +3758,26 @@ function ToneSetupDialog({
     const body = interviewDraft.trim();
     if (!body || isBusy) return;
     const nextMessages: ToneInterviewMessage[] = [...interviewMessages, { role: "human", body }];
-    setInterviewMessages(nextMessages);
-    setInterviewDraft("");
+    dispatchTone({ type: "set-interview-messages", messages: nextMessages });
+    dispatchTone({ type: "set-interview-draft", value: "" });
     await requestInterviewTurn(nextMessages);
   }
 
   function restartInterview() {
-    setInterviewMessages([]);
-    setInterviewDraft("");
-    setGeneratedTone("");
-    setWarnings([]);
-    setErrorMessage("");
-    setInterviewState("idle");
+    dispatchTone({ type: "restart-interview" });
     void requestInterviewTurn([]);
   }
 
   async function buildTone() {
     if (mode === "interview") {
       if (generatedTone.trim()) return generatedTone;
-      setBuilderState("generating");
+      dispatchTone({ type: "tone-generation-start" });
       const response = await requestInterviewTurn(interviewMessages, { forceGenerate: true });
-      setBuilderState(response ? "idle" : "error");
+      dispatchTone({ type: "set-builder-state", builderState: response ? "idle" : "error" });
       return response?.toneOfVoice ?? "";
     }
 
-    setBuilderState("generating");
-    setErrorMessage("");
-    setWarnings([]);
+    dispatchTone({ type: "tone-generation-start" });
     try {
       const response = await generateToneOfVoice({
         mode,
@@ -3787,14 +3786,18 @@ function ToneSetupDialog({
         archetypeId: selectedArchetypeId,
         editorLanguage
       });
-      setGeneratedTone(response.toneOfVoice);
-      if (mode === "manual") setManualText(response.toneOfVoice);
-      setWarnings(response.warnings);
-      setBuilderState("idle");
+      dispatchTone({
+        type: "tone-generation-success",
+        toneOfVoice: response.toneOfVoice,
+        warnings: response.warnings,
+        syncManualText: mode === "manual"
+      });
       return response.toneOfVoice;
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
-      setBuilderState("error");
+      dispatchTone({
+        type: "tone-generation-error",
+        errorMessage: error instanceof Error ? error.message : String(error)
+      });
       return "";
     }
   }
@@ -3802,7 +3805,7 @@ function ToneSetupDialog({
   async function saveTone() {
     const tone = previewTone.trim() || (await buildTone()).trim();
     if (!tone) return;
-    setBuilderState("saving");
+    dispatchTone({ type: "tone-saving-start" });
     await onSave(tone);
   }
 
@@ -3831,9 +3834,7 @@ function ToneSetupDialog({
               key={option.id}
               className={mode === option.id ? "is-active" : ""}
               onClick={() => {
-                setMode(option.id);
-                setErrorMessage("");
-                setWarnings([]);
+                dispatchTone({ type: "set-mode", mode: option.id });
               }}
               type="button"
             >
@@ -3849,7 +3850,7 @@ function ToneSetupDialog({
               <span>Manual tone</span>
               <textarea
                 value={manualText}
-                onChange={(event) => setManualText(event.target.value)}
+                onChange={(event) => dispatchTone({ type: "set-manual-text", value: event.target.value })}
                 placeholder="Direct, founder-to-founder, plainspoken, no hype, British English."
                 rows={8}
               />
@@ -3884,7 +3885,7 @@ function ToneSetupDialog({
                 <textarea
                   value={interviewDraft}
                   aria-label="Tone interview reply"
-                  onChange={(event) => setInterviewDraft(event.target.value)}
+                  onChange={(event) => dispatchTone({ type: "set-interview-draft", value: event.target.value })}
                   onKeyDown={(event) => {
                     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                       event.preventDefault();
@@ -3910,7 +3911,9 @@ function ToneSetupDialog({
                   <span>{slot.label}</span>
                   <input
                     value={urls[slot.position] ?? ""}
-                    onChange={(event) => updateUrl(slot.position, event.target.value)}
+                    onChange={(event) =>
+                      dispatchTone({ type: "set-url", position: slot.position, value: event.target.value })
+                    }
                     placeholder="https://example.com/post"
                   />
                 </label>
@@ -3925,8 +3928,7 @@ function ToneSetupDialog({
                   key={archetype.id}
                   className={selectedArchetypeId === archetype.id ? "is-selected" : ""}
                   onClick={() => {
-                    setSelectedArchetypeId(archetype.id);
-                    setGeneratedTone("");
+                    dispatchTone({ type: "set-selected-archetype", archetypeId: archetype.id });
                   }}
                   type="button"
                 >
@@ -3949,7 +3951,7 @@ function ToneSetupDialog({
               <textarea
                 value={generatedTone}
                 aria-label="Generated tone of voice"
-                onChange={(event) => setGeneratedTone(event.target.value)}
+                onChange={(event) => dispatchTone({ type: "set-generated-tone", value: event.target.value })}
                 placeholder="Generate a tone profile, then edit it here."
                 rows={6}
               />
@@ -4602,7 +4604,7 @@ function SkillComposer({
         />
 
         {autocompleteOptions.length > 0 && slashCommand ? (
-          <div className="skill-autocomplete" role="listbox">
+          <menu className="skill-autocomplete">
             {autocompleteOptions.map((option, index) =>
               option.kind === "browse" ? (
                 <button type="button"
@@ -4632,7 +4634,7 @@ function SkillComposer({
                 </button>
               )
             )}
-          </div>
+          </menu>
         ) : null}
       </div>
 
@@ -4800,7 +4802,15 @@ function LinkPopover({
   onCancel: () => void;
 }) {
   return (
-    <div className="link-popover" style={{ left: position.left, top: position.top }} role="dialog" aria-label="Insert link">
+    <form
+      className="link-popover"
+      style={{ left: position.left, top: position.top }}
+      aria-label="Insert link"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onApply();
+      }}
+    >
       <input
         ref={inputRef}
         value={value}
@@ -4839,7 +4849,7 @@ function LinkPopover({
       >
         <X size={14} />
       </button>
-    </div>
+    </form>
   );
 }
 
