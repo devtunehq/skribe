@@ -58,6 +58,14 @@ import {
   uploadImageAsset
 } from "./api";
 import {
+  findSkillByCommand,
+  getActiveSlashCommand,
+  prepareAgentTurnDraft,
+  skillLabel,
+  skillMatchesQuery,
+  uniqueSkillIds
+} from "./agentDrafts";
+import {
   applySuggestion,
   buildSelection,
   deleteMarkdownBlock,
@@ -181,6 +189,131 @@ type SelectionDragState = {
   isSelecting: boolean;
 };
 type HistorySnapshot = Pick<DocumentState, "markdown" | "review">;
+
+function snapshotFromState(state: DocumentState): HistorySnapshot {
+  return {
+    markdown: state.markdown,
+    review: structuredClone(state.review)
+  };
+}
+
+function comparableReviewPayload(review: DocumentState["review"]) {
+  const { updatedAt: _updatedAt, ...payload } = review;
+  return JSON.stringify(payload);
+}
+
+function snapshotsMatch(left: HistorySnapshot | null | undefined, right: HistorySnapshot | null | undefined) {
+  return Boolean(
+    left &&
+      right &&
+      left.markdown === right.markdown &&
+      comparableReviewPayload(left.review) === comparableReviewPayload(right.review)
+  );
+}
+
+function popDistinctSnapshot(stack: HistorySnapshot[], current: HistorySnapshot) {
+  const nextStack = [...stack];
+  let target = nextStack.pop() ?? null;
+
+  while (target && snapshotsMatch(target, current)) {
+    target = nextStack.pop() ?? null;
+  }
+
+  return { target, stack: nextStack };
+}
+
+function blockNodeToMarkdown(node: HTMLElement, blockType?: string) {
+  const html = blockType === "table" ? node.outerHTML : node.innerHTML;
+  return htmlToInlineMarkdown(html.replace(/\u00a0/g, " ").trimEnd());
+}
+
+function getFloatingToolbarPosition(range: Range): FloatingToolbarState | null {
+  const rects = Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0);
+  const rect = rects[0] ?? range.getBoundingClientRect();
+  if (!rect || rect.width === 0 || rect.height === 0) return null;
+
+  const toolbarWidth = Math.min(430, window.innerWidth - 20);
+  const toolbarHeight = 42;
+  const margin = 10;
+  const minLeft = margin + toolbarWidth / 2;
+  const maxLeft = Math.max(minLeft, window.innerWidth - margin - toolbarWidth / 2);
+  const placement = rect.top > toolbarHeight + margin * 2 ? "above" : "below";
+  const top =
+    placement === "above"
+      ? Math.max(margin, rect.top - toolbarHeight - margin)
+      : Math.min(window.innerHeight - toolbarHeight - margin, rect.bottom + margin);
+
+  return {
+    left: clamp(rect.left + rect.width / 2, minLeft, maxLeft),
+    top,
+    placement
+  };
+}
+
+function getLinkPopoverPosition(range: Range): LinkPopoverState | null {
+  const rects = Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0);
+  const rect = rects[0] ?? range.getBoundingClientRect();
+  if (!rect || rect.width === 0 || rect.height === 0) return null;
+
+  const popoverWidth = 340;
+  const popoverHeight = 46;
+  const margin = 10;
+  const hasRoomBelow = rect.bottom + popoverHeight + margin < window.innerHeight;
+
+  return {
+    left: clamp(rect.left + rect.width / 2, margin + popoverWidth / 2, window.innerWidth - margin - popoverWidth / 2),
+    top: hasRoomBelow ? rect.bottom + margin : Math.max(margin, rect.top - popoverHeight - margin)
+  };
+}
+
+function isProposalReviewTarget(target: EventTarget | null) {
+  return (
+    target instanceof Element &&
+    Boolean(target.closest(".inline-proposal-review-bar, .inline-proposal-change"))
+  );
+}
+
+function floatingToolbarPositionFromPoint(clientX: number, clientY: number): FloatingToolbarState {
+  const above = clientY > 70;
+  return {
+    left: clamp(clientX, 90, window.innerWidth - 90),
+    top: above ? clientY - 52 : clientY + 18,
+    placement: above ? "above" : "below"
+  };
+}
+
+function getEditableBlockForRange(range: Range) {
+  const startBlock = closestEditableBlock(range.startContainer);
+  const endBlock = closestEditableBlock(range.endContainer);
+  return startBlock && startBlock === endBlock ? startBlock : null;
+}
+
+function setClipboardEventPayload(clipboardData: DataTransfer, payload: ClipboardPayload) {
+  clipboardData.setData("text/plain", payload.plainText);
+  if (payload.markdown) clipboardData.setData("text/markdown", payload.markdown);
+}
+
+function isImageFile(file: File | null | undefined) {
+  return Boolean(file && file.type.startsWith("image/"));
+}
+
+function handleCanvasDragOver(event: React.DragEvent<HTMLElement>) {
+  if (!Array.from(event.dataTransfer.items ?? []).some((item) => item.kind === "file" && item.type.startsWith("image/"))) {
+    return;
+  }
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+}
+
+function keepSelection(event: React.MouseEvent<HTMLButtonElement>) {
+  event.preventDefault();
+}
+
+function currentBlockIdFromSelection() {
+  const selection = window.getSelection();
+  const node = selection?.focusNode ?? selection?.anchorNode;
+  return node ? closestEditableBlock(node)?.dataset.blockId ?? null : null;
+}
 
 const authorLabels: Record<Author, string> = {
   human: "Human",
@@ -727,92 +860,6 @@ function scrollToInlineChange(changeKey: string | null) {
   }, 80);
 }
 
-function skillCommandId(value: string) {
-  return value.trim().toLowerCase().replace(/[^a-z0-9:_-]+/g, "-").replace(/^-+|-+$/g, "");
-}
-
-function skillLabel(skill: AgentSkill | AgentSkillSelection) {
-  return skill.name || skill.id;
-}
-
-function findSkillByCommand(skills: AgentSkill[], command: string) {
-  const normalized = skillCommandId(command);
-  return skills.find((skill) => skill.id === normalized || skillCommandId(skill.name) === normalized) ?? null;
-}
-
-function uniqueSkillIds(ids: string[]) {
-  return Array.from(new Set(ids.map(skillCommandId).filter(Boolean))).slice(0, 8);
-}
-
-function getActiveSlashCommand(value: string, cursor: number) {
-  const beforeCursor = value.slice(0, cursor);
-  const match = beforeCursor.match(/(^|\s)\/([a-zA-Z0-9:_-]*)$/);
-  if (!match) return null;
-  const start = cursor - match[0].length + match[1].length;
-  return {
-    start,
-    end: cursor,
-    query: match[2] ?? ""
-  };
-}
-
-function skillMatchesQuery(skill: AgentSkill, query: string) {
-  const normalized = query.toLowerCase();
-  return (
-    skill.id.includes(normalized) ||
-    skill.name.toLowerCase().includes(normalized) ||
-    skill.description.toLowerCase().includes(normalized)
-  );
-}
-
-function extractSkillIdsFromDraft(value: string, skills: AgentSkill[]) {
-  const ids: string[] = [];
-  for (const match of value.matchAll(/(^|\s)\/([a-zA-Z0-9:_-]+)/g)) {
-    const skill = findSkillByCommand(skills, match[2]);
-    if (skill) ids.push(skill.id);
-  }
-  return uniqueSkillIds(ids);
-}
-
-function stripKnownSkillCommands(value: string, skills: AgentSkill[]) {
-  return value
-    .replace(/(^|\s)\/([a-zA-Z0-9:_-]+)/g, (match, prefix, command) => {
-      return findSkillByCommand(skills, command) || command.toLowerCase() === "skills" ? prefix : match;
-    })
-    .replace(/[ \t]{2,}/g, " ")
-    .trim();
-}
-
-function prepareAgentTurnDraft(value: string, selectedSkillIds: string[], skills: AgentSkill[]) {
-  const skillIds = uniqueSkillIds([...selectedSkillIds, ...extractSkillIdsFromDraft(value, skills)]);
-  const selectedSkills = skillIds
-    .map((id) => skills.find((skill) => skill.id === id))
-    .filter(Boolean)
-    .map((skill) => ({ id: skill!.id, name: skill!.name }));
-  const strippedBody = stripKnownSkillCommands(value, skills);
-  const skillList = selectedSkills.map((skill) => `/${skill.id}`).join(", ");
-  const body =
-    strippedBody ||
-    (selectedSkills.length > 0
-      ? `Apply ${skillList} to the current writing context. If edits are useful, return them as reviewable suggestions or document proposals.`
-      : "");
-  const summary = strippedBody
-    ? selectedSkills.length > 0
-      ? `${strippedBody} (${skillList})`
-      : strippedBody
-    : selectedSkills.length > 0
-      ? `Requested ${skillList} on the current writing context.`
-      : "";
-
-  return {
-    body,
-    displayBody: strippedBody,
-    summary,
-    skillIds,
-    skills: selectedSkills
-  };
-}
-
 function isOlderDocument(candidate: DocumentState, current: DocumentState | null) {
   if (!current) return false;
   if (candidate.id !== current.id) return false;
@@ -1194,27 +1241,6 @@ function App() {
     });
   }
 
-  function snapshotFromState(state: DocumentState): HistorySnapshot {
-    return {
-      markdown: state.markdown,
-      review: structuredClone(state.review)
-    };
-  }
-
-  function comparableReviewPayload(review: DocumentState["review"]) {
-    const { updatedAt: _updatedAt, ...payload } = review;
-    return JSON.stringify(payload);
-  }
-
-  function snapshotsMatch(left: HistorySnapshot | null | undefined, right: HistorySnapshot | null | undefined) {
-    return Boolean(
-      left &&
-        right &&
-        left.markdown === right.markdown &&
-        comparableReviewPayload(left.review) === comparableReviewPayload(right.review)
-    );
-  }
-
   function pushUndoSnapshot(state: DocumentState) {
     const snapshot = snapshotFromState(state);
     const last = undoStackRef.current.at(-1);
@@ -1229,17 +1255,6 @@ function App() {
     if (snapshotsMatch(last, snapshot)) return;
 
     redoStackRef.current = [...redoStackRef.current, snapshot].slice(-100);
-  }
-
-  function popDistinctSnapshot(stack: HistorySnapshot[], current: HistorySnapshot) {
-    const nextStack = [...stack];
-    let target = nextStack.pop() ?? null;
-
-    while (target && snapshotsMatch(target, current)) {
-      target = nextStack.pop() ?? null;
-    }
-
-    return { target, stack: nextStack };
   }
 
   function beginLiveEditHistory() {
@@ -1342,11 +1357,6 @@ function App() {
         return text.trim() ? [{ ...block, text }] : [];
       })
     );
-  }
-
-  function blockNodeToMarkdown(node: HTMLElement, blockType?: string) {
-    const html = blockType === "table" ? node.outerHTML : node.innerHTML;
-    return htmlToInlineMarkdown(html.replace(/\u00a0/g, " ").trimEnd());
   }
 
   function isCanvasFocused() {
@@ -1467,45 +1477,6 @@ function App() {
     triggerAgent("thread", body, current, threadId);
   }
 
-  function getFloatingToolbarPosition(range: Range): FloatingToolbarState | null {
-    const rects = Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0);
-    const rect = rects[0] ?? range.getBoundingClientRect();
-    if (!rect || rect.width === 0 || rect.height === 0) return null;
-
-    const toolbarWidth = Math.min(430, window.innerWidth - 20);
-    const toolbarHeight = 42;
-    const margin = 10;
-    const minLeft = margin + toolbarWidth / 2;
-    const maxLeft = Math.max(minLeft, window.innerWidth - margin - toolbarWidth / 2);
-    const placement = rect.top > toolbarHeight + margin * 2 ? "above" : "below";
-    const top =
-      placement === "above"
-        ? Math.max(margin, rect.top - toolbarHeight - margin)
-        : Math.min(window.innerHeight - toolbarHeight - margin, rect.bottom + margin);
-
-    return {
-      left: clamp(rect.left + rect.width / 2, minLeft, maxLeft),
-      top,
-      placement
-    };
-  }
-
-  function getLinkPopoverPosition(range: Range): LinkPopoverState | null {
-    const rects = Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0);
-    const rect = rects[0] ?? range.getBoundingClientRect();
-    if (!rect || rect.width === 0 || rect.height === 0) return null;
-
-    const popoverWidth = 340;
-    const popoverHeight = 46;
-    const margin = 10;
-    const hasRoomBelow = rect.bottom + popoverHeight + margin < window.innerHeight;
-
-    return {
-      left: clamp(rect.left + rect.width / 2, margin + popoverWidth / 2, window.innerWidth - margin - popoverWidth / 2),
-      top: hasRoomBelow ? rect.bottom + margin : Math.max(margin, rect.top - popoverHeight - margin)
-    };
-  }
-
   function updateFloatingToolbarPosition() {
     const range = selectionRangeRef.current;
     if (!range || !canvasRef.current) return;
@@ -1562,13 +1533,6 @@ function App() {
     window.getSelection()?.removeAllRanges();
     canvasRef.current?.focus({ preventScroll: true });
     return true;
-  }
-
-  function isProposalReviewTarget(target: EventTarget | null) {
-    return (
-      target instanceof Element &&
-      Boolean(target.closest(".inline-proposal-review-bar, .inline-proposal-change"))
-    );
   }
 
   function markdownForSelection() {
@@ -1706,15 +1670,6 @@ function App() {
     return draft;
   }
 
-  function floatingToolbarPositionFromPoint(clientX: number, clientY: number): FloatingToolbarState {
-    const above = clientY > 70;
-    return {
-      left: clamp(clientX, 90, window.innerWidth - 90),
-      top: above ? clientY - 52 : clientY + 18,
-      placement: above ? "above" : "below"
-    };
-  }
-
   function handleCanvasPointerDown(event: React.PointerEvent<HTMLElement>) {
     if (event.button !== 0 || isProposalReviewTarget(event.target)) return;
 
@@ -1849,12 +1804,6 @@ function App() {
 
   function focusCanvasBlock(blockId: string) {
     setActiveBlockId((current) => (current === blockId ? current : blockId));
-  }
-
-  function getEditableBlockForRange(range: Range) {
-    const startBlock = closestEditableBlock(range.startContainer);
-    const endBlock = closestEditableBlock(range.endContainer);
-    return startBlock && startBlock === endBlock ? startBlock : null;
   }
 
   function scrollToThreadAnchor(threadId: string) {
@@ -2030,11 +1979,6 @@ function App() {
     return true;
   }
 
-  function setClipboardEventPayload(clipboardData: DataTransfer, payload: ClipboardPayload) {
-    clipboardData.setData("text/plain", payload.plainText);
-    if (payload.markdown) clipboardData.setData("text/markdown", payload.markdown);
-  }
-
   async function writeClipboardPayload(payload: ClipboardPayload, label: string) {
     try {
       await navigator.clipboard.writeText(payload.plainText);
@@ -2107,10 +2051,6 @@ function App() {
     clearCanvasSelectionState();
     showTransientToast(label);
     return true;
-  }
-
-  function isImageFile(file: File | null | undefined) {
-    return Boolean(file && file.type.startsWith("image/"));
   }
 
   async function insertImageFile(file: File) {
@@ -2235,14 +2175,6 @@ function App() {
     if (!applyClipboardTextPaste(text, { asMarkdown })) {
       showTransientToast("Paste failed");
     }
-  }
-
-  function handleCanvasDragOver(event: React.DragEvent<HTMLElement>) {
-    if (!Array.from(event.dataTransfer.items ?? []).some((item) => item.kind === "file" && item.type.startsWith("image/"))) {
-      return;
-    }
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
   }
 
   function handleCanvasDrop(event: React.DragEvent<HTMLElement>) {
@@ -2683,7 +2615,11 @@ function App() {
     const currentBlock = stateRef.current ? parseMarkdownBlocks(stateRef.current.markdown).find((block) => block.id === blockId) : null;
     const registeredNode = blockRefs.current[blockId] ?? null;
     const text = registeredNode ? blockNodeToMarkdown(registeredNode, currentBlock?.type) : htmlToInlineMarkdown(html);
-    const textBlocks = text.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
+    const textBlocks: string[] = [];
+    for (const part of text.split(/\n{2,}/)) {
+      const trimmed = part.trim();
+      if (trimmed) textBlocks.push(trimmed);
+    }
     if (currentBlock && textBlocks.length > 1 && textBlocks[0] === currentBlock.text.trim()) {
       setBlockResetKeys((keys) => ({
         ...keys,
@@ -3674,6 +3610,7 @@ function App() {
           className="selection-context-menu"
           style={{ left: selectionContextMenu.left, top: selectionContextMenu.top }}
           role="menu"
+          tabIndex={-1}
           onMouseDown={(event) => event.preventDefault()}
         >
           <button
@@ -4363,9 +4300,8 @@ function SettingsSkillPicker({
   onChange: (skillIds: string[]) => void;
 }) {
   const [query, setQuery] = useState("");
-  const selectedSkills = selectedSkillIds
-    .map((id) => skills.find((skill) => skill.id === id) ?? { id, name: id, description: "", source: "saved" })
-    .filter(Boolean) as AgentSkill[];
+  const skillsById = new Map(skills.map((skill) => [skill.id, skill]));
+  const selectedSkills: AgentSkill[] = selectedSkillIds.map((id) => skillsById.get(id) ?? { id, name: id, description: "", source: "saved" });
   const filteredSkills = skills.filter((skill) => skillMatchesQuery(skill, query)).slice(0, 20);
 
   function removeSkill(skillId: string) {
@@ -4532,9 +4468,12 @@ function SkillComposer({
   const [skillSearch, setSkillSearch] = useState("");
   const slashCommand = getActiveSlashCommand(value, cursor);
   const query = slashCommand?.query ?? "";
-  const selectedSkills = selectedSkillIds
-    .map((id) => skills.find((skill) => skill.id === id))
-    .filter(Boolean) as AgentSkill[];
+  const skillsById = new Map(skills.map((skill) => [skill.id, skill]));
+  const selectedSkills: AgentSkill[] = [];
+  for (const id of selectedSkillIds) {
+    const skill = skillsById.get(id);
+    if (skill) selectedSkills.push(skill);
+  }
   const matchingSkills = slashCommand ? skills.filter((skill) => skillMatchesQuery(skill, query)).slice(0, 7) : [];
   const showBrowseOption = slashCommand && "skills".startsWith(query.toLowerCase());
   const autocompleteOptions = [
@@ -4777,10 +4716,6 @@ function FloatingFormatToolbar({
   onImage: () => void;
   onComment: () => void;
 }) {
-  const keepSelection = (event: React.MouseEvent<HTMLButtonElement>) => {
-    event.preventDefault();
-  };
-
   return (
     <div
       className={`floating-format-toolbar is-${position.placement}`}
@@ -4976,12 +4911,6 @@ function EditableMarkdownCanvas({
     clearBlockDragState();
   }
 
-  function currentBlockIdFromSelection() {
-    const selection = window.getSelection();
-    const node = selection?.focusNode ?? selection?.anchorNode;
-    return node ? closestEditableBlock(node)?.dataset.blockId ?? null : null;
-  }
-
   function focusCurrentSelectionBlock(target?: EventTarget | null) {
     const targetBlock =
       target instanceof Node ? closestEditableBlock(target)?.dataset.blockId ?? null : currentBlockIdFromSelection();
@@ -5037,23 +4966,25 @@ function EditableMarkdownCanvas({
       >
         {visibleBlocks.map((block) => {
           const blockSpan = blockSpans.find((span) => span.id === block.id) ?? null;
-          const blockAnchorRanges =
-            blockSpan === null
-              ? []
-              : canvasThreads
-                  .filter(
-                    (thread) =>
-                      (thread.status === "open" || thread.id === canvasActiveThreadId) &&
-                      thread.anchor.kind === "markdown-range" &&
-                      thread.anchor.end > blockSpan.textStart &&
-                      thread.anchor.start < blockSpan.textEnd
-                  )
-                  .map((thread) => ({
-                    thread,
-                    start: clamp(thread.anchor.start - blockSpan.textStart, 0, block.text.length),
-                    end: clamp(thread.anchor.end - blockSpan.textStart, 0, block.text.length)
-                  }))
-                  .filter((range) => range.end > range.start);
+          const blockAnchorRanges: BlockAnchorRange[] = [];
+          if (blockSpan !== null) {
+            for (const thread of canvasThreads) {
+              if (
+                (thread.status !== "open" && thread.id !== canvasActiveThreadId) ||
+                thread.anchor.kind !== "markdown-range" ||
+                thread.anchor.end <= blockSpan.textStart ||
+                thread.anchor.start >= blockSpan.textEnd
+              ) {
+                continue;
+              }
+              const range = {
+                thread,
+                start: clamp(thread.anchor.start - blockSpan.textStart, 0, block.text.length),
+                end: clamp(thread.anchor.end - blockSpan.textStart, 0, block.text.length)
+              };
+              if (range.end > range.start) blockAnchorRanges.push(range);
+            }
+          }
 
           return (
             <React.Fragment key={block.id}>
@@ -5318,10 +5249,17 @@ function EditableImageBlock({
       data-block-id={block.id}
       className="editable-image-block"
       contentEditable={false}
+      role="button"
+      aria-label={image?.alt ? `Image block: ${image.alt}` : "Image block"}
       tabIndex={0}
       ref={(node) => onRegisterBlock(block.id, node)}
       onClick={() => onFocusBlock(block.id)}
       onFocus={() => onFocusBlock(block.id)}
+      onKeyDown={(event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        onFocusBlock(block.id);
+      }}
     >
       <div className="editable-image-frame">
         <img src={imagePreviewSrc(image.src)} alt={image.alt} title={image.title} loading="lazy" />
@@ -5464,24 +5402,20 @@ function renderHighlightedText(
   onActivateThread: (threadId: string) => void,
   anchorRanges: BlockAnchorRange[] = []
 ) {
-  const exactRanges = threads
-    .filter(
-      (thread) =>
-        thread.anchor.kind !== "markdown-range" &&
-        (thread.status === "open" || thread.id === activeThreadId) &&
-        thread.anchor.exact
-    )
-    .map((thread) => {
-      const match = findThreadAnchorInText(thread, text);
-      return match
-        ? {
-            thread,
-            start: match.start,
-            end: match.end
-          }
-        : null;
-    })
-    .filter(Boolean) as Array<{ thread: ReviewThread; start: number; end: number }>;
+  const exactRanges: Array<{ thread: ReviewThread; start: number; end: number }> = [];
+  for (const thread of threads) {
+    if (thread.anchor.kind === "markdown-range" || (thread.status !== "open" && thread.id !== activeThreadId) || !thread.anchor.exact) {
+      continue;
+    }
+    const match = findThreadAnchorInText(thread, text);
+    if (match) {
+      exactRanges.push({
+        thread,
+        start: match.start,
+        end: match.end
+      });
+    }
+  }
   const ranges = [...anchorRanges, ...exactRanges]
     .sort((a, b) => a!.start - b!.start) as Array<{ thread: ReviewThread; start: number; end: number }>;
 

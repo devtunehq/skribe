@@ -9,19 +9,26 @@ import {
 import type { ReviewThread, Suggestion } from "./types.ts";
 
 export function getThreadAnchorCandidates(thread: ReviewThread) {
-  const acceptedReplacements = [...thread.suggestions]
-    .filter((suggestion) => suggestion.status === "accepted" && suggestion.replacement.trim())
-    .reverse()
-    .map((suggestion) => suggestion.replacement.trim());
-  const otherReplacements = [...thread.suggestions]
-    .filter((suggestion) => suggestion.status !== "accepted" && suggestion.replacement.trim())
-    .reverse()
-    .map((suggestion) => suggestion.replacement.trim());
-  const candidates = [thread.anchor.exact, ...acceptedReplacements, ...otherReplacements]
-    .map((candidate) => candidate.replace(/\s+/g, " ").trim())
-    .filter(Boolean);
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  const addCandidate = (value: string) => {
+    const normalized = value.replace(/\s+/g, " ").trim();
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    candidates.push(normalized);
+  };
 
-  return Array.from(new Set(candidates));
+  addCandidate(thread.anchor.exact);
+  for (let index = thread.suggestions.length - 1; index >= 0; index -= 1) {
+    const suggestion = thread.suggestions[index];
+    if (suggestion.status === "accepted") addCandidate(suggestion.replacement);
+  }
+  for (let index = thread.suggestions.length - 1; index >= 0; index -= 1) {
+    const suggestion = thread.suggestions[index];
+    if (suggestion.status !== "accepted") addCandidate(suggestion.replacement);
+  }
+
+  return candidates;
 }
 
 export function findThreadAnchorInText(thread: ReviewThread, text: string) {
@@ -115,11 +122,16 @@ function isSafeFuzzySuggestionMatch(match: ReturnType<typeof scoreFuzzyText>) {
 }
 
 function rangeMatchesThreadSuggestion(currentMarkdown: string, thread: ReviewThread, suggestion: Suggestion) {
-  const currentCandidates = [
-    comparableText(currentMarkdown),
-    comparableText(renderedMarkdownSnippet(currentMarkdown))
-  ].filter(Boolean);
-  const targetCandidates = [suggestion.original, thread.anchor.exact].map(comparableText).filter(Boolean);
+  const currentCandidates: string[] = [];
+  for (const candidate of [comparableText(currentMarkdown), comparableText(renderedMarkdownSnippet(currentMarkdown))]) {
+    if (candidate) currentCandidates.push(candidate);
+  }
+
+  const targetCandidates: string[] = [];
+  for (const target of [suggestion.original, thread.anchor.exact]) {
+    const comparable = comparableText(target);
+    if (comparable) targetCandidates.push(comparable);
+  }
 
   return (
     targetCandidates.some((target) => currentCandidates.includes(target)) ||
@@ -147,13 +159,13 @@ function findFuzzySuggestionWindow(markdown: string, thread: ReviewThread, sugge
   if (blocks.length === 0 || spans.length === 0) return null;
 
   const replacementBlockCount = Math.max(1, parseMarkdownBlocks(suggestion.replacement).length);
-  const windowLengths = Array.from(
-    new Set(
-      [replacementBlockCount - 2, replacementBlockCount - 1, replacementBlockCount, replacementBlockCount + 1, replacementBlockCount + 2, 1, 2]
-        .map((length) => clamp(length, 1, blocks.length))
-        .filter(Boolean)
-    )
-  ).sort((a, b) => a - b);
+  const windowLengthSet = new Set<number>();
+  for (const rawLength of [replacementBlockCount - 2, replacementBlockCount - 1, replacementBlockCount, replacementBlockCount + 1, replacementBlockCount + 2, 1, 2]) {
+    const length = clamp(rawLength, 1, blocks.length);
+    if (length) windowLengthSet.add(length);
+  }
+  const windowLengths = Array.from(windowLengthSet).sort((a, b) => a - b);
+  const spansById = new Map(spans.map((span) => [span.id, span]));
 
   let best:
     | {
@@ -171,8 +183,9 @@ function findFuzzySuggestionWindow(markdown: string, thread: ReviewThread, sugge
       const score = bestSuggestionTextScore(windowMarkdown, thread, suggestion);
       if (!isSafeFuzzySuggestionMatch(score)) continue;
 
-      const startSpan = spans.find((span) => span.id === windowBlocks[0].id);
-      const endSpan = spans.find((span) => span.id === windowBlocks.at(-1)?.id);
+      const startSpan = spansById.get(windowBlocks[0].id);
+      const endBlock = windowBlocks.at(-1);
+      const endSpan = endBlock ? spansById.get(endBlock.id) : undefined;
       if (!startSpan || !endSpan) continue;
 
       const start = lineStartIndex(markdown, startSpan.startLine);
@@ -205,7 +218,10 @@ export function applyThreadSuggestionToMarkdown(markdown: string, thread: Review
     }
   }
 
-  for (const candidate of Array.from(new Set([suggestion.original, thread.anchor.exact].filter(Boolean)))) {
+  const exactCandidates = new Set<string>();
+  if (suggestion.original) exactCandidates.add(suggestion.original);
+  if (thread.anchor.exact) exactCandidates.add(thread.anchor.exact);
+  for (const candidate of exactCandidates) {
     const nextMarkdown = applySuggestion(markdown, candidate, replacement);
     if (nextMarkdown !== markdown) return nextMarkdown;
   }

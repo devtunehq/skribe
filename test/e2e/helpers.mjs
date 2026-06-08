@@ -4,20 +4,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
-export const root = new URL("../..", import.meta.url).pathname;
+const root = new URL("../..", import.meta.url).pathname;
 
-export function chromiumPath() {
+function chromiumPath() {
   const result = spawnSync("sh", ["-lc", "command -v chromium || command -v chromium-browser || command -v google-chrome"], {
     encoding: "utf8"
   });
   return result.status === 0 ? result.stdout.trim().split("\n")[0] : "";
 }
 
-export function randomPort() {
+function randomPort() {
   return 47000 + Math.floor(Math.random() * 1000);
 }
 
-export async function waitForHttpJson(url, timeoutMs = 8000) {
+async function waitForHttpJson(url, timeoutMs = 8000) {
   const startedAt = Date.now();
   let lastError = null;
   while (Date.now() - startedAt < timeoutMs) {
@@ -98,7 +98,7 @@ export async function startSkribeServer(markdownPath, options = {}) {
   };
 }
 
-export class Cdp {
+class Cdp {
   constructor(wsUrl) {
     this.ws = new WebSocket(wsUrl);
     this.nextId = 1;
@@ -147,7 +147,7 @@ export class Cdp {
   }
 }
 
-export async function startBrowser() {
+async function startBrowser() {
   const executable = chromiumPath();
   if (!executable) return null;
 

@@ -177,13 +177,16 @@ function renderedMarkdownCharacters(markdown: string) {
 }
 
 export function extractOutline(markdown: string) {
-  return parseMarkdownBlocks(markdown)
-    .filter((block) => block.type === "heading" && (block.level ?? 1) <= 3)
-    .map((block) => ({
+  const outline: Array<{ id: string; level: number; title: string }> = [];
+  for (const block of parseMarkdownBlocks(markdown)) {
+    if (block.type !== "heading" || (block.level ?? 1) > 3) continue;
+    outline.push({
       id: block.id,
       level: block.level ?? 2,
       title: block.text.trim()
-    }));
+    });
+  }
+  return outline;
 }
 
 export function openThreads(threads: ReviewThread[]) {
@@ -519,14 +522,18 @@ function normalizeTableRows(rows: string[][]) {
 }
 
 export function parseMarkdownTable(markdown: string) {
-  const lines = markdown
-    .replace(/\r\n/g, "\n")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
+  const lines: string[] = [];
+  for (const rawLine of markdown.replace(/\r\n/g, "\n").split("\n")) {
+    const line = rawLine.trim();
+    if (line) lines.push(line);
+  }
   if (lines.length < 2 || !isTableRow(lines[0]) || !isTableSeparator(lines[1])) return null;
 
-  const rows = normalizeTableRows([splitTableRow(lines[0]), ...lines.slice(2).filter(isTableRow).map(splitTableRow)]);
+  const parsedRows = [splitTableRow(lines[0])];
+  for (const line of lines.slice(2)) {
+    if (isTableRow(line)) parsedRows.push(splitTableRow(line));
+  }
+  const rows = normalizeTableRows(parsedRows);
   if (rows.length === 0) return null;
 
   const alignments = splitTableRow(lines[1]).map((cell) => {
