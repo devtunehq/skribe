@@ -1,7 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MultiFileDiff } from "@pierre/diffs/react";
 import {
-  BookOpen,
   Bold,
   Check,
   ChevronDown,
@@ -12,7 +11,6 @@ import {
   Copy,
   Download,
   FileText,
-  Globe,
   GripVertical,
   Heading1,
   Heading2,
@@ -27,7 +25,6 @@ import {
   List,
   ListOrdered,
   MessageSquare,
-  PenLine,
   Pilcrow,
   Quote,
   RefreshCw,
@@ -47,11 +44,9 @@ import {
   fetchAgentRuntimes,
   fetchDocument,
   fetchRevisionHistory,
-  generateToneOfVoice,
   restoreDocumentRevision,
   saveDocument,
   sendAgentMessage,
-  sendToneInterviewMessage,
   subscribeToDocumentEvents,
   updateAgentConfig,
   updateAppSettings,
@@ -121,10 +116,14 @@ import {
   deleteSelectionDraftFromMarkdown,
   resolveSelectionDraftRange
 } from "./selection";
+import { AgentTypingIndicator } from "./AgentTypingIndicator";
+import { SettingsDialog } from "./SettingsDialog";
 import {
-  createToneSetupState,
-  toneSetupReducer
-} from "./toneSetupState";
+  appThemeOptions,
+  diffViewModeOptions,
+  documentFontOptions
+} from "./settingsOptions";
+import { ToneSetupDialog, type ToneSetupInvocation } from "./ToneSetupDialog";
 import type {
   AgentSession,
   AgentRuntimeConfig,
@@ -145,9 +144,7 @@ import type {
   RevisionState,
   ProposalChangeDecision,
   ReviewThread,
-  SelectionDraft,
-  ToneInterviewMessage,
-  ToneSetupMode
+  SelectionDraft
 } from "./types";
 
 type PanelMode = "threads" | "chat";
@@ -156,8 +153,6 @@ type SupportedEditorLanguage = EditorLanguage;
 type SupportedDocumentFont = DocumentFont;
 type SupportedAppTheme = AppTheme;
 type SupportedDiffViewMode = DiffViewMode;
-type ToneSetupInvocation = "first-run" | "settings";
-type SettingsTab = "writing" | "agent" | "workspace";
 type BlockDropPlacement = "before" | "after";
 type FloatingToolbarState = {
   left: number;
@@ -327,85 +322,6 @@ const authorLabels: Record<Author, string> = {
   human: "Human",
   agent: "Agent"
 };
-
-const editorLanguageOptions: Array<{ value: SupportedEditorLanguage; label: string }> = [
-  { value: "en-GB", label: "EN-GB" },
-  { value: "en-US", label: "EN-US" }
-];
-
-const documentFontOptions: Array<{ value: SupportedDocumentFont; label: string; description: string }> = [
-  { value: "default", label: "Skribe default", description: "Mono headings, clean sans body." },
-  { value: "sans", label: "Clean sans", description: "Sans throughout the document." },
-  { value: "serif", label: "Editorial serif", description: "Warmer long-form reading." },
-  { value: "mono", label: "Mono draft", description: "Technical, precise drafting." }
-];
-
-const appThemeOptions: Array<{ value: SupportedAppTheme; label: string; description: string }> = [
-  { value: "default", label: "Skribe", description: "Oat paper, yellow mark, blue actions." },
-  { value: "newsprint", label: "Newsprint", description: "Quiet editorial monochrome with red notes." },
-  { value: "sage", label: "Sage", description: "Soft green workspace with mint actions." },
-  { value: "coral", label: "Coral", description: "Warm paper, coral accents, blue links." },
-  { value: "graphite", label: "Graphite", description: "Dark desk, bright controls." }
-];
-
-const diffViewModeOptions: Array<{ value: SupportedDiffViewMode; label: string; description: string }> = [
-  { value: "split", label: "Split", description: "Show current and proposed text side by side." },
-  { value: "unified", label: "Unified", description: "Show removals and additions in one compact flow." }
-];
-
-const settingsTabOptions: Array<{ id: SettingsTab; label: string }> = [
-  { id: "writing", label: "Writing" },
-  { id: "agent", label: "Agent" },
-  { id: "workspace", label: "Workspace" }
-];
-
-const toneSetupModes: Array<{ id: ToneSetupMode; label: string }> = [
-  { id: "manual", label: "Manual" },
-  { id: "interview", label: "Interview" },
-  { id: "links", label: "Links" },
-  { id: "archetype", label: "Archetypes" }
-];
-
-const toneLinkSlots = [
-  { id: "tone-link-1", label: "Link 1", position: 0 },
-  { id: "tone-link-2", label: "Link 2", position: 1 },
-  { id: "tone-link-3", label: "Link 3", position: 2 },
-  { id: "tone-link-4", label: "Link 4", position: 3 },
-  { id: "tone-link-5", label: "Link 5", position: 4 }
-];
-
-const toneArchetypeOptions = [
-  {
-    id: "direct-founder",
-    label: "Direct founder",
-    description: "Plainspoken, concrete, low-hype."
-  },
-  {
-    id: "technical-editorial",
-    label: "Technical editorial",
-    description: "Analytical, clear, market-aware."
-  },
-  {
-    id: "operator-memo",
-    label: "Operator memo",
-    description: "Practical, concise, tradeoff-led."
-  },
-  {
-    id: "warm-teacher",
-    label: "Warm teacher",
-    description: "Patient, accessible, concrete."
-  },
-  {
-    id: "sharp-critic",
-    label: "Sharp critic",
-    description: "Pointed, fair, unsentimental."
-  },
-  {
-    id: "narrative-builder",
-    label: "Narrative builder",
-    description: "Thoughtful, thesis-led, grounded."
-  }
-];
 
 const defaultAppSettings: AppSettings = {
   version: 1,
@@ -3388,10 +3304,12 @@ function App() {
             </div>
           </div>
 
-          <article
+          <div
             ref={canvasRef}
             className="markdown-canvas"
             lang={editorLanguage}
+            role="application"
+            aria-label="Markdown editor"
             tabIndex={-1}
             onPointerDown={handleCanvasPointerDown}
             onPointerMove={handleCanvasPointerMove}
@@ -3441,7 +3359,7 @@ function App() {
               onRequestProposalRevision={requestProposalRevision}
               onTableImageExported={notifyTableImageExported}
             />
-          </article>
+          </div>
         </section>
 
         <aside className="right-panel">
@@ -3633,754 +3551,6 @@ function App() {
 
       {lastCopied ? <div className="toast">{lastCopied}</div> : null}
     </main>
-  );
-}
-
-function toneModeIcon(mode: ToneSetupMode) {
-  if (mode === "manual") return <PenLine size={15} />;
-  if (mode === "interview") return <MessageSquare size={15} />;
-  if (mode === "links") return <Globe size={15} />;
-  return <BookOpen size={15} />;
-}
-
-function ModalDialogShell({
-  className,
-  labelledBy,
-  preventCancel,
-  onCancel,
-  children
-}: {
-  className: string;
-  labelledBy: string;
-  preventCancel?: boolean;
-  onCancel: () => void;
-  children: React.ReactNode;
-}) {
-  const dialogRef = useRef<HTMLDialogElement | null>(null);
-  const onCancelRef = useRef(onCancel);
-  const preventCancelRef = useRef(preventCancel);
-
-  onCancelRef.current = onCancel;
-  preventCancelRef.current = preventCancel;
-
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog || dialog.open) return;
-
-    const requestCancel = () => {
-      if (!preventCancelRef.current) onCancelRef.current();
-    };
-    const handleCancel = (event: Event) => {
-      event.preventDefault();
-      requestCancel();
-    };
-    const handleMouseDown = (event: MouseEvent) => {
-      if (event.target === event.currentTarget) requestCancel();
-    };
-
-    dialog.addEventListener("cancel", handleCancel);
-    dialog.addEventListener("mousedown", handleMouseDown);
-    dialog.showModal();
-
-    return () => {
-      dialog.removeEventListener("cancel", handleCancel);
-      dialog.removeEventListener("mousedown", handleMouseDown);
-      if (dialog.open) dialog.close();
-    };
-  }, []);
-
-  return (
-    <dialog ref={dialogRef} className={className} aria-labelledby={labelledBy}>
-      {children}
-    </dialog>
-  );
-}
-
-function ToneSetupDialog({
-  invocation,
-  currentTone,
-  editorLanguage,
-  onSave,
-  onSkip,
-  onCancel
-}: {
-  invocation: ToneSetupInvocation;
-  currentTone: string;
-  editorLanguage: SupportedEditorLanguage;
-  onSave: (toneOfVoice: string) => void | Promise<void>;
-  onSkip: () => void | Promise<void>;
-  onCancel: () => void;
-}) {
-  const defaultToneArchetypeId = toneArchetypeOptions[0]?.id ?? "direct-founder";
-  const [toneState, dispatchTone] = useReducer(toneSetupReducer, currentTone, (tone) =>
-    createToneSetupState(tone, defaultToneArchetypeId)
-  );
-  const {
-    mode,
-    manualText,
-    interviewMessages,
-    interviewDraft,
-    interviewState,
-    urls,
-    selectedArchetypeId,
-    generatedTone,
-    warnings,
-    builderState,
-    errorMessage
-  } = toneState;
-  const previewTone = mode === "manual" ? manualText : generatedTone;
-  const isBusy = builderState === "generating" || builderState === "saving" || interviewState === "thinking";
-
-  const requestInterviewTurn = useCallback(async (nextMessages: ToneInterviewMessage[], options: { forceGenerate?: boolean } = {}) => {
-    dispatchTone({ type: "interview-request-start" });
-    try {
-      const response = await sendToneInterviewMessage({
-        messages: nextMessages,
-        editorLanguage,
-        currentTone: generatedTone || currentTone,
-        forceGenerate: options.forceGenerate
-      });
-      const reply = response.reply.trim();
-      const messagesWithReply = reply ? [...nextMessages, { role: "agent" as const, body: reply }] : nextMessages;
-      dispatchTone({
-        type: "interview-request-success",
-        messages: messagesWithReply,
-        toneOfVoice: response.toneOfVoice || undefined,
-        warnings: response.warnings
-      });
-      return response;
-    } catch (error) {
-      dispatchTone({
-        type: "interview-request-error",
-        errorMessage: error instanceof Error ? error.message : String(error)
-      });
-      return null;
-    }
-  }, [currentTone, editorLanguage, generatedTone]);
-
-  useEffect(() => {
-    if (mode !== "interview" || interviewMessages.length > 0 || interviewState === "thinking") return;
-    void requestInterviewTurn([]);
-  }, [interviewMessages.length, interviewState, mode, requestInterviewTurn]);
-
-  async function submitInterviewMessage() {
-    const body = interviewDraft.trim();
-    if (!body || isBusy) return;
-    const nextMessages: ToneInterviewMessage[] = [...interviewMessages, { role: "human", body }];
-    dispatchTone({ type: "set-interview-messages", messages: nextMessages });
-    dispatchTone({ type: "set-interview-draft", value: "" });
-    await requestInterviewTurn(nextMessages);
-  }
-
-  function restartInterview() {
-    dispatchTone({ type: "restart-interview" });
-    void requestInterviewTurn([]);
-  }
-
-  async function buildTone() {
-    if (mode === "interview") {
-      if (generatedTone.trim()) return generatedTone;
-      dispatchTone({ type: "tone-generation-start" });
-      const response = await requestInterviewTurn(interviewMessages, { forceGenerate: true });
-      dispatchTone({ type: "set-builder-state", builderState: response ? "idle" : "error" });
-      return response?.toneOfVoice ?? "";
-    }
-
-    dispatchTone({ type: "tone-generation-start" });
-    try {
-      const response = await generateToneOfVoice({
-        mode,
-        manualText,
-        urls,
-        archetypeId: selectedArchetypeId,
-        editorLanguage
-      });
-      dispatchTone({
-        type: "tone-generation-success",
-        toneOfVoice: response.toneOfVoice,
-        warnings: response.warnings,
-        syncManualText: mode === "manual"
-      });
-      return response.toneOfVoice;
-    } catch (error) {
-      dispatchTone({
-        type: "tone-generation-error",
-        errorMessage: error instanceof Error ? error.message : String(error)
-      });
-      return "";
-    }
-  }
-
-  async function saveTone() {
-    const tone = previewTone.trim() || (await buildTone()).trim();
-    if (!tone) return;
-    dispatchTone({ type: "tone-saving-start" });
-    await onSave(tone);
-  }
-
-  return (
-    <ModalDialogShell
-      className="settings-backdrop tone-setup-backdrop"
-      labelledBy="tone-setup-title"
-      preventCancel={isBusy}
-      onCancel={onCancel}
-    >
-      <section className="settings-dialog tone-setup-dialog">
-        <header className="settings-dialog-header">
-          <div>
-            <span>{invocation === "first-run" ? "First run" : "Settings"}</span>
-            <h2 id="tone-setup-title">Tone of voice</h2>
-          </div>
-          <button type="button" className="icon-button mini" onClick={onCancel} title="Close tone setup" disabled={isBusy}>
-            <X size={15} />
-          </button>
-        </header>
-
-        <div className="tone-mode-tabs" role="tablist" aria-label="Tone setup mode">
-          {toneSetupModes.map((option) => (
-            <button
-              key={option.id}
-              className={mode === option.id ? "is-active" : ""}
-              onClick={() => {
-                dispatchTone({ type: "set-mode", mode: option.id });
-              }}
-              type="button"
-            >
-              {toneModeIcon(option.id)}
-              {option.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="tone-setup-body">
-          {mode === "manual" ? (
-            <label className="settings-field">
-              <span>Manual tone</span>
-              <textarea
-                value={manualText}
-                onChange={(event) => dispatchTone({ type: "set-manual-text", value: event.target.value })}
-                placeholder="Direct, founder-to-founder, plainspoken, no hype, British English."
-                rows={8}
-              />
-            </label>
-          ) : null}
-
-          {mode === "interview" ? (
-            <div className="tone-interview-chat">
-              <div className="settings-field-header">
-                <span>Interview</span>
-                <button type="button" className="ghost-button small" onClick={restartInterview} disabled={isBusy}>
-                  <RotateCcw size={14} />
-                  Start over
-                </button>
-              </div>
-              <div className="tone-interview-messages" aria-live="polite">
-                {interviewMessages.map((message, index) => (
-                  <article key={`${message.role}-${index}`} className={`tone-interview-message is-${message.role}`}>
-                    <strong>{message.role === "agent" ? "Skribe" : "You"}</strong>
-                    <p>{message.body}</p>
-                  </article>
-                ))}
-                {interviewState === "thinking" ? <AgentTypingIndicator label="Skribe is thinking" /> : null}
-              </div>
-              <form
-                className="tone-interview-composer"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void submitInterviewMessage();
-                }}
-              >
-                <textarea
-                  value={interviewDraft}
-                  aria-label="Tone interview reply"
-                  onChange={(event) => dispatchTone({ type: "set-interview-draft", value: event.target.value })}
-                  onKeyDown={(event) => {
-                    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                      event.preventDefault();
-                      void submitInterviewMessage();
-                    }
-                  }}
-                  placeholder="Reply to Skribe..."
-                  rows={4}
-                  disabled={isBusy}
-                />
-                <button className="primary-button" type="submit" disabled={isBusy || !interviewDraft.trim()}>
-                  <Send size={15} />
-                  Send
-                </button>
-              </form>
-            </div>
-          ) : null}
-
-          {mode === "links" ? (
-            <div className="tone-link-list">
-              {toneLinkSlots.map((slot) => (
-                <label key={slot.id} className="settings-field">
-                  <span>{slot.label}</span>
-                  <input
-                    value={urls[slot.position] ?? ""}
-                    onChange={(event) =>
-                      dispatchTone({ type: "set-url", position: slot.position, value: event.target.value })
-                    }
-                    placeholder="https://example.com/post"
-                  />
-                </label>
-              ))}
-            </div>
-          ) : null}
-
-          {mode === "archetype" ? (
-            <div className="tone-archetype-grid">
-              {toneArchetypeOptions.map((archetype) => (
-                <button
-                  key={archetype.id}
-                  className={selectedArchetypeId === archetype.id ? "is-selected" : ""}
-                  onClick={() => {
-                    dispatchTone({ type: "set-selected-archetype", archetypeId: archetype.id });
-                  }}
-                  type="button"
-                >
-                  <strong>{archetype.label}</strong>
-                  <small>{archetype.description}</small>
-                </button>
-              ))}
-            </div>
-          ) : null}
-
-          {mode !== "manual" ? (
-            <div className="tone-preview">
-              <div className="settings-field-header">
-                <span>Generated tone</span>
-                <button type="button" className="secondary-button small" onClick={buildTone} disabled={isBusy}>
-                  <Sparkles size={14} />
-                  {builderState === "generating" ? "Generating" : "Generate"}
-                </button>
-              </div>
-              <textarea
-                value={generatedTone}
-                aria-label="Generated tone of voice"
-                onChange={(event) => dispatchTone({ type: "set-generated-tone", value: event.target.value })}
-                placeholder="Generate a tone profile, then edit it here."
-                rows={6}
-              />
-            </div>
-          ) : null}
-
-          {warnings.length > 0 ? (
-            <div className="tone-warning-list">
-              {warnings.map((warning) => (
-                <p key={warning}>{warning}</p>
-              ))}
-            </div>
-          ) : null}
-
-          {errorMessage ? <p className="tone-error">{errorMessage}</p> : null}
-        </div>
-
-        <footer className="settings-dialog-actions">
-          <span className={`settings-save-state is-${builderState === "error" ? "error" : "saved"}`}>
-            {builderState === "generating" || builderState === "saving"
-              ? "working"
-              : builderState === "error"
-                ? "error"
-                : "ready"}
-          </span>
-          {invocation === "first-run" ? (
-            <button type="button" className="ghost-button" onClick={onSkip} disabled={isBusy}>
-              Skip
-            </button>
-          ) : null}
-          <button type="button" className="ghost-button" onClick={onCancel} disabled={isBusy}>
-            Cancel
-          </button>
-          <button type="button" className="primary-button" onClick={saveTone} disabled={isBusy}>
-            <Save size={15} />
-            Save tone
-          </button>
-        </footer>
-      </section>
-    </ModalDialogShell>
-  );
-}
-
-function SettingsDialog({
-  settings,
-  saveState,
-  skills,
-  runtimeOptions,
-  resolvedRuntime,
-  onChange,
-  onOpenToneSetup,
-  onSave,
-  onCancel
-}: {
-  settings: AppSettings;
-  saveState: SaveState;
-  skills: AgentSkill[];
-  runtimeOptions: AgentRuntimeConfig["runtimes"];
-  resolvedRuntime: string | null;
-  onChange: (patch: Partial<AppSettings>) => void;
-  onOpenToneSetup: () => void;
-  onSave: () => void;
-  onCancel: () => void;
-}) {
-  const [activeTab, setActiveTab] = useState<SettingsTab>("writing");
-  const selectedRuntimeId = settings.agentRuntime === "auto" ? resolvedRuntime : settings.agentRuntime;
-  const selectedRuntimeStatus = runtimeOptions.find((runtime) => runtime.id === selectedRuntimeId) ?? null;
-  const modelOptions = selectedRuntimeStatus?.models ?? [];
-  const effortOptions = selectedRuntimeStatus?.effortLevels ?? [];
-  const modelSelectValue =
-    settings.agentModel === "auto" || modelOptions.some((model) => model.id === settings.agentModel)
-      ? settings.agentModel
-      : "__custom";
-  const effortSelectValue =
-    settings.agentEffort === "auto" || effortOptions.some((effort) => effort.id === settings.agentEffort)
-      ? settings.agentEffort
-      : "auto";
-  const selectedDocumentFont = documentFontOptions.find((option) => option.value === settings.documentFont) ?? documentFontOptions[0];
-  const selectedTheme = appThemeOptions.find((option) => option.value === settings.theme) ?? appThemeOptions[0];
-  const selectedDiffViewMode = diffViewModeOptions.find((option) => option.value === settings.diffViewMode) ?? diffViewModeOptions[0];
-
-  return (
-    <ModalDialogShell className="settings-backdrop" labelledBy="settings-title" onCancel={onCancel}>
-      <section className="settings-dialog">
-        <header className="settings-dialog-header">
-          <div>
-            <span>Settings</span>
-            <h2 id="settings-title">Settings</h2>
-          </div>
-          <button type="button" className="icon-button mini" onClick={onCancel} title="Close settings">
-            <X size={15} />
-          </button>
-        </header>
-
-        <div className="settings-tabs" role="tablist" aria-label="Settings sections">
-          {settingsTabOptions.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              id={`settings-tab-${tab.id}`}
-              role="tab"
-              aria-selected={activeTab === tab.id}
-              aria-controls={`settings-panel-${tab.id}`}
-              className={activeTab === tab.id ? "is-active" : ""}
-              onClick={() => setActiveTab(tab.id)}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-
-        <div
-          id={`settings-panel-${activeTab}`}
-          className="settings-form settings-tab-panel"
-          role="tabpanel"
-          aria-labelledby={`settings-tab-${activeTab}`}
-        >
-          {activeTab === "writing" ? (
-            <>
-              <div className="settings-field">
-                <div className="settings-field-header">
-                  <span>Tone of voice</span>
-                  <button type="button" className="secondary-button small" onClick={onOpenToneSetup}>
-                    <Sparkles size={14} />
-                    Build tone
-                  </button>
-                </div>
-                <textarea
-                  value={settings.toneOfVoice}
-                  aria-label="Tone of voice"
-                  onChange={(event) => onChange({ toneOfVoice: event.target.value })}
-                  placeholder="Direct, plainspoken, founder-to-founder, no hype."
-                  rows={5}
-                />
-              </div>
-
-              <div className="settings-grid">
-                <label className="settings-field">
-                  <span>Language</span>
-                  <select
-                    value={settings.editorLanguage}
-                    onChange={(event) => onChange({ editorLanguage: event.target.value as SupportedEditorLanguage })}
-                  >
-                    {editorLanguageOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                  <small className="is-placeholder" aria-hidden="true">
-                    Language helper
-                  </small>
-                </label>
-
-                <label className="settings-field">
-                  <span>Document font</span>
-                  <select
-                    value={settings.documentFont}
-                    onChange={(event) => onChange({ documentFont: event.target.value as SupportedDocumentFont })}
-                  >
-                    {documentFontOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                  <small>{selectedDocumentFont.description}</small>
-                </label>
-              </div>
-
-              <label className="settings-field">
-                <span>Theme</span>
-                <select
-                  value={settings.theme}
-                  onChange={(event) => onChange({ theme: event.target.value as SupportedAppTheme })}
-                >
-                  {appThemeOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                <small>{selectedTheme.description}</small>
-              </label>
-            </>
-          ) : null}
-
-          {activeTab === "agent" ? (
-            <>
-              <div className="settings-grid">
-                <label className="settings-field">
-                  <span>Agent provider</span>
-                  <select
-                    value={settings.agentRuntime}
-                    onChange={(event) =>
-                      onChange({
-                        agentRuntime: event.target.value,
-                        agentModel: "auto",
-                        agentEffort: "auto"
-                      })
-                    }
-                  >
-                    <option value="auto">Auto</option>
-                    {runtimeOptions.map((runtime) => (
-                      <option key={runtime.id} value={runtime.id} disabled={!runtime.available}>
-                        {runtime.label}{runtime.available ? "" : " unavailable"}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label className="settings-field">
-                  <span>Agent model</span>
-                  <select
-                    value={modelSelectValue}
-                    disabled={Boolean(selectedRuntimeStatus && !selectedRuntimeStatus.supportsManualModel)}
-                    onChange={(event) => {
-                      if (event.target.value === "__custom") return;
-                      onChange({ agentModel: event.target.value });
-                    }}
-                  >
-                    <option value="auto">Default model</option>
-                    {modelOptions.map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {model.label}
-                      </option>
-                    ))}
-                    {modelSelectValue === "__custom" ? <option value="__custom">{settings.agentModel}</option> : null}
-                  </select>
-                </label>
-              </div>
-
-              <label className="settings-field">
-                <span>Agent effort</span>
-                <select
-                  value={effortSelectValue}
-                  disabled={Boolean(selectedRuntimeStatus && !selectedRuntimeStatus.supportsEffort)}
-                  onChange={(event) => onChange({ agentEffort: event.target.value })}
-                >
-                  <option value="auto">Default effort</option>
-                  {effortOptions.map((effort) => (
-                    <option key={effort.id} value={effort.id}>
-                      {effort.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <div className="settings-field">
-                <span>Default skills</span>
-                <SettingsSkillPicker
-                  skills={skills}
-                  selectedSkillIds={settings.defaultSkills}
-                  onChange={(defaultSkills) => onChange({ defaultSkills })}
-                />
-              </div>
-
-              <label className="settings-check">
-                <input
-                  type="checkbox"
-                  checked={settings.autoReplyToComments}
-                  onChange={(event) => onChange({ autoReplyToComments: event.target.checked })}
-                />
-                <span>Auto-reply to new comments</span>
-              </label>
-
-              <label className="settings-field">
-                <span>Proposal mode</span>
-                <select
-                  value={settings.proposalModeDefault}
-                  onChange={(event) =>
-                    onChange({ proposalModeDefault: event.target.value === "bold" ? "bold" : "conservative" })
-                  }
-                >
-                  <option value="conservative">Conservative</option>
-                  <option value="bold">Bold</option>
-                </select>
-              </label>
-
-              <label className="settings-field">
-                <span>Diff view</span>
-                <select
-                  value={settings.diffViewMode}
-                  onChange={(event) => onChange({ diffViewMode: event.target.value as SupportedDiffViewMode })}
-                >
-                  {diffViewModeOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                <small>{selectedDiffViewMode.description}</small>
-              </label>
-            </>
-          ) : null}
-
-          {activeTab === "workspace" ? (
-            <>
-              <label className="settings-check">
-                <input
-                  type="checkbox"
-                  checked={settings.showResolvedThreads}
-                  onChange={(event) => onChange({ showResolvedThreads: event.target.checked })}
-                />
-                <span>Show resolved threads</span>
-              </label>
-
-              <div className="settings-grid">
-                <label className="settings-check">
-                  <input
-                    type="checkbox"
-                    checked={settings.panelState.leftCollapsed}
-                    onChange={(event) =>
-                      onChange({
-                        panelState: {
-                          ...settings.panelState,
-                          leftCollapsed: event.target.checked
-                        }
-                      })
-                    }
-                  />
-                  <span>Collapse left panel</span>
-                </label>
-
-                <label className="settings-check">
-                  <input
-                    type="checkbox"
-                    checked={settings.panelState.rightCollapsed}
-                    onChange={(event) =>
-                      onChange({
-                        panelState: {
-                          ...settings.panelState,
-                          rightCollapsed: event.target.checked
-                        }
-                      })
-                    }
-                  />
-                  <span>Collapse right panel</span>
-                </label>
-              </div>
-            </>
-          ) : null}
-        </div>
-
-        <footer className="settings-dialog-actions">
-          <span className={`settings-save-state is-${saveState}`}>{saveState}</span>
-          <button type="button" className="ghost-button" onClick={onCancel}>
-            Cancel
-          </button>
-          <button type="button" className="primary-button" onClick={onSave} disabled={saveState === "saving"}>
-            <Save size={15} />
-            Save
-          </button>
-        </footer>
-      </section>
-    </ModalDialogShell>
-  );
-}
-
-function SettingsSkillPicker({
-  skills,
-  selectedSkillIds,
-  onChange
-}: {
-  skills: AgentSkill[];
-  selectedSkillIds: string[];
-  onChange: (skillIds: string[]) => void;
-}) {
-  const [query, setQuery] = useState("");
-  const skillsById = new Map(skills.map((skill) => [skill.id, skill]));
-  const selectedSkills: AgentSkill[] = selectedSkillIds.map((id) => skillsById.get(id) ?? { id, name: id, description: "", source: "saved" });
-  const filteredSkills = skills.filter((skill) => skillMatchesQuery(skill, query)).slice(0, 20);
-
-  function removeSkill(skillId: string) {
-    onChange(selectedSkillIds.filter((id) => id !== skillId));
-  }
-
-  function toggleSkill(skillId: string) {
-    onChange(
-      selectedSkillIds.includes(skillId)
-        ? selectedSkillIds.filter((id) => id !== skillId)
-        : uniqueSkillIds([...selectedSkillIds, skillId])
-    );
-  }
-
-  return (
-    <div className="settings-skill-picker">
-      {selectedSkills.length > 0 ? (
-        <div className="skill-chip-row" aria-label="Default agent skills">
-          {selectedSkills.map((skill) => (
-            <button type="button" key={skill.id} className="skill-chip" onClick={() => removeSkill(skill.id)} title={`Remove ${skillLabel(skill)}`}>
-              /{skill.id}
-              <X size={12} />
-            </button>
-          ))}
-        </div>
-      ) : null}
-
-      <label className="skill-search settings-skill-search">
-        <Search size={14} />
-        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search skills" />
-      </label>
-
-      <div className="settings-skill-list">
-        {filteredSkills.length === 0 ? (
-          <p className="empty-note">No skills match that search.</p>
-        ) : (
-          filteredSkills.map((skill) => {
-            const selected = selectedSkillIds.includes(skill.id);
-            return (
-              <button type="button" key={skill.id} className={selected ? "is-selected" : ""} onClick={() => toggleSkill(skill.id)}>
-                <span>
-                  <strong>/{skill.id}</strong>
-                  <small>{skill.description || skill.source}</small>
-                </span>
-              </button>
-            );
-          })
-        )}
-      </div>
-    </div>
   );
 }
 
@@ -4986,31 +4156,6 @@ function EditableMarkdownCanvas({
     return blockId;
   }
 
-  function handleDocumentKeyDown(event: React.KeyboardEvent<HTMLElement>) {
-    if (event.defaultPrevented) return;
-    const blockId = currentBlockIdFromSelection();
-    if (blockId) onShortcut(event, blockId);
-  }
-
-  function handleDocumentKeyUp(event: React.KeyboardEvent<HTMLElement>) {
-    focusCurrentSelectionBlock(event.target);
-    onRememberSelection();
-  }
-
-  function handleDocumentMouseUp(event: React.MouseEvent<HTMLElement>) {
-    focusCurrentSelectionBlock(event.target);
-    onRememberSelection();
-  }
-
-  function handleDocumentBlur(event: React.FocusEvent<HTMLElement>) {
-    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
-    onCommitDocument();
-  }
-
-  function handleDocumentInput() {
-    onDocumentInput();
-  }
-
   return (
     <>
       {unanchoredInlineChanges.map((change) => (
@@ -5025,11 +4170,6 @@ function EditableMarkdownCanvas({
       <div
         className="editable-document"
         lang={editorLanguage}
-        onBlur={handleDocumentBlur}
-        onInput={handleDocumentInput}
-        onKeyDown={handleDocumentKeyDown}
-        onKeyUp={handleDocumentKeyUp}
-        onMouseUp={handleDocumentMouseUp}
       >
         {visibleBlocks.map((block) => {
           const blockAnchorRanges = anchorRangesByBlock.get(block.id) ?? emptyBlockAnchorRanges;
@@ -5070,6 +4210,8 @@ function EditableMarkdownCanvas({
                   onFocusBlock={onFocusBlock}
                   onRememberSelection={onRememberSelection}
                   onShortcut={onShortcut}
+                  onCommitDocument={onCommitDocument}
+                  onDocumentInput={onDocumentInput}
                   onTableImageExported={onTableImageExported}
                 />
               </EditableBlockShell>
@@ -5169,6 +4311,8 @@ interface EditableBlockProps {
   onFocusBlock: (blockId: string) => void;
   onRememberSelection: () => void;
   onShortcut: (event: React.KeyboardEvent<HTMLElement>, blockId: string) => void;
+  onCommitDocument: () => void;
+  onDocumentInput: () => void;
   onTableImageExported: (status: "success" | "error") => void;
 }
 
@@ -5184,6 +4328,8 @@ const EditableBlock = React.memo(function EditableBlock({
   onFocusBlock,
   onRememberSelection,
   onShortcut,
+  onCommitDocument,
+  onDocumentInput,
   onTableImageExported
 }: EditableBlockProps) {
   const editableRef = useRef<HTMLElement | null>(null);
@@ -5204,6 +4350,12 @@ const EditableBlock = React.memo(function EditableBlock({
     },
     onSelect: onRememberSelection,
     onKeyDown: (event: React.KeyboardEvent<HTMLElement>) => onShortcut(event, block.id),
+    onBlur: (event: React.FocusEvent<HTMLElement>) => {
+      const documentRoot = event.currentTarget.closest(".editable-document");
+      if (documentRoot?.contains(event.relatedTarget as Node | null)) return;
+      onCommitDocument();
+    },
+    onInput: onDocumentInput,
     contentEditable: true,
     suppressContentEditableWarning: true,
     spellCheck: true,
@@ -5489,12 +4641,12 @@ function renderHighlightedText(
     }
     const isActive = activeThreadId === range.thread.id;
     nodes.push(
-      <span
+      <button
+        type="button"
         key={range.thread.id}
         data-thread-id={range.thread.id}
         className={`anchor-highlight ${isActive ? "is-active" : ""}`}
-        role="button"
-        tabIndex={0}
+        onMouseDown={(event) => event.preventDefault()}
         onClick={() => {
           if (range.thread.id === "selection-preview") return;
           const selection = window.getSelection();
@@ -5509,7 +4661,7 @@ function renderHighlightedText(
         }}
       >
         <InlineMarkdown markdown={text.slice(range.start, range.end)} keyPrefix={`range-${range.thread.id}`} />
-      </span>
+      </button>
     );
     cursor = range.end;
   });
@@ -6291,22 +5443,6 @@ function DocumentProposalCard({
           Decline all
         </button>
       </div>
-    </article>
-  );
-}
-
-function AgentTypingIndicator({ label }: { label: string }) {
-  return (
-    <article className="message-bubble is-agent is-typing">
-      <div>
-        <strong>Agent</strong>
-        <span>{label}</span>
-      </div>
-      <p aria-live="polite">
-        <span className="typing-dot" />
-        <span className="typing-dot" />
-        <span className="typing-dot" />
-      </p>
     </article>
   );
 }
