@@ -27,7 +27,7 @@ export interface MarkdownImage {
 
 export type MarkdownBlockIdentity = Omit<MarkdownBlock, "id">;
 
-export function markdownBlockSignature(block: MarkdownBlockIdentity) {
+function markdownBlockSignature(block: MarkdownBlockIdentity) {
   return [
     block.type,
     block.level ?? "",
@@ -37,7 +37,7 @@ export function markdownBlockSignature(block: MarkdownBlockIdentity) {
   ].join("\u001f");
 }
 
-export function markdownBlockIdFromSignature(signature: string, occurrence: number) {
+function markdownBlockIdFromSignature(signature: string, occurrence: number) {
   let hash = 2166136261;
   for (let index = 0; index < signature.length; index += 1) {
     hash ^= signature.charCodeAt(index);
@@ -46,7 +46,7 @@ export function markdownBlockIdFromSignature(signature: string, occurrence: numb
   return `block-${(hash >>> 0).toString(36)}-${occurrence}`;
 }
 
-export function makeMarkdownBlockId(block: MarkdownBlockIdentity, occurrence: number) {
+function makeMarkdownBlockId(block: MarkdownBlockIdentity, occurrence: number) {
   return markdownBlockIdFromSignature(markdownBlockSignature(block), occurrence);
 }
 
@@ -257,7 +257,7 @@ export function parseMarkdownImage(markdown: string): MarkdownImage | null {
   return { alt, src, title };
 }
 
-export function serializeMarkdownImage(image: MarkdownImage) {
+function serializeMarkdownImage(image: MarkdownImage) {
   const alt = image.alt.replace(/\]/g, "\\]");
   const src = /[\s)]/.test(image.src) ? `<${image.src}>` : image.src.replace(/\)/g, "%29");
   const title = image.title ? ` "${image.title.replace(/"/g, '\\"')}"` : "";
@@ -509,39 +509,6 @@ export function moveMarkdownBlock(
   return serializeMarkdownBlocks(blocks);
 }
 
-export function inlineMarkdownToHtml(markdown: string) {
-  let html = escapeHtml(markdown);
-
-  const codeSegments: string[] = [];
-  const linkSegments: string[] = [];
-  html = html.replace(/`([^`]+)`/g, (_, code) => {
-    const index = codeSegments.push(`<code>${code}</code>`) - 1;
-    return `\u0000CODE${index}\u0000`;
-  });
-  html = html.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_, label, href) => {
-    const index = linkSegments.push(`<a href="${href}" target="_blank" rel="noreferrer">${label}</a>`) - 1;
-    return `\u0000LINK${index}\u0000`;
-  });
-
-  html = html
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
-    .replace(/~~([^~]+)~~/g, "<s>$1</s>")
-    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-    .replace(/_([^_]+)_/g, "<em>$1</em>")
-    .replace(/\n/g, "<br />");
-
-  linkSegments.forEach((segment, index) => {
-    html = html.replace(`\u0000LINK${index}\u0000`, segment);
-  });
-
-  codeSegments.forEach((segment, index) => {
-    html = html.replace(`\u0000CODE${index}\u0000`, segment);
-  });
-
-  return html;
-}
-
 function escapeTableCell(value: string) {
   return value.replace(/\|/g, "\\|").replace(/\n+/g, " ").trim();
 }
@@ -577,7 +544,7 @@ export function parseMarkdownTable(markdown: string) {
   };
 }
 
-export function serializeMarkdownTable(headers: string[], rows: string[][]) {
+function serializeMarkdownTable(headers: string[], rows: string[][]) {
   const normalizedRows = normalizeTableRows([headers, ...rows]);
   const width = normalizedRows[0]?.length ?? 2;
   const header = normalizedRows[0] ?? Array.from({ length: width }, () => "");
@@ -641,13 +608,4 @@ export function htmlToInlineMarkdown(html: string) {
     .replace(/\u200B/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .trimEnd();
-}
-
-function escapeHtml(value: string) {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
 }

@@ -77,7 +77,7 @@ export function getProposalChangeBlocks(fileDiff: FileDiffMetadata | null): Prop
   );
 }
 
-export function sortChangesForReverseApply(changes: ProposalChangeBlock[]) {
+function sortChangesForReverseApply(changes: ProposalChangeBlock[]) {
   return [...changes].sort(
     (a, b) => b.deletionLineStart - a.deletionLineStart || b.hunkIndex - a.hunkIndex || b.changeIndex - a.changeIndex
   );
@@ -161,7 +161,7 @@ function findManualInsertionIndex(markdown: string, sourceLines: string[], lineI
   return null;
 }
 
-export function rebaseManualMarkdownEdits(previousMarkdown: string, currentMarkdown: string, nextMarkdown: string) {
+function rebaseManualMarkdownEdits(previousMarkdown: string, currentMarkdown: string, nextMarkdown: string) {
   if (currentMarkdown === previousMarkdown) return nextMarkdown;
 
   const manualDiff = parseMarkdownDiff(previousMarkdown, currentMarkdown);

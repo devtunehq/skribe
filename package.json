@@ -38,7 +38,8 @@
     "test": "node --test test/*.test.mjs",
     "test:coverage": "node --experimental-test-coverage --test test/*.test.mjs",
     "test:e2e": "npm run build && node --test test/e2e/*.test.mjs",
-    "typecheck": "tsc -b"
+    "typecheck": "tsc -b",
+    "doctor": "npx react-doctor@latest"
   },
   "devDependencies": {
     "@pierre/diffs": "^1.2.4",
@@ -47,6 +48,7 @@
     "@vitejs/plugin-react": "^5.0.4",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
+    "react-doctor": "^0.4.2",
     "react-dom": "^19.0.0",
     "react-markdown": "^9.0.1",
     "remark-gfm": "^4.0.0",

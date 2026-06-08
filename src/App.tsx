@@ -68,7 +68,6 @@ import {
   titleFromMarkdown,
   wordCount,
   htmlToInlineMarkdown,
-  inlineMarkdownToHtml,
   looksLikeMarkdownPaste,
   markdownBlockIdFromIndex,
   normalizeMarkdownPaste,
@@ -279,6 +278,9 @@ const defaultAppSettings: AppSettings = {
   proposalModeDefault: "conservative",
   diffViewMode: "split"
 };
+
+const emptyThreads: ReviewThread[] = [];
+const emptyProposals: DocumentProposal[] = [];
 
 function mergeAppSettings(settings?: Partial<AppSettings> | null): AppSettings {
   const requestedDocumentFont = settings?.documentFont;
@@ -610,6 +612,65 @@ function markdownToClipboardText(markdown: string) {
     .trim();
 }
 
+const inlineMarkdownPattern =
+  /`([^`]+)`|\[([^\]\n]+)\]\(([^)\s]+)\)|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|\*([^*]+)\*|_([^_]+)_|\n/g;
+
+function safeRenderedMarkdownHref(href: string) {
+  const trimmed = href.trim();
+  if (!trimmed || /[\u0000-\u001f\u007f\s]/.test(trimmed)) return null;
+  if (/^(?:https?:|mailto:)/i.test(trimmed)) return trimmed;
+  if (/^[a-z][a-z\d+.-]*:/i.test(trimmed)) return null;
+  return trimmed;
+}
+
+function inlineMarkdownNodes(markdown: string, keyPrefix = "inline") {
+  if (!markdown) return null;
+
+  const nodes: React.ReactNode[] = [];
+  let cursor = 0;
+  let key = 0;
+
+  for (const match of markdown.matchAll(inlineMarkdownPattern)) {
+    const start = match.index ?? 0;
+    if (start > cursor) nodes.push(markdown.slice(cursor, start));
+
+    const [raw, code, linkLabel, linkHref, boldAsterisk, boldUnderscore, strike, italicAsterisk, italicUnderscore] = match;
+    const nodeKey = `${keyPrefix}-${key++}`;
+
+    if (code !== undefined) {
+      nodes.push(<code key={nodeKey}>{code}</code>);
+    } else if (linkLabel !== undefined && linkHref !== undefined) {
+      const safeHref = safeRenderedMarkdownHref(linkHref);
+      nodes.push(
+        safeHref ? (
+          <a key={nodeKey} href={safeHref} target="_blank" rel="noreferrer">
+            {linkLabel}
+          </a>
+        ) : (
+          raw
+        )
+      );
+    } else if (boldAsterisk !== undefined || boldUnderscore !== undefined) {
+      nodes.push(<strong key={nodeKey}>{boldAsterisk ?? boldUnderscore}</strong>);
+    } else if (strike !== undefined) {
+      nodes.push(<s key={nodeKey}>{strike}</s>);
+    } else if (italicAsterisk !== undefined || italicUnderscore !== undefined) {
+      nodes.push(<em key={nodeKey}>{italicAsterisk ?? italicUnderscore}</em>);
+    } else {
+      nodes.push(<br key={nodeKey} />);
+    }
+
+    cursor = start + raw.length;
+  }
+
+  if (cursor < markdown.length) nodes.push(markdown.slice(cursor));
+  return nodes;
+}
+
+function InlineMarkdown({ markdown, keyPrefix }: { markdown: string; keyPrefix?: string }) {
+  return <>{inlineMarkdownNodes(markdown, keyPrefix)}</>;
+}
+
 function caretRangeFromPoint(x: number, y: number) {
   const caretDocument = document as Document & {
     caretRangeFromPoint?: (x: number, y: number) => Range | null;
@@ -815,6 +876,38 @@ function App() {
   const redoStackRef = useRef<HistorySnapshot[]>([]);
   const liveEditHistoryActiveRef = useRef(false);
   const historyRestoreRef = useRef(false);
+  const agentSession = documentState?.agentSession;
+
+  const clearPendingEditTimers = useCallback(() => {
+    if (liveEditTimerRef.current) window.clearTimeout(liveEditTimerRef.current);
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    liveEditTimerRef.current = null;
+    saveTimerRef.current = null;
+  }, []);
+
+  const saveAgentRuntimeConfig = useCallback(
+    async (nextConfig: { runtime: string; model: string; effort: string }) => {
+      if (agentSession?.status === "running") return;
+
+      setSaveState("saving");
+      try {
+        const updated = await updateAgentConfig(nextConfig);
+        stateRef.current = updated.document;
+        setDocumentState(updated.document);
+        setAgentRuntimeConfig(updated.config);
+        setAgentModelDraft(updated.config.configuredModel === "auto" ? "" : updated.config.configuredModel);
+        if (updated.settings) {
+          const savedSettings = mergeAppSettings(updated.settings);
+          setAppSettings(savedSettings);
+          setSettingsDraft(savedSettings);
+        }
+        setSaveState("saved");
+      } catch {
+        setSaveState("error");
+      }
+    },
+    [agentSession?.status]
+  );
 
   useEffect(() => {
     Promise.all([fetchAppSettings(), fetchDocument(), fetchRevisionHistory(), fetchAgentSkills(), fetchAgentRuntimes()])
@@ -873,7 +966,8 @@ function App() {
     agentRuntimeConfig,
     documentState?.agentSession?.configuredModel,
     documentState?.agentSession?.configuredRuntime,
-    documentState?.agentSession?.runtime
+    documentState?.agentSession?.runtime,
+    saveAgentRuntimeConfig
   ]);
 
   useEffect(() => {
@@ -891,10 +985,7 @@ function App() {
       if (isOlderDocument(remote, current)) return;
       const shouldSkipRender = switchedDocument ? false : shouldAvoidDocumentRenderWhileEditing(remote);
       if (switchedDocument) {
-        if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
-        if (liveEditTimerRef.current) window.clearTimeout(liveEditTimerRef.current);
-        saveTimerRef.current = null;
-        liveEditTimerRef.current = null;
+        clearPendingEditTimers();
         undoStackRef.current = [];
         redoStackRef.current = [];
         selectionRangeRef.current = null;
@@ -932,14 +1023,11 @@ function App() {
       }
       if (saveRef.current !== "saving") setSaveState("saved");
     });
-  }, []);
+  }, [clearPendingEditTimers]);
 
   useEffect(() => {
-    return () => {
-      if (liveEditTimerRef.current) window.clearTimeout(liveEditTimerRef.current);
-      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
-    };
-  }, []);
+    return clearPendingEditTimers;
+  }, [clearPendingEditTimers]);
 
   useEffect(() => {
     const reposition = () => {
@@ -955,13 +1043,13 @@ function App() {
 
   const outline = useMemo(() => extractOutline(documentState?.markdown ?? ""), [documentState?.markdown]);
   const words = useMemo(() => wordCount(documentState?.markdown ?? ""), [documentState?.markdown]);
-  const threads = documentState?.review.threads ?? [];
+  const threads = documentState?.review.threads ?? emptyThreads;
   const showResolvedThreads = appSettings.showResolvedThreads;
   const visibleThreads = useMemo(
     () => (showResolvedThreads ? threads : threads.filter((thread) => thread.status !== "resolved")),
     [showResolvedThreads, threads]
   );
-  const proposals = documentState?.review.proposals ?? [];
+  const proposals = documentState?.review.proposals ?? emptyProposals;
   const reviewableProposals = useMemo(
     () =>
       proposals
@@ -981,33 +1069,10 @@ function App() {
   const activeThread = visibleThreads.find((thread) => thread.id === activeThreadId) ?? visibleThreads[0] ?? null;
   const openThreadCount = openThreads(threads).length;
   const resolvedThreadCount = threads.filter((thread) => thread.status === "resolved").length;
-  const agentSession = documentState?.agentSession;
-
   function refreshRevisions() {
     fetchRevisionHistory()
       .then((revisions) => setRevisionState(revisions))
       .catch(() => undefined);
-  }
-
-  async function saveAgentRuntimeConfig(nextConfig: { runtime: string; model: string; effort: string }) {
-    if (agentSession?.status === "running") return;
-
-    setSaveState("saving");
-    try {
-      const updated = await updateAgentConfig(nextConfig);
-      stateRef.current = updated.document;
-      setDocumentState(updated.document);
-      setAgentRuntimeConfig(updated.config);
-      setAgentModelDraft(updated.config.configuredModel === "auto" ? "" : updated.config.configuredModel);
-      if (updated.settings) {
-        const savedSettings = mergeAppSettings(updated.settings);
-        setAppSettings(savedSettings);
-        setSettingsDraft(savedSettings);
-      }
-      setSaveState("saved");
-    } catch {
-      setSaveState("error");
-    }
   }
 
   async function persistSettings(nextSettings: AppSettings, options: { closeDialog?: boolean } = {}) {
@@ -3238,22 +3303,35 @@ function App() {
             {saveState === "saving" ? <RefreshCw size={14} /> : <Save size={14} />}
             {saveState}
           </span>
-          <button className="icon-button" onClick={() => setIsSettingsOpen(true)} title="Settings">
+          <button type="button" className="icon-button" onClick={() => setIsSettingsOpen(true)} title="Settings" aria-label="Settings">
             <Settings size={17} />
           </button>
-          <button className="icon-button" onClick={() => fileInputRef.current?.click()} title="Import Markdown">
+          <button
+            type="button"
+            className="icon-button"
+            onClick={() => fileInputRef.current?.click()}
+            title="Import Markdown"
+            aria-label="Import Markdown"
+          >
             <Upload size={17} />
           </button>
-          <button className="icon-button" onClick={() => copyText(documentState.markdown, "Markdown copied")} title="Copy Markdown">
+          <button
+            type="button"
+            className="icon-button"
+            onClick={() => copyText(documentState.markdown, "Markdown copied")}
+            title="Copy Markdown"
+            aria-label="Copy Markdown"
+          >
             <Copy size={17} />
           </button>
-          <button className="icon-button" onClick={exportMarkdown} title="Export Markdown">
+          <button type="button" className="icon-button" onClick={exportMarkdown} title="Export Markdown" aria-label="Export Markdown">
             <Download size={17} />
           </button>
           <input
             ref={fileInputRef}
             type="file"
             accept=".md,.markdown,text/markdown,text/plain"
+            aria-label="Import Markdown file"
             hidden
             onChange={(event) => {
               const file = event.target.files?.[0];
@@ -3265,6 +3343,7 @@ function App() {
             ref={imageInputRef}
             type="file"
             accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+            aria-label="Insert image file"
             hidden
             onChange={(event) => {
               const files = event.target.files;
@@ -3277,7 +3356,7 @@ function App() {
 
       <section className="workspace">
         <aside className="left-rail">
-          <button
+          <button type="button"
             className="rail-collapse-button"
             onClick={() => updatePanelState({ leftCollapsed: !isLeftRailCollapsed })}
             title={isLeftRailCollapsed ? "Show left sidebar" : "Hide left sidebar"}
@@ -3315,7 +3394,7 @@ function App() {
           </div>
 
           <div className="rail-section rail-section-compact">
-            <button
+            <button type="button"
               className="rail-heading rail-toggle-heading"
               onClick={() => setIsRevisionHistoryOpen((value) => !value)}
               title={isRevisionHistoryOpen ? "Collapse revision history" : "Expand revision history"}
@@ -3341,46 +3420,46 @@ function App() {
         <section className="center-pane">
           <div className="canvas-toolbar">
             <div className="format-toolbar" aria-label="Formatting toolbar">
-              <button title="Paragraph (Ctrl/Cmd+Alt+0)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "paragraph", level: undefined }); }}>
+              <button type="button" title="Paragraph (Ctrl/Cmd+Alt+0)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "paragraph", level: undefined }); }}>
                 <Pilcrow size={16} />
               </button>
-              <button title="Heading 1 (Ctrl/Cmd+Alt+1)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "heading", level: 1 }); }}>
+              <button type="button" title="Heading 1 (Ctrl/Cmd+Alt+1)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "heading", level: 1 }); }}>
                 <Heading1 size={16} />
               </button>
-              <button title="Heading 2 (Ctrl/Cmd+Alt+2)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "heading", level: 2 }); }}>
+              <button type="button" title="Heading 2 (Ctrl/Cmd+Alt+2)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "heading", level: 2 }); }}>
                 <Heading2 size={16} />
               </button>
-              <button title="Heading 3 (Ctrl/Cmd+Alt+3)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "heading", level: 3 }); }}>
+              <button type="button" title="Heading 3 (Ctrl/Cmd+Alt+3)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "heading", level: 3 }); }}>
                 <Heading3 size={16} />
               </button>
               <span className="toolbar-divider" />
-              <button title="Bold (Ctrl/Cmd+B)" onMouseDown={(event) => { event.preventDefault(); applyInlineCommand("bold"); }}>
+              <button type="button" title="Bold (Ctrl/Cmd+B)" onMouseDown={(event) => { event.preventDefault(); applyInlineCommand("bold"); }}>
                 <Bold size={16} />
               </button>
-              <button title="Italic (Ctrl/Cmd+I)" onMouseDown={(event) => { event.preventDefault(); applyInlineCommand("italic"); }}>
+              <button type="button" title="Italic (Ctrl/Cmd+I)" onMouseDown={(event) => { event.preventDefault(); applyInlineCommand("italic"); }}>
                 <Italic size={16} />
               </button>
-              <button title="Inline code (Ctrl/Cmd+`)" onMouseDown={(event) => { event.preventDefault(); applyInlineCode(); }}>
+              <button type="button" title="Inline code (Ctrl/Cmd+`)" onMouseDown={(event) => { event.preventDefault(); applyInlineCode(); }}>
                 <Code2 size={16} />
               </button>
-              <button title="Insert link (Ctrl/Cmd+K)" onMouseDown={(event) => { event.preventDefault(); openLinkPopover(); }}>
+              <button type="button" title="Insert link (Ctrl/Cmd+K)" onMouseDown={(event) => { event.preventDefault(); openLinkPopover(); }}>
                 <LinkIcon size={16} />
               </button>
-              <button title="Insert image" onMouseDown={(event) => { event.preventDefault(); imageInputRef.current?.click(); }}>
+              <button type="button" title="Insert image" onMouseDown={(event) => { event.preventDefault(); imageInputRef.current?.click(); }}>
                 <ImageIcon size={16} />
               </button>
               <span className="toolbar-divider" />
-              <button title="Bulleted list (Ctrl/Cmd+Shift+8)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "unordered-list" }); }}>
+              <button type="button" title="Bulleted list (Ctrl/Cmd+Shift+8)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "unordered-list" }); }}>
                 <List size={16} />
               </button>
-              <button title="Numbered list (Ctrl/Cmd+Shift+7)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "ordered-list", marker: "1" }); }}>
+              <button type="button" title="Numbered list (Ctrl/Cmd+Shift+7)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "ordered-list", marker: "1" }); }}>
                 <ListOrdered size={16} />
               </button>
-              <button title="Quote" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "quote" }); }}>
+              <button type="button" title="Quote" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "quote" }); }}>
                 <Quote size={16} />
               </button>
               <span className="toolbar-divider" />
-              <button title="Comment on selected text" onMouseDown={(event) => { event.preventDefault(); startCommentFromSelection(); }}>
+              <button type="button" title="Comment on selected text" onMouseDown={(event) => { event.preventDefault(); startCommentFromSelection(); }}>
                 <MessageSquare size={16} />
               </button>
             </div>
@@ -3443,7 +3522,7 @@ function App() {
         </section>
 
         <aside className="right-panel">
-          <button
+          <button type="button"
             className="right-collapse-button"
             onClick={() => updatePanelState({ rightCollapsed: !isRightPanelCollapsed })}
             title={isRightPanelCollapsed ? "Show right sidebar" : "Hide right sidebar"}
@@ -3452,11 +3531,11 @@ function App() {
           </button>
           <div className="right-panel-content">
           <div className="panel-tabs">
-            <button className={panelMode === "threads" ? "active" : ""} onClick={() => setPanelMode("threads")}>
+            <button type="button" className={panelMode === "threads" ? "active" : ""} onClick={() => setPanelMode("threads")}>
               <MessageSquare size={15} />
               Threads
             </button>
-            <button className={panelMode === "chat" ? "active" : ""} onClick={() => setPanelMode("chat")}>
+            <button type="button" className={panelMode === "chat" ? "active" : ""} onClick={() => setPanelMode("chat")}>
               <Sparkles size={15} />
               Chat
             </button>
@@ -3673,16 +3752,11 @@ function ToneSetupDialog({
   const previewTone = mode === "manual" ? manualText : generatedTone;
   const isBusy = builderState === "generating" || builderState === "saving" || interviewState === "thinking";
 
-  useEffect(() => {
-    if (mode !== "interview" || interviewMessages.length > 0 || interviewState === "thinking") return;
-    void requestInterviewTurn([]);
-  }, [mode]);
-
   function updateUrl(index: number, value: string) {
     setUrls((currentUrls) => currentUrls.map((url, urlIndex) => (urlIndex === index ? value : url)));
   }
 
-  async function requestInterviewTurn(nextMessages: ToneInterviewMessage[], options: { forceGenerate?: boolean } = {}) {
+  const requestInterviewTurn = useCallback(async (nextMessages: ToneInterviewMessage[], options: { forceGenerate?: boolean } = {}) => {
     setInterviewState("thinking");
     setErrorMessage("");
     setWarnings([]);
@@ -3705,7 +3779,12 @@ function ToneSetupDialog({
       setInterviewState("error");
       return null;
     }
-  }
+  }, [currentTone, editorLanguage, generatedTone]);
+
+  useEffect(() => {
+    if (mode !== "interview" || interviewMessages.length > 0 || interviewState === "thinking") return;
+    void requestInterviewTurn([]);
+  }, [interviewMessages.length, interviewState, mode, requestInterviewTurn]);
 
   async function submitInterviewMessage() {
     const body = interviewDraft.trim();
@@ -3779,7 +3858,7 @@ function ToneSetupDialog({
             <span>{invocation === "first-run" ? "First run" : "Settings"}</span>
             <h2 id="tone-setup-title">Tone of voice</h2>
           </div>
-          <button className="icon-button mini" onClick={onCancel} title="Close tone setup" disabled={isBusy}>
+          <button type="button" className="icon-button mini" onClick={onCancel} title="Close tone setup" disabled={isBusy}>
             <X size={15} />
           </button>
         </header>
@@ -3819,7 +3898,7 @@ function ToneSetupDialog({
             <div className="tone-interview-chat">
               <div className="settings-field-header">
                 <span>Interview</span>
-                <button className="ghost-button small" onClick={restartInterview} disabled={isBusy}>
+                <button type="button" className="ghost-button small" onClick={restartInterview} disabled={isBusy}>
                   <RotateCcw size={14} />
                   Start over
                 </button>
@@ -3842,6 +3921,7 @@ function ToneSetupDialog({
               >
                 <textarea
                   value={interviewDraft}
+                  aria-label="Tone interview reply"
                   onChange={(event) => setInterviewDraft(event.target.value)}
                   onKeyDown={(event) => {
                     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -3899,13 +3979,14 @@ function ToneSetupDialog({
             <div className="tone-preview">
               <div className="settings-field-header">
                 <span>Generated tone</span>
-                <button className="secondary-button small" onClick={buildTone} disabled={isBusy}>
+                <button type="button" className="secondary-button small" onClick={buildTone} disabled={isBusy}>
                   <Sparkles size={14} />
                   {builderState === "generating" ? "Generating" : "Generate"}
                 </button>
               </div>
               <textarea
                 value={generatedTone}
+                aria-label="Generated tone of voice"
                 onChange={(event) => setGeneratedTone(event.target.value)}
                 placeholder="Generate a tone profile, then edit it here."
                 rows={6}
@@ -3933,14 +4014,14 @@ function ToneSetupDialog({
                 : "ready"}
           </span>
           {invocation === "first-run" ? (
-            <button className="ghost-button" onClick={onSkip} disabled={isBusy}>
+            <button type="button" className="ghost-button" onClick={onSkip} disabled={isBusy}>
               Skip
             </button>
           ) : null}
-          <button className="ghost-button" onClick={onCancel} disabled={isBusy}>
+          <button type="button" className="ghost-button" onClick={onCancel} disabled={isBusy}>
             Cancel
           </button>
-          <button className="primary-button" onClick={saveTone} disabled={isBusy}>
+          <button type="button" className="primary-button" onClick={saveTone} disabled={isBusy}>
             <Save size={15} />
             Save tone
           </button>
@@ -4002,7 +4083,7 @@ function SettingsDialog({
             <span>Settings</span>
             <h2 id="settings-title">Settings</h2>
           </div>
-          <button className="icon-button mini" onClick={onCancel} title="Close settings">
+          <button type="button" className="icon-button mini" onClick={onCancel} title="Close settings">
             <X size={15} />
           </button>
         </header>
@@ -4035,13 +4116,14 @@ function SettingsDialog({
               <div className="settings-field">
                 <div className="settings-field-header">
                   <span>Tone of voice</span>
-                  <button className="secondary-button small" onClick={onOpenToneSetup}>
+                  <button type="button" className="secondary-button small" onClick={onOpenToneSetup}>
                     <Sparkles size={14} />
                     Build tone
                   </button>
                 </div>
                 <textarea
                   value={settings.toneOfVoice}
+                  aria-label="Tone of voice"
                   onChange={(event) => onChange({ toneOfVoice: event.target.value })}
                   placeholder="Direct, plainspoken, founder-to-founder, no hype."
                   rows={5}
@@ -4258,10 +4340,10 @@ function SettingsDialog({
 
         <footer className="settings-dialog-actions">
           <span className={`settings-save-state is-${saveState}`}>{saveState}</span>
-          <button className="ghost-button" onClick={onCancel}>
+          <button type="button" className="ghost-button" onClick={onCancel}>
             Cancel
           </button>
-          <button className="primary-button" onClick={onSave} disabled={saveState === "saving"}>
+          <button type="button" className="primary-button" onClick={onSave} disabled={saveState === "saving"}>
             <Save size={15} />
             Save
           </button>
@@ -4303,7 +4385,7 @@ function SettingsSkillPicker({
       {selectedSkills.length > 0 ? (
         <div className="skill-chip-row" aria-label="Default agent skills">
           {selectedSkills.map((skill) => (
-            <button key={skill.id} className="skill-chip" onClick={() => removeSkill(skill.id)} title={`Remove ${skillLabel(skill)}`}>
+            <button type="button" key={skill.id} className="skill-chip" onClick={() => removeSkill(skill.id)} title={`Remove ${skillLabel(skill)}`}>
               /{skill.id}
               <X size={12} />
             </button>
@@ -4323,7 +4405,7 @@ function SettingsSkillPicker({
           filteredSkills.map((skill) => {
             const selected = selectedSkillIds.includes(skill.id);
             return (
-              <button key={skill.id} className={selected ? "is-selected" : ""} onClick={() => toggleSkill(skill.id)}>
+              <button type="button" key={skill.id} className={selected ? "is-selected" : ""} onClick={() => toggleSkill(skill.id)}>
                 <span>
                   <strong>/{skill.id}</strong>
                   <small>{skill.description || skill.source}</small>
@@ -4388,7 +4470,7 @@ function RevisionHistoryPanel({
                 {isCurrent ? (
                   <span className="doc-revision-current">Current</span>
                 ) : (
-                  <button
+                  <button type="button"
                     className="secondary-button small doc-revision-restore"
                     disabled={isRestoring}
                     onClick={() => onRestore(revision.id)}
@@ -4425,6 +4507,7 @@ function SkillComposer({
   onSelectedSkillIdsChange,
   skills,
   placeholder,
+  ariaLabel,
   rows,
   submitLabel,
   submitIcon,
@@ -4436,6 +4519,7 @@ function SkillComposer({
   onSelectedSkillIdsChange: (skillIds: string[]) => void;
   skills: AgentSkill[];
   placeholder: string;
+  ariaLabel: string;
   rows: number;
   submitLabel: string;
   submitIcon: React.ReactNode;
@@ -4501,7 +4585,7 @@ function SkillComposer({
       {selectedSkills.length > 0 ? (
         <div className="skill-chip-row" aria-label="Selected agent skills">
           {selectedSkills.map((skill) => (
-            <button key={skill.id} className="skill-chip" onClick={() => removeSkill(skill.id)} title={`Remove ${skillLabel(skill)}`}>
+            <button type="button" key={skill.id} className="skill-chip" onClick={() => removeSkill(skill.id)} title={`Remove ${skillLabel(skill)}`}>
               /{skill.id}
               <X size={12} />
             </button>
@@ -4550,13 +4634,14 @@ function SkillComposer({
           }}
           rows={rows}
           placeholder={placeholder}
+          aria-label={ariaLabel}
         />
 
         {autocompleteOptions.length > 0 && slashCommand ? (
           <div className="skill-autocomplete" role="listbox">
             {autocompleteOptions.map((option, index) =>
               option.kind === "browse" ? (
-                <button
+                <button type="button"
                   key={option.id}
                   className={index === activeIndex ? "is-active" : ""}
                   onMouseDown={(event) => event.preventDefault()}
@@ -4569,7 +4654,7 @@ function SkillComposer({
                   </span>
                 </button>
               ) : (
-                <button
+                <button type="button"
                   key={option.skill.id}
                   className={index === activeIndex ? "is-active" : ""}
                   onMouseDown={(event) => event.preventDefault()}
@@ -4592,7 +4677,7 @@ function SkillComposer({
           <div className="skill-picker-header">
             <strong>Agent skills</strong>
             <span>{skills.length}</span>
-            <button className="icon-button mini" onClick={() => setIsPickerOpen(false)} title="Close skills">
+            <button type="button" className="icon-button mini" onClick={() => setIsPickerOpen(false)} title="Close skills">
               <X size={12} />
             </button>
           </div>
@@ -4612,7 +4697,7 @@ function SkillComposer({
               filteredPickerSkills.map((skill) => {
                 const selected = selectedSkillIds.includes(skill.id);
                 return (
-                  <button
+                  <button type="button"
                     key={skill.id}
                     className={selected ? "is-selected" : ""}
                     onClick={() => (selected ? removeSkill(skill.id) : onSelectedSkillIdsChange(uniqueSkillIds([...selectedSkillIds, skill.id])))}
@@ -4631,11 +4716,11 @@ function SkillComposer({
       ) : null}
 
       <div className="skill-composer-actions">
-        <button className="secondary-button small" onClick={() => setIsPickerOpen((open) => !open)} title="Browse agent skills">
+        <button type="button" className="secondary-button small" onClick={() => setIsPickerOpen((open) => !open)} title="Browse agent skills">
           <Sparkles size={14} />
           Skills
         </button>
-        <button className="primary-button" onClick={onSubmit}>
+        <button type="button" className="primary-button" onClick={onSubmit}>
           {submitIcon}
           {submitLabel}
         </button>
@@ -4703,36 +4788,36 @@ function FloatingFormatToolbar({
       role="toolbar"
       aria-label="Selection formatting toolbar"
     >
-      <button title="Paragraph" disabled={!activeBlockId} onMouseDown={keepSelection} onClick={onParagraph}>
+      <button type="button" title="Paragraph" disabled={!activeBlockId} onMouseDown={keepSelection} onClick={onParagraph}>
         <Pilcrow size={15} />
       </button>
-      <button title="Heading 1" disabled={!activeBlockId} onMouseDown={keepSelection} onClick={() => onHeading(1)}>
+      <button type="button" title="Heading 1" disabled={!activeBlockId} onMouseDown={keepSelection} onClick={() => onHeading(1)}>
         <Heading1 size={15} />
       </button>
-      <button title="Heading 2" disabled={!activeBlockId} onMouseDown={keepSelection} onClick={() => onHeading(2)}>
+      <button type="button" title="Heading 2" disabled={!activeBlockId} onMouseDown={keepSelection} onClick={() => onHeading(2)}>
         <Heading2 size={15} />
       </button>
-      <button title="Heading 3" disabled={!activeBlockId} onMouseDown={keepSelection} onClick={() => onHeading(3)}>
+      <button type="button" title="Heading 3" disabled={!activeBlockId} onMouseDown={keepSelection} onClick={() => onHeading(3)}>
         <Heading3 size={15} />
       </button>
       <span className="toolbar-divider" />
-      <button title="Bold" onMouseDown={keepSelection} onClick={onBold}>
+      <button type="button" title="Bold" onMouseDown={keepSelection} onClick={onBold}>
         <Bold size={15} />
       </button>
-      <button title="Italic" onMouseDown={keepSelection} onClick={onItalic}>
+      <button type="button" title="Italic" onMouseDown={keepSelection} onClick={onItalic}>
         <Italic size={15} />
       </button>
-      <button title="Inline code" onMouseDown={keepSelection} onClick={onInlineCode}>
+      <button type="button" title="Inline code" onMouseDown={keepSelection} onClick={onInlineCode}>
         <Code2 size={15} />
       </button>
-      <button title="Insert link" onMouseDown={keepSelection} onClick={onLink}>
+      <button type="button" title="Insert link" onMouseDown={keepSelection} onClick={onLink}>
         <LinkIcon size={15} />
       </button>
-      <button title="Insert image" onMouseDown={keepSelection} onClick={onImage}>
+      <button type="button" title="Insert image" onMouseDown={keepSelection} onClick={onImage}>
         <ImageIcon size={15} />
       </button>
       <span className="toolbar-divider" />
-      <button title="Comment on selected text" onMouseDown={keepSelection} onClick={onComment}>
+      <button type="button" title="Comment on selected text" onMouseDown={keepSelection} onClick={onComment}>
         <MessageSquare size={15} />
       </button>
     </div>
@@ -5314,7 +5399,9 @@ function EditableTableBlock({
         <thead>
           <tr>
             {headers.map((cell, index) => (
-              <th key={`header-${index}`} style={cellStyle(index)} dangerouslySetInnerHTML={{ __html: inlineMarkdownToHtml(cell) }} />
+              <th key={`header-${index}`} style={cellStyle(index)}>
+                <InlineMarkdown markdown={cell} keyPrefix={`header-${index}`} />
+              </th>
             ))}
           </tr>
         </thead>
@@ -5322,11 +5409,9 @@ function EditableTableBlock({
           {rows.map((row, rowIndex) => (
             <tr key={`row-${rowIndex}`}>
               {Array.from({ length: columnCount }, (_, index) => (
-                <td
-                  key={`cell-${rowIndex}-${index}`}
-                  style={cellStyle(index)}
-                  dangerouslySetInnerHTML={{ __html: inlineMarkdownToHtml(row[index] ?? "") }}
-                />
+                <td key={`cell-${rowIndex}-${index}`} style={cellStyle(index)}>
+                  <InlineMarkdown markdown={row[index] ?? ""} keyPrefix={`cell-${rowIndex}-${index}`} />
+                </td>
               ))}
             </tr>
           ))}
@@ -5402,7 +5487,11 @@ function renderHighlightedText(
 
   if (ranges.length === 0) {
     if (!text) return null;
-    return <span dangerouslySetInnerHTML={{ __html: inlineMarkdownToHtml(text) }} />;
+    return (
+      <span>
+        <InlineMarkdown markdown={text} />
+      </span>
+    );
   }
 
   const nodes: React.ReactNode[] = [];
@@ -5411,7 +5500,9 @@ function renderHighlightedText(
     if (range.start < cursor) return;
     if (range.start > cursor) {
       nodes.push(
-        <span key={`segment-${cursor}`} dangerouslySetInnerHTML={{ __html: inlineMarkdownToHtml(text.slice(cursor, range.start)) }} />
+        <span key={`segment-${cursor}`}>
+          <InlineMarkdown markdown={text.slice(cursor, range.start)} keyPrefix={`segment-${cursor}`} />
+        </span>
       );
     }
     const isActive = activeThreadId === range.thread.id;
@@ -5420,20 +5511,31 @@ function renderHighlightedText(
         key={range.thread.id}
         data-thread-id={range.thread.id}
         className={`anchor-highlight ${isActive ? "is-active" : ""}`}
+        role="button"
+        tabIndex={0}
         onClick={() => {
           if (range.thread.id === "selection-preview") return;
           const selection = window.getSelection();
           if (selection && !selection.isCollapsed) return;
           onActivateThread(range.thread.id);
         }}
-        dangerouslySetInnerHTML={{ __html: inlineMarkdownToHtml(text.slice(range.start, range.end)) }}
-      />
+        onKeyDown={(event) => {
+          if (range.thread.id === "selection-preview") return;
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          onActivateThread(range.thread.id);
+        }}
+      >
+        <InlineMarkdown markdown={text.slice(range.start, range.end)} keyPrefix={`range-${range.thread.id}`} />
+      </span>
     );
     cursor = range.end;
   });
   if (cursor < text.length) {
     nodes.push(
-      <span key={`segment-${cursor}`} dangerouslySetInnerHTML={{ __html: inlineMarkdownToHtml(text.slice(cursor)) }} />
+      <span key={`segment-${cursor}`}>
+        <InlineMarkdown markdown={text.slice(cursor)} keyPrefix={`segment-${cursor}`} />
+      </span>
     );
   }
   return nodes;
@@ -5517,13 +5619,14 @@ function ThreadPanel(props: ThreadPanelProps) {
             onSelectedSkillIdsChange={onSetNewThreadSkillIds}
             skills={agentSkills}
             placeholder="Leave a note for the agent..."
+            ariaLabel="New thread comment"
             rows={4}
             submitLabel="Add thread"
             submitIcon={<MessageSquare size={15} />}
             onSubmit={onAddThread}
           />
           <div className="button-row">
-            <button className="ghost-button" onClick={onClearSelection}>
+            <button type="button" className="ghost-button" onClick={onClearSelection}>
               <X size={15} />
               Clear
             </button>
@@ -5535,7 +5638,7 @@ function ThreadPanel(props: ThreadPanelProps) {
         <span>
           {threads.length} visible · {resolvedThreadCount} resolved
         </span>
-        <button
+        <button type="button"
           className="ghost-button small"
           onClick={onToggleResolvedThreads}
           disabled={resolvedThreadCount === 0}
@@ -5555,7 +5658,7 @@ function ThreadPanel(props: ThreadPanelProps) {
           </p>
         ) : (
           threads.map((thread, index) => (
-            <button
+            <button type="button"
               key={thread.id}
               className={`thread-card ${thread.id === activeThreadId ? "is-active" : ""} ${
                 thread.status === "resolved" ? "is-resolved" : ""
@@ -5582,7 +5685,7 @@ function ThreadPanel(props: ThreadPanelProps) {
           <div className="thread-detail-header">
             <span>{activeThread.status}</span>
             <div className="thread-actions">
-              <button
+              <button type="button"
                 className="secondary-button small"
                 disabled={isAgentWorkingForActiveThread}
                 onClick={() => onRequestAgentReply(activeThread.id)}
@@ -5590,7 +5693,7 @@ function ThreadPanel(props: ThreadPanelProps) {
                 <Sparkles size={14} />
                 Ask agent
               </button>
-              <button
+              <button type="button"
                 className="ghost-button small"
                 onClick={() => onSetStatus(activeThread.id, activeThread.status === "open" ? "resolved" : "open")}
               >
@@ -5598,7 +5701,7 @@ function ThreadPanel(props: ThreadPanelProps) {
               </button>
             </div>
           </div>
-          <button className="thread-anchor-preview" onClick={() => onActivateThread(activeThread.id)}>
+          <button type="button" className="thread-anchor-preview" onClick={() => onActivateThread(activeThread.id)}>
             {activeThread.anchor.exact}
           </button>
 
@@ -5641,18 +5744,18 @@ function ThreadPanel(props: ThreadPanelProps) {
                   <p>{suggestion.replacement}</p>
                   {suggestion.status === "open" ? (
                     <div className="button-row">
-                      <button className="primary-button" onClick={() => onSuggestionStatus(activeThread.id, suggestion.id, "accepted")}>
+                      <button type="button" className="primary-button" onClick={() => onSuggestionStatus(activeThread.id, suggestion.id, "accepted")}>
                         <Check size={15} />
                         Accept
                       </button>
-                      <button className="ghost-button" onClick={() => onSuggestionStatus(activeThread.id, suggestion.id, "rejected")}>
+                      <button type="button" className="ghost-button" onClick={() => onSuggestionStatus(activeThread.id, suggestion.id, "rejected")}>
                         <X size={15} />
                         Reject
                       </button>
                     </div>
                   ) : suggestion.status === "accepted" && !markdown.includes(suggestion.replacement) ? (
                     <div className="button-row">
-                      <button className="secondary-button" onClick={() => onSuggestionStatus(activeThread.id, suggestion.id, "accepted")}>
+                      <button type="button" className="secondary-button" onClick={() => onSuggestionStatus(activeThread.id, suggestion.id, "accepted")}>
                         <Check size={15} />
                         Apply to doc
                       </button>
@@ -5682,6 +5785,7 @@ function ThreadPanel(props: ThreadPanelProps) {
               skills={agentSkills}
               rows={3}
               placeholder="Reply in this thread..."
+              ariaLabel="Thread reply"
               submitLabel="Reply"
               submitIcon={<Send size={15} />}
               onSubmit={() => onAddMessage(activeThread.id)}
@@ -5719,15 +5823,15 @@ function InlineProposalReviewBar({
       </div>
       <p>{review.proposal.summary}</p>
       <div className="button-row compact">
-        <button className="secondary-button" onClick={() => onRequestProposalRewrite(review.proposal.id)}>
+        <button type="button" className="secondary-button" onClick={() => onRequestProposalRewrite(review.proposal.id)}>
           <RefreshCw size={15} />
           Rewrite proposal
         </button>
-        <button className="primary-button" onClick={() => onProposalStatus(review.proposal.id, "accepted")}>
+        <button type="button" className="primary-button" onClick={() => onProposalStatus(review.proposal.id, "accepted")}>
           <Check size={15} />
           Accept all
         </button>
-        <button className="ghost-button" onClick={() => onProposalStatus(review.proposal.id, "rejected")}>
+        <button type="button" className="ghost-button" onClick={() => onProposalStatus(review.proposal.id, "rejected")}>
           <X size={15} />
           Decline all
         </button>
@@ -5862,7 +5966,7 @@ function InlineProposalChangeCard({
       </div>
       <ProposalChangePreview change={change} mode={diffViewMode} variant="inline" />
       <div className="button-row compact">
-        <button
+        <button type="button"
           className={change.decision === "accepted" ? "primary-button" : "secondary-button"}
           onClick={(event) => {
             const nextChangeKey = getNextInlineChangeKey(event.currentTarget);
@@ -5873,7 +5977,7 @@ function InlineProposalChangeCard({
           <Check size={15} />
           Accept
         </button>
-        <button
+        <button type="button"
           className={change.decision === "rejected" ? "ghost-button is-active" : "ghost-button"}
           onClick={(event) => {
             const nextChangeKey = getNextInlineChangeKey(event.currentTarget);
@@ -5884,14 +5988,14 @@ function InlineProposalChangeCard({
           <X size={15} />
           Decline
         </button>
-        <button
+        <button type="button"
           className="secondary-button"
           onClick={() => onRequestProposalRevision(change.proposalId, change, rewriteInstruction)}
         >
           <RefreshCw size={15} />
           Rewrite
         </button>
-        <button className="ghost-button" onClick={() => setIsCommentOpen((value) => !value)}>
+        <button type="button" className="ghost-button" onClick={() => setIsCommentOpen((value) => !value)}>
           <MessageSquare size={15} />
           Comment
         </button>
@@ -5900,11 +6004,12 @@ function InlineProposalChangeCard({
         <div className="revision-composer revision-comment-composer">
           <textarea
             value={revisionDraft}
+            aria-label="Revision comment"
             onChange={(event) => setRevisionDraft(event.target.value)}
             rows={3}
             placeholder="Send a revision comment to the agent..."
           />
-          <button
+          <button type="button"
             className="primary-button"
             onClick={() => {
               onRequestProposalRevision(change.proposalId, change, revisionDraft);
@@ -6033,6 +6138,7 @@ function ChatPanel({
           skills={agentSkills}
           rows={5}
           placeholder="Discuss the draft, ask for a pass, or leave agent instructions..."
+          ariaLabel="Chat message"
           submitLabel="Send"
           submitIcon={<Send size={15} />}
           onSubmit={onSend}
@@ -6126,28 +6232,28 @@ function DocumentProposalCard({
                 </div>
                 <ProposalChangePreview change={change} mode={diffViewMode} variant="panel" maxCharacters={900} />
                 <div className="button-row">
-                  <button
+                  <button type="button"
                     className={decision === "accepted" ? "primary-button" : "secondary-button"}
                     onClick={() => onProposalChangeDecision(proposal.id, change.key, "accepted")}
                   >
                     <Check size={15} />
                     Accept block
                   </button>
-                  <button
+                  <button type="button"
                     className={decision === "rejected" ? "ghost-button is-active" : "ghost-button"}
                     onClick={() => onProposalChangeDecision(proposal.id, change.key, "rejected")}
                   >
                     <X size={15} />
                     Decline
                   </button>
-                  <button
+                  <button type="button"
                     className="secondary-button"
                     onClick={() => onRequestProposalRevision(proposal.id, change, rewriteInstruction)}
                   >
                     <RefreshCw size={15} />
                     Rewrite
                   </button>
-                  <button
+                  <button type="button"
                     className="ghost-button"
                     onClick={() => setOpenRevisionKey(openRevisionKey === change.key ? null : change.key)}
                   >
@@ -6159,6 +6265,7 @@ function DocumentProposalCard({
                   <div className="revision-composer revision-comment-composer">
                     <textarea
                       value={revisionDraft}
+                      aria-label="Revision comment"
                       onChange={(event) =>
                         setRevisionDrafts((drafts) => ({
                           ...drafts,
@@ -6168,7 +6275,7 @@ function DocumentProposalCard({
                       rows={3}
                       placeholder="Send a revision comment to the agent..."
                     />
-                    <button
+                    <button type="button"
                       className="primary-button"
                       onClick={() => {
                         onRequestProposalRevision(proposal.id, change, revisionDraft);
@@ -6191,11 +6298,11 @@ function DocumentProposalCard({
       )}
 
       <div className="button-row">
-        <button className="primary-button" onClick={() => onProposalStatus(proposal.id, "accepted")}>
+        <button type="button" className="primary-button" onClick={() => onProposalStatus(proposal.id, "accepted")}>
           <Check size={15} />
           Accept all
         </button>
-        <button className="ghost-button" onClick={() => onProposalStatus(proposal.id, "rejected")}>
+        <button type="button" className="ghost-button" onClick={() => onProposalStatus(proposal.id, "rejected")}>
           <X size={15} />
           Decline all
         </button>
