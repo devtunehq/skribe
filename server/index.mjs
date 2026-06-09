@@ -39,6 +39,7 @@ let activeDocument = resolveActiveDocument(requestedMarkdownArg);
 
 const defaultSettings = {
   version: 1,
+  userName: "",
   toneOfVoice: "",
   toneOfVoiceSetupComplete: false,
   editorLanguage: "en-GB",
@@ -239,12 +240,14 @@ function normalizePanelState(value) {
 
 function normalizeAppSettings(settings) {
   const source = settings && typeof settings === "object" ? settings : {};
+  const userName = typeof source.userName === "string" ? source.userName.slice(0, 120) : defaultSettings.userName;
   const toneOfVoice =
     typeof source.toneOfVoice === "string" ? source.toneOfVoice.slice(0, toneOfVoiceMaxChars) : defaultSettings.toneOfVoice;
   return {
     ...defaultSettings,
     ...source,
     version: 1,
+    userName,
     toneOfVoice,
     toneOfVoiceSetupComplete:
       typeof source.toneOfVoiceSetupComplete === "boolean" ? source.toneOfVoiceSetupComplete : Boolean(toneOfVoice.trim()),
@@ -2551,6 +2554,7 @@ function buildAgentContextPacket(turn) {
       updatedAt: review.updatedAt
     },
     writingPreferences: {
+      userName: settings.userName,
       toneOfVoice: settings.toneOfVoice,
       editorLanguage: settings.editorLanguage
     },

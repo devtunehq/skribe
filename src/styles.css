@@ -1964,6 +1964,7 @@ select {
 
 textarea:focus,
 select:focus,
+.settings-field input:focus,
 .skill-search input:focus {
   outline: none;
   border-color: var(--sky-blue);
@@ -2848,11 +2849,17 @@ select:focus,
 
 .settings-backdrop {
   position: fixed;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: auto;
+  left: 0;
   z-index: 100;
   display: grid;
   place-items: start center;
   width: auto;
+  height: var(--modal-page-height, 100dvh);
+  min-height: 100vh;
+  min-height: 100dvh;
   max-width: none;
   max-height: none;
   margin: 0;
@@ -2889,7 +2896,7 @@ select:focus,
 }
 
 .settings-dialog-header span,
-.settings-field > span,
+.settings-label,
 .settings-save-state {
   color: var(--muted);
   font-family: var(--font-mono);
@@ -2970,12 +2977,66 @@ select:focus,
   gap: 10px;
 }
 
-.settings-field-header > span {
+.settings-field-header > .settings-label {
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
+}
+
+.settings-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.settings-info {
+  width: 15px;
+  height: 15px;
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--line-ink);
+  background: var(--paper-white);
+  color: var(--muted);
+  border-radius: 50%;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: none;
+  cursor: help;
+}
+
+.settings-info:hover,
+.settings-info:focus-visible {
+  color: var(--text-strong);
+  border-color: var(--sky-blue);
+}
+
+.settings-tooltip {
+  position: fixed;
+  z-index: 400;
+  display: block;
+  padding: 8px 10px;
+  border: 1px solid var(--line-ink);
+  background: var(--paper-white);
+  box-shadow: var(--hard-shadow);
+  color: var(--text);
+  border-radius: var(--radius);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+  text-align: left;
+  text-transform: none;
+  pointer-events: none;
+}
+
+.settings-tooltip.is-above {
+  transform: translateY(-100%);
 }
 
 .settings-field textarea,
@@ -3014,8 +3075,14 @@ select:focus,
   accent-color: var(--sky-blue);
 }
 
-.settings-check span {
+.settings-check .settings-label {
   font-size: 14px;
+}
+
+.settings-check .settings-info {
+  width: 14px;
+  height: 14px;
+  font-size: 9px;
 }
 
 .settings-dialog-actions {

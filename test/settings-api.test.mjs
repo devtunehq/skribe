@@ -115,6 +115,7 @@ test("settings API persists all global settings to the config directory", async 
     assert.equal(initial.response.status, 200);
     assert.equal(initial.payload.storage.configDir, server.configDir);
     assert.equal(initial.payload.storage.dataDir, server.dataDir);
+    assert.equal(initial.payload.settings.userName, "");
     assert.equal(initial.payload.settings.editorLanguage, "en-GB");
     assert.equal(initial.payload.settings.documentFont, "default");
     assert.equal(initial.payload.settings.theme, "default");
@@ -128,6 +129,7 @@ test("settings API persists all global settings to the config directory", async 
       "Preserve the author's voice.";
     const nextSettings = {
       ...initial.payload.settings,
+      userName: "Alex",
       toneOfVoice: longTone,
       toneOfVoiceSetupComplete: true,
       editorLanguage: "en-US",
@@ -154,6 +156,7 @@ test("settings API persists all global settings to the config directory", async 
 
     assert.equal(saved.response.status, 200);
     assert.equal(saved.payload.settings.toneOfVoice, nextSettings.toneOfVoice);
+    assert.equal(saved.payload.settings.userName, "Alex");
     assert.ok(saved.payload.settings.toneOfVoice.length > 1200);
     assert.ok(saved.payload.settings.toneOfVoice.endsWith("Preserve the author's voice."));
     assert.equal(saved.payload.settings.toneOfVoiceSetupComplete, true);
@@ -171,6 +174,7 @@ test("settings API persists all global settings to the config directory", async 
     assert.equal(saved.payload.settings.diffViewMode, "unified");
 
     const settingsFile = JSON.parse(await readFile(join(server.configDir, "settings.json"), "utf8"));
+    assert.equal(settingsFile.userName, "Alex");
     assert.equal(settingsFile.toneOfVoice, longTone);
     assert.deepEqual(settingsFile.defaultSkills, ["humanizer", "plgeek-voice"]);
     assert.equal(settingsFile.toneOfVoiceSetupComplete, true);

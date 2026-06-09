@@ -1,3 +1,4 @@
+import { SettingsLabel } from "./SettingsLabel";
 import type { AppSettings } from "./types";
 
 export function SettingsWorkspacePanel({
@@ -15,7 +16,9 @@ export function SettingsWorkspacePanel({
           checked={settings.showResolvedThreads}
           onChange={(event) => onChange({ showResolvedThreads: event.target.checked })}
         />
-        <span>Show resolved threads</span>
+        <SettingsLabel tooltip="Controls whether resolved comment threads are visible by default.">
+          Show resolved threads
+        </SettingsLabel>
       </label>
 
       <div className="settings-grid">
@@ -32,7 +35,9 @@ export function SettingsWorkspacePanel({
               })
             }
           />
-          <span>Collapse left panel</span>
+          <SettingsLabel tooltip="Start each document with the outline and revision sidebar collapsed.">
+            Collapse left panel
+          </SettingsLabel>
         </label>
 
         <label className="settings-check">
@@ -48,7 +53,9 @@ export function SettingsWorkspacePanel({
               })
             }
           />
-          <span>Collapse right panel</span>
+          <SettingsLabel tooltip="Start each document with the threads and chat sidebar collapsed.">
+            Collapse right panel
+          </SettingsLabel>
         </label>
       </div>
     </>

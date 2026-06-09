@@ -1,0 +1,15 @@
+/* Skribe Design System — global entry point.
+   Consumers link THIS file. It is an import manifest only; every token, font,
+   theme and base rule is reached from here.
+
+   Brand in one line: a playful blueprint on a paper bag — warm oat ground,
+   paper-white surfaces, crisp ink hairlines, Space Mono chrome, Inter prose,
+   one electric sky-blue for interaction, one mellow-yellow highlighter, and a
+   single hard offset shadow that snaps in on hover and press. */
+
+@import url("tokens/fonts.css");
+@import url("tokens/colors.css");
+@import url("tokens/typography.css");
+@import url("tokens/spacing.css");
+@import url("tokens/themes.css");
+@import url("tokens/base.css");

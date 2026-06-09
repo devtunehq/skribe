@@ -1,4 +1,5 @@
 import { diffViewModeOptions } from "./settingsOptions";
+import { SettingsLabel } from "./SettingsLabel";
 import { SettingsSkillPicker } from "./SettingsSkillPicker";
 import type {
   AgentRuntimeConfig,
@@ -38,7 +39,9 @@ export function SettingsAgentPanel({
     <>
       <div className="settings-grid">
         <label className="settings-field">
-          <span>Agent provider</span>
+          <SettingsLabel tooltip="Default local CLI runtime Skribe should use for agent turns.">
+            Agent provider
+          </SettingsLabel>
           <select
             value={settings.agentRuntime}
             onChange={(event) =>
@@ -60,7 +63,9 @@ export function SettingsAgentPanel({
         </label>
 
         <label className="settings-field">
-          <span>Agent model</span>
+          <SettingsLabel tooltip="Default model for the selected CLI when the runtime exposes model selection.">
+            Agent model
+          </SettingsLabel>
           <select
             value={modelSelectValue}
             disabled={Boolean(selectedRuntimeStatus && !selectedRuntimeStatus.supportsManualModel)}
@@ -81,7 +86,9 @@ export function SettingsAgentPanel({
       </div>
 
       <label className="settings-field">
-        <span>Agent effort</span>
+        <SettingsLabel tooltip="Default reasoning effort where the selected CLI supports it.">
+          Agent effort
+        </SettingsLabel>
         <select
           value={effortSelectValue}
           disabled={Boolean(selectedRuntimeStatus && !selectedRuntimeStatus.supportsEffort)}
@@ -97,7 +104,9 @@ export function SettingsAgentPanel({
       </label>
 
       <div className="settings-field">
-        <span>Default skills</span>
+        <SettingsLabel tooltip="Favourite skills preselected for new chat messages and new comment threads.">
+          Default skills
+        </SettingsLabel>
         <SettingsSkillPicker
           skills={skills}
           selectedSkillIds={settings.defaultSkills}
@@ -111,11 +120,15 @@ export function SettingsAgentPanel({
           checked={settings.autoReplyToComments}
           onChange={(event) => onChange({ autoReplyToComments: event.target.checked })}
         />
-        <span>Auto-reply to new comments</span>
+        <SettingsLabel tooltip="When enabled, a new anchored comment immediately asks the agent for a reply.">
+          Auto-reply to new comments
+        </SettingsLabel>
       </label>
 
       <label className="settings-field">
-        <span>Proposal mode</span>
+        <SettingsLabel tooltip="Controls whether broad rewrites should ask first or produce reviewable diffs when requested.">
+          Proposal mode
+        </SettingsLabel>
         <select
           value={settings.proposalModeDefault}
           onChange={(event) => onChange({ proposalModeDefault: event.target.value === "bold" ? "bold" : "conservative" })}
@@ -126,7 +139,9 @@ export function SettingsAgentPanel({
       </label>
 
       <label className="settings-field">
-        <span>Diff view</span>
+        <SettingsLabel tooltip="Choose split view for side-by-side blocks or unified view for compact minus/plus lines.">
+          Diff view
+        </SettingsLabel>
         <select
           value={settings.diffViewMode}
           onChange={(event) => onChange({ diffViewMode: event.target.value as DiffViewMode })}

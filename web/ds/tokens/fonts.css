@@ -1,0 +1,14 @@
+/* Skribe webfonts
+   ----------------
+   Skribe ships two typefaces:
+     • Space Mono  — all chrome, labels, headings, numerics (the "blueprint" voice)
+     • Inter       — document prose and UI body copy
+
+   NOTE ON SUBSTITUTION: the production app lists "Aeonik Mono" (a paid Monotype
+   face) as the first preference for monospace chrome, with Space Mono as the
+   open fallback already baked into the stack. We ship Space Mono — the free,
+   near-identical stand-in the Skribe repo itself falls back to. If you have an
+   Aeonik Mono license, drop the woff2 files in this folder and add @font-face
+   rules above Space Mono; the rest of the system needs no changes. */
+
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Mono:ital,wght@0,400;0,700;1,400;1,700&display=swap");

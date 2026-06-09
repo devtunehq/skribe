@@ -177,6 +177,22 @@ npm run serve
 
 Open [http://127.0.0.1:4327](http://127.0.0.1:4327).
 
+## Deploy The Homepage
+
+The Vercel deployment target is the static homepage in `web/`.
+
+The repo includes `vercel.json` so Vercel uses the static `web/` directory instead of the local editor app build. The editor itself remains packaged through Vite for `skribe` and `npx skribe-editor`.
+
+```bash
+vercel
+```
+
+For a production deployment:
+
+```bash
+vercel --prod
+```
+
 ## Open A Markdown File
 
 Run Skribe against a specific file:

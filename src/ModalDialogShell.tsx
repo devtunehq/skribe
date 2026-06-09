@@ -25,6 +25,14 @@ export function ModalDialogShell({
     const dialog = dialogRef.current;
     if (!dialog || dialog.open) return;
 
+    const syncPageHeight = () => {
+      const pageHeight = Math.max(
+        window.innerHeight,
+        document.documentElement.scrollHeight,
+        document.body.scrollHeight
+      );
+      dialog.style.setProperty("--modal-page-height", `${pageHeight}px`);
+    };
     const requestCancel = () => {
       if (!preventCancelRef.current) onCancelRef.current();
     };
@@ -36,13 +44,17 @@ export function ModalDialogShell({
       if (event.target === event.currentTarget) requestCancel();
     };
 
+    syncPageHeight();
+    window.addEventListener("resize", syncPageHeight);
     dialog.addEventListener("cancel", handleCancel);
     dialog.addEventListener("mousedown", handleMouseDown);
     dialog.showModal();
 
     return () => {
+      window.removeEventListener("resize", syncPageHeight);
       dialog.removeEventListener("cancel", handleCancel);
       dialog.removeEventListener("mousedown", handleMouseDown);
+      dialog.style.removeProperty("--modal-page-height");
       if (dialog.open) dialog.close();
     };
   }, []);

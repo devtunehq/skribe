@@ -314,13 +314,9 @@ function currentBlockIdFromSelection() {
   return node ? closestEditableBlock(node)?.dataset.blockId ?? null : null;
 }
 
-const authorLabels: Record<Author, string> = {
-  human: "Human",
-  agent: "Agent"
-};
-
 const defaultAppSettings: AppSettings = {
   version: 1,
+  userName: "",
   toneOfVoice: "",
   toneOfVoiceSetupComplete: false,
   editorLanguage: "en-GB",
@@ -344,6 +340,7 @@ const emptyThreads: ReviewThread[] = [];
 const emptyProposals: DocumentProposal[] = [];
 
 function mergeAppSettings(settings?: Partial<AppSettings> | null): AppSettings {
+  const userName = typeof settings?.userName === "string" ? settings.userName.slice(0, 120) : defaultAppSettings.userName;
   const requestedDocumentFont = settings?.documentFont;
   const requestedTheme = settings?.theme;
   const requestedDiffViewMode = settings?.diffViewMode;
@@ -359,6 +356,7 @@ function mergeAppSettings(settings?: Partial<AppSettings> | null): AppSettings {
   return {
     ...defaultAppSettings,
     ...(settings ?? {}),
+    userName,
     documentFont,
     theme,
     diffViewMode,
@@ -368,6 +366,19 @@ function mergeAppSettings(settings?: Partial<AppSettings> | null): AppSettings {
       ...(settings?.panelState ?? {})
     }
   };
+}
+
+function humanAuthorLabel(settings: Pick<AppSettings, "userName">) {
+  const name = settings.userName.trim();
+  return name || "You";
+}
+
+function authorLabel(author: Author, humanLabel: string) {
+  return author === "human" ? humanLabel : "Agent";
+}
+
+function formatLedgerSummaryForDisplay(summary: string, humanLabel: string) {
+  return summary.replace(/\bHuman\b/g, humanLabel);
 }
 
 function fileNameFromPath(path?: string) {
@@ -1153,8 +1164,8 @@ function useSkribeController() {
       ...toneSettingsBase(),
       toneOfVoiceSetupComplete: true
     });
-    await persistSettings(nextSettings);
     setToneSetupInvocation(null);
+    await persistSettings(nextSettings);
   }
 
   function updatePanelState(patch: Partial<AppSettings["panelState"]>) {
@@ -1324,7 +1335,47 @@ function useSkribeController() {
     return liveEditHistoryActiveRef.current || liveEditTimerRef.current !== null ? stateWithLiveCanvasEdit(state) : state;
   }
 
+  function visibleEditableShells() {
+    return Array.from(canvasRef.current?.querySelectorAll<HTMLElement>(".editable-document [data-block-shell]") ?? []);
+  }
+
+  function serializeVisibleCanvasMarkdown(markdown: string) {
+    const shells = visibleEditableShells();
+    if (shells.length === 0) return null;
+
+    const sourceBlocks = parseMarkdownBlocks(markdown);
+    const renderedState = documentState;
+    const renderedMarkdown = renderedState && renderedState.id === stateRef.current?.id ? renderedState.markdown : null;
+    const renderedBlocks = renderedMarkdown ? parseMarkdownBlocks(renderedMarkdown) : [];
+    const blocksById = new Map<string, ReturnType<typeof parseMarkdownBlocks>[number]>();
+    [...sourceBlocks, ...renderedBlocks].forEach((block) => blocksById.set(block.id, block));
+
+    const blocks = shells.flatMap((shell) => {
+      const blockId = shell.dataset.blockShell;
+      if (!blockId) return [];
+
+      const sourceBlock = blocksById.get(blockId) ?? {
+        id: blockId,
+        type: "paragraph" as const,
+        text: ""
+      };
+
+      if (sourceBlock.type === "image") return [sourceBlock];
+
+      const node = shell.querySelector<HTMLElement>("[data-block-id]");
+      if (!node) return [sourceBlock];
+
+      const text = blockNodeToMarkdown(node, sourceBlock.type);
+      return text.trim() ? [{ ...sourceBlock, text }] : [];
+    });
+
+    return serializeMarkdownBlocks(blocks);
+  }
+
   function serializeCanvasMarkdown(markdown: string) {
+    const visibleMarkdown = serializeVisibleCanvasMarkdown(markdown);
+    if (visibleMarkdown !== null) return visibleMarkdown;
+
     const blocks = parseMarkdownBlocks(markdown);
     if (blocks.length === 0) {
       const emptyBlockId = markdownBlockIdFromIndex(0);
@@ -1342,6 +1393,22 @@ function useSkribeController() {
         return text.trim() ? [{ ...block, text }] : [];
       })
     );
+  }
+
+  function resetRenderedEditableBlocks(markdown: string) {
+    const ids = new Set(parseMarkdownBlocks(markdown).map((block) => block.id));
+    visibleEditableShells().forEach((shell) => {
+      if (shell.dataset.blockShell) ids.add(shell.dataset.blockShell);
+    });
+    if (ids.size === 0) ids.add(markdownBlockIdFromIndex(0));
+
+    setBlockResetKeys((keys) => {
+      const next = { ...keys };
+      ids.forEach((id) => {
+        next[id] = (next[id] ?? 0) + 1;
+      });
+      return next;
+    });
   }
 
   function isCanvasFocused() {
@@ -1363,10 +1430,14 @@ function useSkribeController() {
     if (!current) return;
     const next = stateWithLiveCanvasEdit(current);
     if (next === current) {
-      if (documentState && current.markdown !== documentState.markdown) setDocumentState(current);
+      if (documentState && current.markdown !== documentState.markdown) {
+        resetRenderedEditableBlocks(current.markdown);
+        setDocumentState(current);
+      }
       liveEditHistoryActiveRef.current = false;
       return;
     }
+    resetRenderedEditableBlocks(next.markdown);
     commit(() => next);
     liveEditHistoryActiveRef.current = false;
   }
@@ -3827,6 +3898,7 @@ function RightPanel() {
     isRightPanelCollapsed,
     selectionRangeRef
   } = useSkribeControllerContext();
+  const humanLabel = humanAuthorLabel(appSettings);
 
   if (!documentState) return null;
 
@@ -3865,6 +3937,7 @@ function RightPanel() {
             newThreadSkillIds={newThreadSkillIds}
             threadSkillIds={threadSkillIds}
             defaultSkillIds={appSettings.defaultSkills}
+            humanLabel={humanLabel}
             showResolvedThreads={showResolvedThreads}
             resolvedThreadCount={resolvedThreadCount}
             onSetNewComment={setNewComment}
@@ -3902,6 +3975,7 @@ function RightPanel() {
             agentSkills={agentSkills}
             selectedSkillIds={chatSkillIds}
             diffViewMode={appSettings.diffViewMode}
+            humanLabel={humanLabel}
             onSetChatDraft={setChatDraft}
             onSetSelectedSkillIds={setChatSkillIds}
             onSend={addChatMessage}
@@ -5133,11 +5207,7 @@ function renderHighlightedText(
 
   if (ranges.length === 0) {
     if (!text) return null;
-    return (
-      <span>
-        <InlineMarkdown markdown={text} />
-      </span>
-    );
+    return <InlineMarkdown markdown={text} />;
   }
 
   const nodes: React.ReactNode[] = [];
@@ -5199,6 +5269,7 @@ interface ThreadPanelProps {
   newThreadSkillIds: string[];
   threadSkillIds: Record<string, string[]>;
   defaultSkillIds: string[];
+  humanLabel: string;
   showResolvedThreads: boolean;
   resolvedThreadCount: number;
   onSetNewComment: (value: string) => void;
@@ -5229,6 +5300,7 @@ function ThreadPanel(props: ThreadPanelProps) {
     newThreadSkillIds,
     threadSkillIds,
     defaultSkillIds,
+    humanLabel,
     showResolvedThreads,
     resolvedThreadCount,
     onSetNewComment,
@@ -5360,7 +5432,7 @@ function ThreadPanel(props: ThreadPanelProps) {
                 }`}
               >
                 <div>
-                  <strong>{authorLabels[message.author]}</strong>
+                  <strong>{authorLabel(message.author, humanLabel)}</strong>
                   <time>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
                 </div>
                 {message.body ? <p>{message.body}</p> : null}
@@ -5684,6 +5756,7 @@ interface ChatPanelProps {
   agentSkills: AgentSkill[];
   selectedSkillIds: string[];
   diffViewMode: SupportedDiffViewMode;
+  humanLabel: string;
   onSetChatDraft: (value: string) => void;
   onSetSelectedSkillIds: (value: string[]) => void;
   onSend: () => void;
@@ -5701,6 +5774,7 @@ function ChatPanel({
   agentSkills,
   selectedSkillIds,
   diffViewMode,
+  humanLabel,
   onSetChatDraft,
   onSetSelectedSkillIds,
   onSend,
@@ -5733,7 +5807,7 @@ function ChatPanel({
               {recentLedger.map((event) => (
                 <li key={event.id}>
                   <span>{event.type.replace(/_/g, " ")}</span>
-                  {event.summary}
+                  {formatLedgerSummaryForDisplay(event.summary, humanLabel)}
                 </li>
               ))}
             </ol>
@@ -5766,7 +5840,7 @@ function ChatPanel({
               }`}
             >
               <div>
-                <strong>{authorLabels[message.author]}</strong>
+                <strong>{authorLabel(message.author, humanLabel)}</strong>
                 <time>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
               </div>
               {message.body ? <p>{message.body}</p> : null}

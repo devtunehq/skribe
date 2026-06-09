@@ -300,6 +300,29 @@ export async function press(cdp, key, options = {}) {
   await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", ...base });
 }
 
+export async function insertText(cdp, text) {
+  await cdp.send("Input.insertText", { text });
+}
+
+export async function mouseClick(cdp, point) {
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: point.x,
+    y: point.y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1
+  });
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: point.x,
+    y: point.y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1
+  });
+}
+
 export async function mouseDrag(cdp, from, to) {
   await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: from.x, y: from.y, button: "left", buttons: 1, clickCount: 1 });
   await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: to.x, y: to.y, button: "left", buttons: 1 });

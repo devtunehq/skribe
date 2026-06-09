@@ -1,0 +1,74 @@
+/* Skribe — Base layer
+   Minimal globals consumers inherit: the document defaults to Inter on the oat
+   ground, plus the three brand keyframes (spin, typingPulse, anchorPulse) and
+   the signature chrome-label treatment. Structural component CSS lives with each
+   component / UI kit, not here. */
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+/* The brand's signature: monospace, uppercase, lightly tracked chrome labels.
+   Apply .mono-label to any control label, heading-of-chrome, pill, or tab. */
+.mono-label {
+  font-family: var(--font-mono);
+  font-weight: var(--weight-bold);
+  text-transform: uppercase;
+  letter-spacing: var(--label-tracking);
+}
+
+/* The highlighter mark — Skribe's one decorative flourish. Wrap inline text to
+   get the mellow-yellow marker used for comment anchors. */
+.mark {
+  background: var(--mark-fill);
+  box-shadow: inset 0 -0.42em 0 var(--mark-underline);
+  padding: 0 2px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes typingPulse {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.35; }
+  40% { transform: translateY(-3px); opacity: 0.95; }
+}
+
+@keyframes anchorPulse {
+  0% {
+    box-shadow:
+      inset 0 -0.42em 0 color-mix(in srgb, var(--mellow-yellow) 78%, transparent),
+      0 0 0 0 color-mix(in srgb, var(--sky-blue) 44%, transparent);
+  }
+  45% {
+    box-shadow:
+      inset 0 -0.42em 0 color-mix(in srgb, var(--mellow-yellow) 78%, transparent),
+      0 0 0 8px color-mix(in srgb, var(--sky-blue) 18%, transparent);
+  }
+  100% {
+    box-shadow:
+      inset 0 -0.42em 0 color-mix(in srgb, var(--mellow-yellow) 62%, transparent),
+      0 0 0 0 transparent;
+  }
+}

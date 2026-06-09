@@ -4,6 +4,7 @@ import {
   documentFontOptions,
   editorLanguageOptions
 } from "./settingsOptions";
+import { SettingsLabel } from "./SettingsLabel";
 import type {
   AppSettings,
   AppTheme,
@@ -27,7 +28,9 @@ export function SettingsWritingPanel({
     <>
       <div className="settings-field">
         <div className="settings-field-header">
-          <span>Tone of voice</span>
+          <SettingsLabel tooltip="A persistent writing preference the agent should follow when replying or proposing edits.">
+            Tone of voice
+          </SettingsLabel>
           <button type="button" className="secondary-button small" onClick={onOpenToneSetup}>
             <Sparkles size={14} />
             Build tone
@@ -42,9 +45,26 @@ export function SettingsWritingPanel({
         />
       </div>
 
+      <label className="settings-field">
+        <SettingsLabel tooltip="Used to label your messages in chat and comment threads. Leave blank to show You.">
+          Your name
+        </SettingsLabel>
+        <input
+          type="text"
+          value={settings.userName}
+          aria-label="Your name"
+          onChange={(event) => onChange({ userName: event.target.value })}
+          placeholder="You"
+          maxLength={120}
+        />
+        <small>Shown in conversation labels only. Stored locally with your settings.</small>
+      </label>
+
       <div className="settings-grid">
         <label className="settings-field">
-          <span>Language</span>
+          <SettingsLabel tooltip="Default spelling convention for the editor and agent guidance.">
+            Language
+          </SettingsLabel>
           <select
             value={settings.editorLanguage}
             onChange={(event) => onChange({ editorLanguage: event.target.value as EditorLanguage })}
@@ -61,7 +81,9 @@ export function SettingsWritingPanel({
         </label>
 
         <label className="settings-field">
-          <span>Document font</span>
+          <SettingsLabel tooltip="Controls the rendered document font in the editable canvas.">
+            Document font
+          </SettingsLabel>
           <select
             value={settings.documentFont}
             onChange={(event) => onChange({ documentFont: event.target.value as DocumentFont })}
@@ -77,7 +99,9 @@ export function SettingsWritingPanel({
       </div>
 
       <label className="settings-field">
-        <span>Theme</span>
+        <SettingsLabel tooltip="Changes the app colour palette.">
+          Theme
+        </SettingsLabel>
         <select value={settings.theme} onChange={(event) => onChange({ theme: event.target.value as AppTheme })}>
           {appThemeOptions.map((option) => (
             <option key={option.value} value={option.value}>

@@ -1,0 +1,80 @@
+/* Skribe — Theme & document-font scopes
+   The default (Skribe) theme lives on :root in colors.css. These alternates
+   re-map the same token names on a [data-theme] scope. Apply by setting
+   data-theme="newsprint|sage|coral|graphite" on a container (the app uses
+   .app-shell). Graphite is the one dark theme. Document-font scopes swap the
+   reading typeface independently of theme. */
+
+[data-theme="newsprint"] {
+  color-scheme: light;
+  --canvas-oat: #f1eee8; --paper-white: #fffdf8; --smoke-gray: #f7f4ee;
+  --ink: #303030; --coal: #111111; --slate: #77706a;
+  --sky-blue: #8db9cb; --mellow-yellow: #f2d35c; --frost-blue: #eef5f4;
+  --coral-red: #d96b57; --sunset-orange: #d99145; --aqua-teal: #5ca99c;
+  --cerulean-blue: #5b9ab7; --indigo-violet: #8d81ad; --grape-purple: #7891c8;
+  --lime-green: #a1aa46; --golden-rod: #c9ad38;
+  --bg: var(--canvas-oat); --surface: var(--paper-white); --surface-2: var(--smoke-gray);
+  --surface-hover: var(--frost-blue); --text: var(--ink); --text-strong: var(--coal);
+  --muted: var(--slate); --faint: #aaa29b; --line: #ded6c9; --line-ink: var(--ink);
+  --accent: var(--coral-red); --accent-ink: var(--coal); --danger: #bd443a;
+}
+
+[data-theme="sage"] {
+  color-scheme: light;
+  --canvas-oat: #edf3ea; --paper-white: #fffef8; --smoke-gray: #f5f8f1;
+  --ink: #30413a; --coal: #122019; --slate: #6f8077;
+  --sky-blue: #86c8ad; --mellow-yellow: #f3d86c; --frost-blue: #e4f4ee;
+  --coral-red: #e08b7d; --sunset-orange: #d8a35a; --aqua-teal: #47b89d;
+  --cerulean-blue: #65a6c1; --indigo-violet: #9c91c7; --grape-purple: #7f93c8;
+  --lime-green: #9db65a; --golden-rod: #d3b94b;
+  --bg: var(--canvas-oat); --surface: var(--paper-white); --surface-2: var(--smoke-gray);
+  --surface-hover: var(--frost-blue); --text: var(--ink); --text-strong: var(--coal);
+  --muted: var(--slate); --faint: #9dac9e; --line: #d6e0d2; --line-ink: var(--ink);
+  --accent: var(--sky-blue); --accent-ink: var(--coal); --danger: #c8554d;
+}
+
+[data-theme="coral"] {
+  color-scheme: light;
+  --canvas-oat: #f7eee8; --paper-white: #fffaf6; --smoke-gray: #f8f1ed;
+  --ink: #403532; --coal: #160f0d; --slate: #806f68;
+  --sky-blue: #78b9d6; --mellow-yellow: #ffd166; --frost-blue: #fff1e9;
+  --coral-red: #ef8354; --sunset-orange: #e9a45d; --aqua-teal: #45b7a7;
+  --cerulean-blue: #4fa3c2; --indigo-violet: #a58cc9; --grape-purple: #7b8ed4;
+  --lime-green: #aeb85a; --golden-rod: #d6b63d;
+  --bg: var(--canvas-oat); --surface: var(--paper-white); --surface-2: var(--smoke-gray);
+  --surface-hover: var(--frost-blue); --text: var(--ink); --text-strong: var(--coal);
+  --muted: var(--slate); --faint: #ab9b93; --line: #e7d8cd; --line-ink: var(--ink);
+  --accent: var(--coral-red); --accent-ink: var(--coal); --danger: #bf4c3f;
+}
+
+[data-theme="graphite"] {
+  color-scheme: dark;
+  --canvas-oat: #151816; --paper-white: #20231f; --smoke-gray: #282c27;
+  --ink: #e5dfd2; --coal: #fbf4e8; --slate: #aaa396;
+  --sky-blue: #80d4ff; --mellow-yellow: #ffd84a; --frost-blue: #253944;
+  --coral-red: #ff8b7e; --sunset-orange: #f2b35f; --aqua-teal: #5fd0bd;
+  --cerulean-blue: #79c3e6; --indigo-violet: #b9a4e7; --grape-purple: #95a9f2;
+  --lime-green: #c3d46a; --golden-rod: #e8cf55;
+  --bg: var(--canvas-oat); --surface: var(--paper-white); --surface-2: var(--smoke-gray);
+  --surface-hover: var(--frost-blue); --text: var(--ink); --text-strong: var(--coal);
+  --muted: var(--slate); --faint: #777165; --line: #363c35; --line-ink: #d6cfbf;
+  --accent: var(--sky-blue); --accent-ink: #101412; --danger: #ff8b7e;
+  --hard-shadow: -6px 6px 0 0 #030504;
+}
+
+/* ---- Document font scopes (independent of theme) ---- */
+[data-document-font="sans"] {
+  --font-document: var(--font-sans);
+  --font-document-heading: var(--font-sans);
+  --document-heading-letter-spacing: 0;
+}
+[data-document-font="serif"] {
+  --font-document: var(--font-serif);
+  --font-document-heading: var(--font-serif);
+  --document-heading-letter-spacing: 0;
+}
+[data-document-font="mono"] {
+  --font-document: var(--font-mono);
+  --font-document-heading: var(--font-mono);
+  --document-heading-letter-spacing: 0;
+}

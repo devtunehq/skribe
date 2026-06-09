@@ -1,0 +1,42 @@
+/* Skribe — Spacing, radius, shadow & layout tokens
+   The look is FLAT and HARD-EDGED: cards have 0px radius, controls a barely-there
+   2px. There is exactly one shadow in the system — a single hard offset (no blur)
+   that snaps in on hover/active. Interactive elements "lift" toward the top-right
+   on hover (translate 6px,-6px) and "press in" on active (translate 2px,-2px). */
+
+:root {
+  /* ---- Radius ---- */
+  --radius: 2px;        /* controls: buttons, inputs, pills, chips */
+  --radius-card: 0px;   /* cards, panels, the writing sheet — squared off */
+
+  /* ---- The one shadow ---- */
+  --hard-shadow: -6px 6px 0 0 var(--ink);          /* lifted / focused state */
+  --hard-shadow-press: -2px 2px 0 0 var(--ink);    /* pressed-in state */
+  --hard-shadow-soft: -3px 3px 0 0 color-mix(in srgb, var(--ink) 72%, transparent);
+
+  /* ---- Lift transforms (pair with --hard-shadow) ---- */
+  --lift: translate(6px, -6px); /* @kind other */
+  --press: translate(2px, -2px); /* @kind other */
+  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1); /* @kind other */
+
+  /* ---- Spacing scale (px) ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  /* ---- Control sizing ---- */
+  --control-h: 34px;        /* pills, selects, icon buttons */
+  --button-h: 38px;         /* text buttons */
+  --hairline: 1px;
+
+  /* ---- Layout ---- */
+  --topbar-h: 64px;
+  --rail-w: 250px;
+  --panel-w: 420px;
+  --reading-measure: 720px; /* max width of the document column */
+}

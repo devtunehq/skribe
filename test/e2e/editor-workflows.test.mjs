@@ -7,6 +7,8 @@ import {
   evaluate,
   jsonRequest,
   makeMarkdownDoc,
+  insertText,
+  mouseClick,
   mouseDrag,
   navigate,
   press,
@@ -149,6 +151,77 @@ test("manual edits autosave without moving the caret, and undo/redo works", asyn
         "fetch('/api/document').then((response) => response.json()).then((doc) => doc.markdown.includes('## First paragraph edited.'))"
       );
       assert.match(await waitForFileText(markdownPath, /## First paragraph edited\./), /## First paragraph edited\./);
+    }
+  );
+});
+
+test("clicking blank canvas after typing does not duplicate the last inserted text", async (t) => {
+  await withApp(
+    t,
+    "",
+    async ({ browser, markdownPath }) => {
+      const focusPoint = await evaluate(
+        browser.cdp,
+        `(() => {
+          const block = document.querySelector('[data-block-id="block-0"]');
+          const rect = block.getBoundingClientRect();
+          return { x: rect.left + 20, y: rect.top + Math.max(8, rect.height / 2) };
+        })()`
+      );
+      await mouseClick(browser.cdp, focusPoint);
+      await insertText(browser.cdp, "something else");
+      await waitForFileText(markdownPath, /^something else\n$/);
+
+      const blankPoint = await evaluate(
+        browser.cdp,
+        `(() => {
+          const canvas = document.querySelector('.markdown-canvas').getBoundingClientRect();
+          const lastBlock = Array.from(document.querySelectorAll('[data-block-id]')).at(-1).getBoundingClientRect();
+          return {
+            x: canvas.left + Math.min(420, canvas.width - 40),
+            y: Math.min(window.innerHeight - 40, lastBlock.bottom + 120)
+          };
+        })()`
+      );
+
+      await mouseClick(browser.cdp, blankPoint);
+      await mouseClick(browser.cdp, blankPoint);
+      await mouseClick(browser.cdp, blankPoint);
+      await new Promise((resolve) => setTimeout(resolve, 1600));
+
+      const markdown = await waitForFileText(markdownPath, /^something else\n$/);
+      assert.equal((markdown.match(/something else/g) ?? []).length, 1);
+
+      await evaluate(
+        browser.cdp,
+        `(() => {
+          const block = document.querySelector('[data-block-id="block-0"]');
+          block.focus();
+          const range = document.createRange();
+          const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+          let node = null;
+          let next = walker.nextNode();
+          while (next) {
+            node = next;
+            next = walker.nextNode();
+          }
+          range.setStart(node || block, node ? node.textContent.length : block.childNodes.length);
+          range.collapse(true);
+          const selection = window.getSelection();
+          selection.removeAllRanges();
+          selection.addRange(range);
+          return true;
+        })()`
+      );
+      await press(browser.cdp, "Enter", { code: "Enter", keyCode: 13 });
+      await insertText(browser.cdp, "second thought");
+      await waitForFileText(markdownPath, /second thought/);
+      await mouseClick(browser.cdp, blankPoint);
+      await new Promise((resolve) => setTimeout(resolve, 1600));
+
+      const paragraphMarkdown = await waitForFileText(markdownPath, /second thought/);
+      assert.equal((paragraphMarkdown.match(/something else/g) ?? []).length, 1);
+      assert.equal((paragraphMarkdown.match(/second thought/g) ?? []).length, 1);
     }
   );
 });
@@ -414,6 +487,104 @@ test("resolved threads are hidden by default and can be shown from the thread to
   );
 });
 
+test("user name setting labels human-authored chat UI", async (t) => {
+  const createdAt = "2026-06-09T09:00:00.000Z";
+  await withApp(
+    t,
+    "# Draft\n\nName label test.\n",
+    async ({ browser }) => {
+      await evaluate(browser.cdp, "document.querySelector('.panel-tabs button:nth-child(2)').click()");
+      await waitFor(browser.cdp, "document.querySelector('.chat-panel .message-bubble.is-human strong')?.textContent === 'You'");
+      assert.equal(
+        await evaluate(browser.cdp, "document.querySelector('.memory-card li')?.textContent.includes('You chat message')"),
+        true
+      );
+
+      await evaluate(browser.cdp, "document.querySelector('button[title=\"Settings\"]').click()");
+      await waitFor(browser.cdp, "Boolean(document.querySelector('.settings-dialog'))");
+      const tooltipState = await evaluate(
+        browser.cdp,
+        `(() => {
+          const tooltips = Array.from(document.querySelectorAll('.settings-info'));
+          const nameField = Array.from(document.querySelectorAll('.settings-field')).find((field) => field.textContent.includes('Your name'));
+          const input = nameField?.querySelector('input[type="text"]');
+          if (!input) return { tooltipCount: tooltips.length, hasNameTooltip: false };
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'Alex');
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          return {
+            tooltipCount: tooltips.length,
+            hasNameTooltip: Boolean(nameField.querySelector('.settings-info[title]'))
+          };
+        })()`
+      );
+      assert.ok(tooltipState.tooltipCount >= 5);
+      assert.equal(tooltipState.hasNameTooltip, true);
+      await evaluate(
+        browser.cdp,
+        `(() => {
+          const info = document.querySelector('.settings-field .settings-info');
+          const rect = info.getBoundingClientRect();
+          info.dispatchEvent(new MouseEvent('mouseover', {
+            bubbles: true,
+            clientX: rect.left + rect.width / 2,
+            clientY: rect.top + rect.height / 2,
+            view: window
+          }));
+          return true;
+        })()`
+      );
+      await waitFor(browser.cdp, "Boolean(document.querySelector('.settings-tooltip'))");
+      const tooltipRect = await evaluate(
+        browser.cdp,
+        `(() => {
+          const tooltip = document.querySelector('.settings-tooltip');
+          const host = tooltip.parentElement;
+          const rect = tooltip.getBoundingClientRect();
+          return {
+            left: rect.left,
+            right: rect.right,
+            top: rect.top,
+            bottom: rect.bottom,
+            viewportWidth: window.innerWidth,
+            viewportHeight: window.innerHeight,
+            hostTag: host?.tagName
+          };
+        })()`
+      );
+      assert.equal(tooltipRect.hostTag, "DIALOG");
+      assert.ok(tooltipRect.left >= 0, `tooltip clipped left: ${tooltipRect.left}`);
+      assert.ok(tooltipRect.right <= tooltipRect.viewportWidth, `tooltip clipped right: ${tooltipRect.right}`);
+      assert.ok(tooltipRect.top >= 0, `tooltip clipped top: ${tooltipRect.top}`);
+      assert.ok(tooltipRect.bottom <= tooltipRect.viewportHeight, `tooltip clipped bottom: ${tooltipRect.bottom}`);
+      assert.equal(await clickButtonByText(browser.cdp, ".settings-dialog-actions", "Save"), true);
+      await waitFor(browser.cdp, "document.querySelector('.chat-panel .message-bubble.is-human strong')?.textContent === 'Alex'");
+      await waitFor(
+        browser.cdp,
+        "fetch('/api/settings').then((response) => response.json()).then((payload) => payload.settings.userName === 'Alex')"
+      );
+      assert.equal(
+        await evaluate(browser.cdp, "document.querySelector('.memory-card li')?.textContent.includes('Alex chat message')"),
+        true
+      );
+    },
+    {
+      review: {
+        chat: [{ id: "chat-human", author: "human", body: "Can you review this?", createdAt }],
+        contextLedger: [
+          {
+            id: "ledger-human",
+            type: "chat_message",
+            actor: "human",
+            summary: "Human chat message: Can you review this?",
+            createdAt
+          }
+        ]
+      }
+    }
+  );
+});
+
 test("accepting an inline proposal block hides it and preserves unrelated manual edits", async (t) => {
   const originalMarkdown = "# Draft\n\nOriginal one.\n\nManual untouched.\n\nOriginal two.\n";
   const replacementMarkdown = "# Draft\n\nImproved one.\n\nManual untouched.\n\nImproved two.\n";
@@ -550,7 +721,7 @@ test("first-run tone setup uses a native dialog and can be skipped", async (t) =
       await evaluate(browser.cdp, "document.querySelector('dialog.tone-setup-backdrop')?.getAttribute('aria-labelledby')"),
       "tone-setup-title"
     );
-    assert.equal(await clickButtonByText(browser.cdp, ".tone-setup-dialog", "Skip"), true);
+    assert.equal(await clickButtonByText(browser.cdp, ".tone-setup-dialog .settings-dialog-actions", "Skip"), true);
     await waitFor(browser.cdp, "!document.querySelector('dialog.tone-setup-backdrop[open]')");
     await waitFor(
       browser.cdp,
@@ -566,10 +737,29 @@ test("first-run tone setup uses a native dialog and can be skipped", async (t) =
 test("settings dialog persists language, theme, font, and collapsed panel defaults", async (t) => {
   await withApp(
     t,
-    "# Draft\n\nSettings test.\n",
+    `# Draft\n\n${Array.from({ length: 42 }, (_, index) => `Settings test paragraph ${index + 1}.`).join("\n\n")}\n`,
     async ({ browser, server }) => {
       await evaluate(browser.cdp, "document.querySelector('button[title=\"Settings\"]').click()");
       await waitFor(browser.cdp, "Boolean(document.querySelector('.settings-dialog'))");
+      const backdropCoverage = await evaluate(
+        browser.cdp,
+        `(() => {
+          const rect = document.querySelector('dialog.settings-backdrop').getBoundingClientRect();
+          return {
+            backdropHeight: rect.height,
+            pageHeight: document.documentElement.scrollHeight,
+            viewportHeight: window.innerHeight
+          };
+        })()`
+      );
+      assert.ok(
+        backdropCoverage.pageHeight > backdropCoverage.viewportHeight,
+        `expected long page, got page ${backdropCoverage.pageHeight}px and viewport ${backdropCoverage.viewportHeight}px`
+      );
+      assert.ok(
+        backdropCoverage.backdropHeight >= backdropCoverage.pageHeight - 1,
+        `backdrop ${backdropCoverage.backdropHeight}px shorter than page ${backdropCoverage.pageHeight}px`
+      );
       const selectLayout = await evaluate(
         browser.cdp,
         `(() => {
@@ -587,6 +777,10 @@ test("settings dialog persists language, theme, font, and collapsed panel defaul
       await evaluate(
         browser.cdp,
         `(() => {
+          const name = Array.from(document.querySelectorAll('.settings-field')).find((field) => field.textContent.includes('Your name')).querySelector('input');
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(name, 'Morgan');
+          name.dispatchEvent(new Event('input', { bubbles: true }));
+          name.dispatchEvent(new Event('change', { bubbles: true }));
           const language = Array.from(document.querySelectorAll('.settings-field')).find((field) => field.textContent.includes('Language')).querySelector('select');
           Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(language, 'en-US');
           language.querySelector('option[value="en-US"]').selected = true;
@@ -633,7 +827,7 @@ test("settings dialog persists language, theme, font, and collapsed panel defaul
       assert.equal(await clickButtonByText(browser.cdp, ".settings-dialog-actions", "Save"), true);
       await waitFor(
         browser.cdp,
-        "fetch('/api/settings').then((response) => response.json()).then((payload) => payload.settings.editorLanguage === 'en-US' && payload.settings.diffViewMode === 'unified')"
+        "fetch('/api/settings').then((response) => response.json()).then((payload) => payload.settings.userName === 'Morgan' && payload.settings.editorLanguage === 'en-US' && payload.settings.diffViewMode === 'unified')"
       );
       await waitFor(browser.cdp, "document.querySelector('.app-shell')?.getAttribute('lang') === 'en-US'");
       await waitFor(browser.cdp, "document.querySelector('.app-shell')?.dataset.documentFont === 'serif'");

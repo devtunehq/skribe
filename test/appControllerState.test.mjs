@@ -9,6 +9,7 @@ import {
 
 const defaultSettings = {
   version: 1,
+  userName: "",
   toneOfVoice: "",
   toneOfVoiceSetupComplete: false,
   editorLanguage: "en-GB",

@@ -1,0 +1,60 @@
+/* Skribe — Color tokens
+   "Playful blueprint on a paper bag." A warm oat ground, paper-white surfaces,
+   crisp ink hairlines, one electric sky-blue reserved for interaction, and a
+   mellow-yellow that only ever shows up as a highlighter mark. The decorative
+   accents are STROKE colors — used on borders and small fills, never as large
+   fields or body text. */
+
+:root {
+  color-scheme: light;
+
+  /* ---- Core palette ---- */
+  --canvas-oat: #f4efea;   /* the desk: warm paper-bag ground under everything */
+  --paper-white: #ffffff;  /* surfaces: cards, panels, the writing sheet */
+  --smoke-gray: #f8f8f7;   /* recessed fields, table headers, code blocks */
+  --ink: #383838;          /* hairlines + body text (the blueprint line) */
+  --coal: #000000;         /* strong text, on-accent text */
+  --slate: #818181;        /* muted captions, meta, secondary labels */
+  --sky-blue: #6fc2ff;     /* INTERACTION ONLY: primary action, focus, active */
+  --mellow-yellow: #ffde00;/* the highlighter: comment anchors, marker tabs */
+  --frost-blue: #ebf9ff;   /* tint of sky-blue: hover wash, agent surfaces */
+
+  /* ---- Decorative accents (borders / small fills only — never body text) ---- */
+  --coral-red: #f38e84;    /* destructive accents, removals (with red wash) */
+  --sunset-orange: #f5b161;
+  --aqua-teal: #38c1b0;    /* suggestions, accepted / additive state */
+  --cerulean-blue: #54b4de;/* links, agent message borders */
+  --indigo-violet: #b291de;
+  --grape-purple: #7597ee;
+  --lime-green: #b3c419;
+  --golden-rod: #e1c427;
+
+  /* ---- Semantic aliases (reference these, not the raw palette) ---- */
+  --bg: var(--canvas-oat);
+  --surface: var(--paper-white);
+  --surface-2: var(--smoke-gray);
+  --surface-hover: var(--frost-blue);
+
+  --text: var(--ink);
+  --text-strong: var(--coal);
+  --muted: var(--slate);
+  --faint: #a6a6a4;
+
+  --line: #e2dcd3;          /* warm oat hairline (quiet dividers inside cards) */
+  --line-ink: var(--ink);   /* blueprint hairline (every structural border) */
+
+  --accent: var(--sky-blue);
+  --accent-ink: var(--coal);
+  --mark: var(--mellow-yellow);
+
+  --link: var(--cerulean-blue);
+  --success: var(--aqua-teal);
+  --danger: #d8584c;
+
+  /* state washes — tints mixed live against white */
+  --wash-danger: color-mix(in srgb, var(--coral-red) 10%, white);
+  --wash-success: color-mix(in srgb, var(--aqua-teal) 10%, white);
+  --wash-accent: color-mix(in srgb, var(--sky-blue) 26%, transparent);
+  --mark-fill: color-mix(in srgb, var(--mellow-yellow) 34%, transparent);
+  --mark-underline: color-mix(in srgb, var(--mellow-yellow) 62%, transparent);
+}

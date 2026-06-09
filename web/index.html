@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Skribe — Local-first Markdown writing with an AI review partner</title>
+  <meta name="description" content="Skribe is a local-first Markdown writing and review workbench: an editable canvas, anchored comment threads, chat, reviewable diffs and revision history. Bring your own AI subscription." />
+  <link rel="icon" href="assets/skribe-icon.png" />
+
+  <link rel="stylesheet" href="ds/styles.css" />
+  <link rel="stylesheet" href="landing.css" />
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- React (production builds — no runtime Babel) -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+
+  <!-- Skribe Design System bundle, shared icons, then the precompiled app -->
+  <script src="ds/_ds_bundle.js"></script>
+  <script src="icons.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

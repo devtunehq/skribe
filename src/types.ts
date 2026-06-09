@@ -115,6 +115,7 @@ export interface ReviewSettings {
 
 export interface AppSettings {
   version: number;
+  userName: string;
   toneOfVoice: string;
   toneOfVoiceSetupComplete: boolean;
   editorLanguage: EditorLanguage;

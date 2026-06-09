@@ -68,6 +68,7 @@ export function ToneSetupDialog({
   } = toneState;
   const previewTone = mode === "manual" ? manualText : generatedTone;
   const isBusy = builderState === "generating" || builderState === "saving" || interviewState === "thinking";
+  const allowFirstRunDismiss = invocation === "first-run";
 
   const requestInterviewTurn = useCallback(async (nextMessages: ToneInterviewMessage[], options: { forceGenerate?: boolean } = {}) => {
     dispatchTone({ type: "interview-request-start" });
@@ -160,7 +161,7 @@ export function ToneSetupDialog({
     <ModalDialogShell
       className="settings-backdrop tone-setup-backdrop"
       labelledBy="tone-setup-title"
-      preventCancel={isBusy}
+      preventCancel={isBusy && !allowFirstRunDismiss}
       onCancel={onCancel}
     >
       <section className="settings-dialog tone-setup-dialog">
@@ -169,7 +170,13 @@ export function ToneSetupDialog({
             <span>{invocation === "first-run" ? "First run" : "Settings"}</span>
             <h2 id="tone-setup-title">Tone of voice</h2>
           </div>
-          <button type="button" className="icon-button mini" onClick={onCancel} title="Close tone setup" disabled={isBusy}>
+          <button
+            type="button"
+            className="icon-button mini"
+            onClick={onCancel}
+            title="Close tone setup"
+            disabled={isBusy && !allowFirstRunDismiss}
+          >
             <X size={15} />
           </button>
         </header>
@@ -208,11 +215,11 @@ export function ToneSetupDialog({
                 : "ready"}
           </span>
           {invocation === "first-run" ? (
-            <button type="button" className="ghost-button" onClick={onSkip} disabled={isBusy}>
+            <button type="button" className="ghost-button" onClick={onSkip}>
               Skip
             </button>
           ) : null}
-          <button type="button" className="ghost-button" onClick={onCancel} disabled={isBusy}>
+          <button type="button" className="ghost-button" onClick={onCancel} disabled={isBusy && !allowFirstRunDismiss}>
             Cancel
           </button>
           <button type="button" className="primary-button" onClick={saveTone} disabled={isBusy}>
