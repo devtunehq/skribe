@@ -6,7 +6,7 @@
 
 Local-first Markdown writing with an AI review partner.
 
-Skribe gives you an editable Markdown canvas, anchored comment threads, chat, reviewable diffs, revision history, and clean Markdown export. The document stays local. Review state stays local.
+Skribe gives you an editable Markdown canvas, anchored comment threads, chat, reviewable diffs, Flow mode, revision history, and clean Markdown export. The document stays local. Review state stays local.
 
 **Bring your own AI subscription.** Skribe uses the native agent CLIs you already have installed, such as Codex CLI or Claude Code. If your local CLI is signed in and working, Skribe can use it.
 
@@ -21,6 +21,7 @@ Most AI writing tools treat long-form editing as a chat transcript. That gets cl
 Skribe is built around the document:
 
 - **Editable rendered Markdown canvas** with headings, links, images, lists, quotes, code, GFM tables, copy/paste, and keyboard shortcuts.
+- **Flow mode** for distraction-free drafting with the app chrome, sidebars, toolbar, threads, chat, and agent UI hidden.
 - **Anchored comment threads** for paragraph-level or selection-level review.
 - **Document chat** for broader passes, structural edits, and agent collaboration.
 - **Agent skills** for reusable writing passes such as voice, humanising, copyediting, newsletter review, or any local skill your CLI runtime already knows about.
@@ -89,6 +90,12 @@ SKRIBE_SKILL_ROOTS=~/company/skills:~/personal/skills skribe ~/draft.md
 Rendered Markdown stays editable, with a compact toolbar and collapsible sidebars.
 
 ![Skribe editor](docs/screenshots/editor.png)
+
+### Flow Mode
+
+Hide the UI and AI surfaces when you just want to write. Flow mode leaves the editable canvas visible with a small exit button, and `Escape` returns you to the full review workspace.
+
+![Skribe Flow mode](docs/screenshots/flow.png)
 
 ### Threads
 

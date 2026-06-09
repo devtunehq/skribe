@@ -93,7 +93,7 @@ function Hero() {
     className: "mark"
   }, "AI review partner")), /*#__PURE__*/React.createElement("p", {
     className: "hero__sub"
-  }, "An editable Markdown canvas with anchored comment threads, chat, reviewable diffs and revision history. ", /*#__PURE__*/React.createElement("strong", null, "The document stays local. Review state stays local.")), /*#__PURE__*/React.createElement("div", {
+  }, "An editable Markdown canvas with Flow mode, anchored comment threads, chat, reviewable diffs and revision history. ", /*#__PURE__*/React.createElement("strong", null, "The document stays local. Review state stays local.")), /*#__PURE__*/React.createElement("div", {
     className: "cta"
   }, /*#__PURE__*/React.createElement("div", {
     className: "cmd"
@@ -113,7 +113,7 @@ function Hero() {
     rel: "noopener"
   }, "Read the docs \u2192"))), /*#__PURE__*/React.createElement("div", {
     className: "trust"
-  }, /*#__PURE__*/React.createElement(Pill, null, "MIT licensed"), /*#__PURE__*/React.createElement(Pill, null, "Theme support"), /*#__PURE__*/React.createElement(Pill, null, "Provider-agnostic"), /*#__PURE__*/React.createElement(Pill, null, "Local-only storage")));
+  }, /*#__PURE__*/React.createElement(Pill, null, "MIT licensed"), /*#__PURE__*/React.createElement(Pill, null, "Flow mode"), /*#__PURE__*/React.createElement(Pill, null, "Provider-agnostic"), /*#__PURE__*/React.createElement(Pill, null, "Local-only storage")));
 }
 
 /* ---------------- Product shot ---------------- */
@@ -139,6 +139,10 @@ const FEATURES = [{
   icon: "File",
   title: "Editable canvas",
   body: "Rendered Markdown you edit in place — headings, links, images, lists, quotes, code, GFM tables and keyboard shortcuts."
+}, {
+  icon: "Eye",
+  title: "Flow mode",
+  body: "Hide the app chrome, sidebars, toolbar, threads, chat and agent UI when you just want the editable canvas."
 }, {
   icon: "Comment",
   title: "Anchored threads",
@@ -280,7 +284,22 @@ function Shots() {
     alt: "Skribe diff review: proposed changes shown inline with accept, decline, rewrite and comment actions"
   })), /*#__PURE__*/React.createElement("div", {
     className: "shot__text"
-  }, /*#__PURE__*/React.createElement("h3", null, "Accept, decline, revise"), /*#__PURE__*/React.createElement("p", null, "Agent edits arrive as a reviewable proposal. Step through each change block in split or unified view and accept, decline, rewrite or comment before anything touches your draft.")))));
+  }, /*#__PURE__*/React.createElement("h3", null, "Accept, decline, revise"), /*#__PURE__*/React.createElement("p", null, "Agent edits arrive as a reviewable proposal. Step through each change block in split or unified view and accept, decline, rewrite or comment before anything touches your draft."))), /*#__PURE__*/React.createElement("div", {
+    className: "shot"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "shot__text"
+  }, /*#__PURE__*/React.createElement("h3", null, "Drop into Flow mode"), /*#__PURE__*/React.createElement("p", null, "When the draft needs attention, hide the app chrome, sidebars, toolbar, threads, chat and agent UI. The canvas stays editable, with a small exit button when you are ready to review again.")), /*#__PURE__*/React.createElement("div", {
+    className: "window"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "window__bar"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "window__dots"
+  }, /*#__PURE__*/React.createElement("i", null), /*#__PURE__*/React.createElement("i", null), /*#__PURE__*/React.createElement("i", null)), /*#__PURE__*/React.createElement("span", {
+    className: "window__title"
+  }, "Skribe \u2014 Flow mode")), /*#__PURE__*/React.createElement("img", {
+    src: "assets/flow.png",
+    alt: "Skribe Flow mode: a distraction-free editable Markdown canvas with a small exit button"
+  })))));
 }
 
 /* ---------------- Quick start ---------------- */
