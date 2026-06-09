@@ -1,5 +1,7 @@
 import { createServer } from "node:http";
 import { execFile, spawn } from "node:child_process";
+import { stdin as input, stdout as output } from "node:process";
+import { createInterface } from "node:readline/promises";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { cp, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
@@ -34,7 +36,7 @@ const host = "127.0.0.1";
 const appUrl = `http://${host}:${port}`;
 const skillRegistryTtlMs = 30000;
 const runtimeRegistryTtlMs = 30000;
-const { argv: cliArgv, noOpenBrowser } = stripGlobalFlags(process.argv.slice(2));
+const { argv: cliArgv, noOpenBrowser, createMissingDocument } = stripGlobalFlags(process.argv.slice(2));
 const cliInvocation = parseCliInvocation(cliArgv);
 const requestedMarkdownArg = requestedDocumentPath();
 let activeDocument = resolveActiveDocument(requestedMarkdownArg);
@@ -168,25 +170,54 @@ function resolveUserPath(pathArg) {
 function stripGlobalFlags(argv) {
   const args = [...argv];
   let noOpenBrowser = false;
+  let createMissingDocument = false;
   const filtered = args.filter((arg) => {
     if (arg === "--no-open") {
       noOpenBrowser = true;
       return false;
     }
+    if (arg === "--create" || arg === "-c") {
+      createMissingDocument = true;
+      return false;
+    }
     return true;
   });
-  return { argv: filtered, noOpenBrowser };
+  return { argv: filtered, noOpenBrowser, createMissingDocument };
 }
 
-function assertExternalDocumentExists() {
-  if (activeDocument.source !== "external") return;
-  if (existsSync(activeDocument.markdownPath)) return;
+function defaultMarkdownForPath(markdownPath, title) {
+  const heading = titleFromPath(markdownPath) || title;
+  if (heading && heading !== "Untitled Draft") {
+    return `# ${heading}\n\n`;
+  }
+  return defaultMarkdown;
+}
 
+function printMissingDocumentHelp() {
   console.error(`Document not found: ${activeDocument.markdownPath}`);
   if (requestedMarkdownArg && !requestedMarkdownArg.startsWith("/")) {
     console.error(`Relative paths resolve from: ${userWorkingDirectory()}`);
   }
-  process.exit(1);
+  console.error("Run with --create to create a new file at this path.");
+}
+
+async function offerToCreateExternalDocument() {
+  if (createMissingDocument) return true;
+
+  const canPrompt = input.isTTY && output.isTTY;
+  if (!canPrompt) {
+    printMissingDocumentHelp();
+    return false;
+  }
+
+  const rl = createInterface({ input, output });
+  try {
+    const answer = await rl.question(`Create new document at ${activeDocument.markdownPath}? [Y/n] `);
+    const trimmed = answer.trim();
+    return trimmed === "" || /^y(es)?$/i.test(trimmed);
+  } finally {
+    rl.close();
+  }
 }
 
 async function ensureDocumentFiles() {
@@ -196,13 +227,20 @@ async function ensureDocumentFiles() {
 
   if (!existsSync(activeDocument.markdownPath)) {
     if (activeDocument.source === "external") {
-      assertExternalDocumentExists();
+      const shouldCreate = await offerToCreateExternalDocument();
+      if (!shouldCreate) {
+        console.error(input.isTTY && output.isTTY ? "Document not created." : "");
+        process.exit(1);
+      }
+      console.log(`Creating new document: ${activeDocument.markdownPath}`);
     }
     await mkdir(dirname(activeDocument.markdownPath), { recursive: true });
     const markdown =
       activeDocument.source === "internal" && existsSync(legacyDraftPath)
         ? await readFile(legacyDraftPath, "utf8")
-        : defaultMarkdown;
+        : activeDocument.source === "external"
+          ? defaultMarkdownForPath(activeDocument.markdownPath, activeDocument.title)
+          : defaultMarkdown;
     await writeFile(activeDocument.markdownPath, markdown, "utf8");
   }
 
@@ -566,6 +604,7 @@ Utility:
   skribe export --out out.md    Write exported Markdown to a file
 
 Options:
+  --create, -c                  Create the Markdown file if it does not exist yet
   --no-open                     Do not open the app URL in your browser on startup
 
 Environment:
@@ -1288,7 +1327,6 @@ async function agentRuntimeConfigResponse() {
 async function loadDocumentIntoMemory() {
   await ensureAppStorage();
   settingsMemory = normalizeAppSettings(await readJson(settingsPath, defaultSettings));
-  assertExternalDocumentExists();
   await ensureDocumentFiles();
   const [markdown, review, agentSession, draftStat, reviewStat] = await Promise.all([
     readFile(activeDocument.markdownPath, "utf8"),

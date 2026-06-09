@@ -111,6 +111,7 @@ test("CLI fails clearly when an external document path does not exist", () => {
   });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Document not found/);
+  assert.match(result.stderr, /--create/);
 });
 
 test("CLI export can print or write a Markdown file", async () => {

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -191,6 +192,22 @@ test("settings API persists all global settings to the config directory", async 
     assert.match(health.payload.markdownPath, new RegExp(server.dataDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   } finally {
     await server.stop();
+  }
+});
+
+test("open creates a missing external document when --create is passed", async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), "skribe-create-doc-"));
+  const markdownPath = join(rootDir, "newdoc.md");
+  const server = await startServer({ args: ["--create", markdownPath] });
+
+  try {
+    assert.ok(existsSync(markdownPath));
+    assert.match(await readFile(markdownPath, "utf8"), /# newdoc/);
+    const health = await jsonRequest(server.baseUrl, "/api/health");
+    assert.equal(health.payload.markdownPath, markdownPath);
+  } finally {
+    await server.stop();
+    await rm(rootDir, { recursive: true, force: true });
   }
 });
 

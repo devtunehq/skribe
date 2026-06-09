@@ -142,7 +142,7 @@ npm install -g skribe-editor
 skribe ~/draft.md
 ```
 
-Skribe starts a local server and prints the browser URL.
+Skribe starts a local server, opens your browser automatically, and prints the app URL as the last line of output.
 
 ## CLI Commands
 
@@ -154,6 +154,26 @@ skribe open [file.md]         # same as skribe [file.md]
 skribe --version              # print the installed version
 skribe --help                 # show CLI help
 ```
+
+Options (since `0.1.6`):
+
+```bash
+skribe --create newdoc.md     # create the file if it does not exist yet
+skribe -c newdoc.md           # short form of --create
+skribe --no-open ~/draft.md   # start without opening the browser
+```
+
+If you open a file that does not exist yet, Skribe asks in the terminal:
+
+```text
+Create new document at /home/you/newdoc.md? [Y/n]
+```
+
+Press Enter or `y` to create it. Skribe seeds the file with a heading based on the filename, then opens it in the browser. Press `n` to cancel.
+
+In non-interactive contexts such as scripts or CI, pass `--create` explicitly. Without it, Skribe prints the resolved path and exits with a clear error instead of creating the file silently.
+
+Disable browser auto-open for a single run with `--no-open`, or for every run with `SKRIBE_NO_OPEN_BROWSER=1`.
 
 Diagnostics:
 
@@ -229,6 +249,21 @@ npm link
 skribe ~/draft.md
 ```
 
+Relative paths resolve from the directory where you run the command, including with `npx`:
+
+```bash
+cd ~/writing
+npx skribe-editor chapter-one.md
+```
+
+That opens or offers to create `~/writing/chapter-one.md`, not a path inside `node_modules`.
+
+To start a brand-new file in the current directory:
+
+```bash
+skribe --create newdoc.md
+```
+
 Skribe keeps the `.md` file as the clean document source. Comments, chat, proposals, revisions, and agent memory are stored in a sidecar directory under the local Skribe config directory.
 
 ## Agent Runtime
@@ -257,6 +292,7 @@ Useful environment variables:
 | Variable | Purpose |
 | --- | --- |
 | `PORT` | Server port. Defaults to `4327`. |
+| `SKRIBE_NO_OPEN_BROWSER` | Set to `1` to disable browser auto-open on startup. |
 | `SKRIBE_CONFIG_DIR` | Config root. Defaults to `~/.config/skribe`. |
 | `SKRIBE_DATA_DIR` | Local document/review storage root. Defaults to `~/.config/skribe/data`. |
 | `SKRIBE_DOCUMENT` / `SKRIBE_DOCUMENT_PATH` | Markdown file to open when no CLI path is passed. |
