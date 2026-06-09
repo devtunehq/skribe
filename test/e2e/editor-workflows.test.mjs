@@ -229,6 +229,46 @@ test("clicking blank canvas after typing does not duplicate the last inserted te
   );
 });
 
+test("flow mode hides app chrome while keeping the canvas editable", async (t) => {
+  await withApp(
+    t,
+    "# Draft\n\nWrite without chrome.\n",
+    async ({ browser, markdownPath }) => {
+      assert.equal(
+        await evaluate(browser.cdp, "Boolean(document.querySelector('button[aria-label=\"Enter flow mode\"]'))"),
+        true
+      );
+      await evaluate(browser.cdp, "document.querySelector('button[aria-label=\"Enter flow mode\"]')?.click()");
+      await waitFor(browser.cdp, "Boolean(document.querySelector('.app-shell.flow-mode'))");
+
+      const hiddenChrome = await evaluate(
+        browser.cdp,
+        `(() => ({
+          topbar: Boolean(document.querySelector('.topbar')),
+          leftRail: Boolean(document.querySelector('.left-rail')),
+          rightPanel: Boolean(document.querySelector('.right-panel')),
+          toolbar: Boolean(document.querySelector('.canvas-toolbar')),
+          exit: Boolean(document.querySelector('button[aria-label="Exit flow mode"]'))
+        }))()`
+      );
+      assert.deepEqual(hiddenChrome, {
+        topbar: false,
+        leftRail: false,
+        rightPanel: false,
+        toolbar: false,
+        exit: true
+      });
+
+      assert.equal(await setEditableText(browser.cdp, "block-1", "Write without chrome, but still edit."), true);
+      await waitForFileText(markdownPath, /Write without chrome, but still edit\./);
+
+      await evaluate(browser.cdp, "document.querySelector('button[aria-label=\"Exit flow mode\"]')?.click()");
+      await waitFor(browser.cdp, "!document.querySelector('.app-shell.flow-mode')");
+      assert.equal(await evaluate(browser.cdp, "Boolean(document.querySelector('.topbar'))"), true);
+    }
+  );
+});
+
 test("Ctrl-A selects the whole document and copy uses rendered cross-block text", async (t) => {
   await withApp(
     t,

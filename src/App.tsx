@@ -820,6 +820,7 @@ function isOlderDocument(candidate: DocumentState, current: DocumentState | null
 
 function useSkribeController() {
   const [controllerState, dispatchController] = useReducer(appControllerReducer, defaultAppSettings, createAppControllerState);
+  const [isFlowMode, setIsFlowMode] = useState(false);
   const controllerSetters = useMemo(() => createAppControllerSetters(dispatchController), []);
   const {
     documentState,
@@ -3152,6 +3153,8 @@ function useSkribeController() {
     blockResetKeys,
     agentSession,
     agentRuntimeUnavailable,
+    isFlowMode,
+    setIsFlowMode,
     canvasRef,
     fileInputRef,
     imageInputRef,
@@ -3315,28 +3318,53 @@ function SkribeShell() {
     appSettings,
     documentState,
     editorLanguage,
+    isFlowMode,
     isLeftRailCollapsed,
     isRightPanelCollapsed,
-    lastCopied
+    lastCopied,
+    setIsFlowMode
   } = useSkribeControllerContext();
+
+  useEffect(() => {
+    if (!isFlowMode) return undefined;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setIsFlowMode(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isFlowMode, setIsFlowMode]);
 
   if (!documentState) return <SkribeLoadingScreen />;
 
   return (
     <main
-      className={`app-shell ${isLeftRailCollapsed ? "left-collapsed" : ""} ${
+      className={`app-shell ${isFlowMode ? "flow-mode" : ""} ${isLeftRailCollapsed ? "left-collapsed" : ""} ${
         isRightPanelCollapsed ? "right-collapsed" : ""
       }`}
       data-theme={appSettings.theme}
       data-document-font={appSettings.documentFont}
       lang={editorLanguage}
     >
-      <Topbar />
+      {isFlowMode ? null : <Topbar />}
       <section className="workspace">
-        <LeftRail />
+        {isFlowMode ? null : <LeftRail />}
         <CenterPane />
-        <RightPanel />
+        {isFlowMode ? null : <RightPanel />}
       </section>
+      {isFlowMode ? (
+        <button
+          type="button"
+          className="flow-mode-toggle"
+          onClick={() => setIsFlowMode(false)}
+          title="Exit flow mode"
+          aria-label="Exit flow mode"
+        >
+          <Eye size={16} />
+          <span>Exit Flow</span>
+        </button>
+      ) : null}
       <SkribeOverlays />
       {lastCopied ? <div className="toast">{lastCopied}</div> : null}
     </main>
@@ -3353,7 +3381,8 @@ function Topbar() {
     exportMarkdown,
     importMarkdown,
     insertImageFiles,
-    openSettingsDialog
+    openSettingsDialog,
+    setIsFlowMode
   } = useSkribeControllerContext();
 
   if (!documentState) return null;
@@ -3380,6 +3409,9 @@ function Topbar() {
         </span>
         <button type="button" className="icon-button" onClick={openSettingsDialog} title="Settings" aria-label="Settings">
           <Settings size={17} />
+        </button>
+        <button type="button" className="icon-button" onClick={() => setIsFlowMode(true)} title="Flow mode" aria-label="Enter flow mode">
+          <EyeOff size={17} />
         </button>
         <button
           type="button"
@@ -3703,6 +3735,7 @@ function CenterPane() {
     canvasRef,
     documentState,
     editorLanguage,
+    isFlowMode,
     pendingSelectionDraft,
     reviewableProposals,
     selectionDraft,
@@ -3741,7 +3774,7 @@ function CenterPane() {
 
   return (
     <section className="center-pane">
-      <CanvasToolbar />
+      {isFlowMode ? null : <CanvasToolbar />}
       <div
         ref={canvasRef}
         className="markdown-canvas"
@@ -3764,19 +3797,21 @@ function CenterPane() {
         onContextMenu={handleCanvasContextMenu}
         onScroll={updateFloatingToolbarPosition}
       >
-        <InlineProposalReviewBar
-          review={activeInlineProposal}
-          proposalCount={reviewableProposals.length}
-          onProposalStatus={updateProposalStatus}
-          onRequestProposalRewrite={requestProposalRewrite}
-        />
+        {isFlowMode ? null : (
+          <InlineProposalReviewBar
+            review={activeInlineProposal}
+            proposalCount={reviewableProposals.length}
+            onProposalStatus={updateProposalStatus}
+            onRequestProposalRewrite={requestProposalRewrite}
+          />
+        )}
         <EditableMarkdownCanvas
           markdown={documentState.markdown}
           editorLanguage={editorLanguage}
-          threads={threads}
-          inlineProposal={activeInlineProposal}
+          threads={isFlowMode ? [] : threads}
+          inlineProposal={isFlowMode ? null : activeInlineProposal}
           diffViewMode={appSettings.diffViewMode}
-          selectionPreview={selectionDraft ?? pendingSelectionDraft}
+          selectionPreview={isFlowMode ? null : selectionDraft ?? pendingSelectionDraft}
           blockResetKeys={blockResetKeys}
           activeBlockId={activeBlockId}
           activeThreadId={activeThread?.id ?? null}
@@ -4010,6 +4045,7 @@ function SkribeOverlays() {
     agentSkills,
     appSettings,
     floatingToolbar,
+    isFlowMode,
     isSettingsOpen,
     linkDraft,
     linkInputRef,
@@ -4043,6 +4079,8 @@ function SkribeOverlays() {
     updateSettingsDraft,
     imageInputRef
   } = useSkribeControllerContext();
+
+  if (isFlowMode) return null;
 
   return (
     <>

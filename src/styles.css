@@ -311,6 +311,10 @@ button {
   background: var(--bg);
 }
 
+.app-shell.flow-mode {
+  grid-template-rows: minmax(0, 1fr);
+}
+
 .topbar {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) auto;
@@ -927,6 +931,12 @@ button {
   min-height: calc(100dvh - 64px);
 }
 
+.app-shell.flow-mode .workspace {
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
 .app-shell.left-collapsed .workspace {
   grid-template-columns: 44px minmax(420px, 1fr) 420px;
 }
@@ -967,6 +977,38 @@ button {
   max-height: calc(100vh - 64px);
   overflow: hidden;
   background: var(--canvas-oat);
+}
+
+.app-shell.flow-mode .center-pane {
+  grid-template-rows: minmax(0, 1fr);
+  max-height: 100vh;
+  max-height: 100dvh;
+}
+
+.flow-mode-toggle {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  z-index: 50;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-ink);
+  border-radius: var(--radius);
+  background: var(--paper-white);
+  color: var(--text);
+  box-shadow: var(--shadow-offset);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.flow-mode-toggle:hover {
+  background: var(--accent-blue-soft);
 }
 
 .rail-collapse-button,
@@ -1385,6 +1427,11 @@ button {
   background: var(--canvas-oat);
   padding: 40px max(32px, 6vw) 80px;
   min-height: 0;
+}
+
+.app-shell.flow-mode .markdown-canvas {
+  padding-top: max(56px, 8vh);
+  padding-bottom: max(80px, 10vh);
 }
 
 .markdown-canvas:focus {
