@@ -761,6 +761,7 @@ test("table image export uses a transparent PNG background", async (t) => {
         browser.cdp,
         `(() => {
           window.__skribeTableExport = null;
+          window.__skribeTableDownload = null;
           const originalToBlob = HTMLCanvasElement.prototype.toBlob;
           HTMLCanvasElement.prototype.toBlob = function(callback, type, quality) {
             const ctx = this.getContext('2d');
@@ -773,18 +774,28 @@ test("table image export uses a transparent PNG background", async (t) => {
             window.__skribeTableBlobType = blob.type;
             return originalCreateObjectURL.call(this, blob);
           };
+          const originalAnchorClick = HTMLAnchorElement.prototype.click;
+          HTMLAnchorElement.prototype.click = function() {
+            if (this.download && this.download.startsWith('skribe-table-')) {
+              window.__skribeTableDownload = { download: this.download, href: this.href };
+              return undefined;
+            }
+            return originalAnchorClick.call(this);
+          };
           return true;
         })()`
       );
       await evaluate(browser.cdp, "document.querySelector('.table-image-download').click()");
-      await waitFor(browser.cdp, "Boolean(window.__skribeTableExport && window.__skribeTableBlobType)");
-      const exportInfo = await evaluate(browser.cdp, "({ ...window.__skribeTableExport, blobType: window.__skribeTableBlobType })");
+      await waitFor(browser.cdp, "Boolean(window.__skribeTableExport && window.__skribeTableBlobType && window.__skribeTableDownload)");
+      const exportInfo = await evaluate(browser.cdp, "({ ...window.__skribeTableExport, blobType: window.__skribeTableBlobType, download: window.__skribeTableDownload })");
 
       assert.ok(exportInfo.width > 0);
       assert.ok(exportInfo.height > 0);
       assert.equal(exportInfo.pixel[3], 0);
       assert.equal(exportInfo.type, "image/png");
       assert.equal(exportInfo.blobType, "image/png");
+      assert.match(exportInfo.download.download, /^skribe-table-block-\d+\.png$/);
+      assert.match(exportInfo.download.href, /^blob:/);
     }
   );
 });
