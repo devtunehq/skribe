@@ -44,6 +44,9 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Fetch main for react-doctor diff
+        run: git fetch origin main:main
+
       - name: React Doctor (diff)
         run: npm run doctor:diff
 
