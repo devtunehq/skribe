@@ -69,6 +69,7 @@ export async function startSkribeServer(markdownPath, options = {}) {
       SKRIBE_AGENT_RUNTIME: "stub",
       SKRIBE_AGENT_MODEL: "auto",
       SKRIBE_AGENT_EFFORT: "auto",
+      SKRIBE_NO_OPEN_BROWSER: "1",
       ...(options.env ?? {})
     },
     stdio: ["ignore", "pipe", "pipe"]

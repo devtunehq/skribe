@@ -7,7 +7,10 @@ const binDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(binDir, "..");
 const serverPath = resolve(projectRoot, "server", "index.mjs");
 const args = process.argv.slice(2);
-const invokerCwd = process.env.INIT_CWD || process.cwd();
+// Under npx/global install the bin often starts inside the package directory.
+// INIT_CWD points at the directory where the user invoked the command.
+const invokerCwd =
+  process.cwd() === projectRoot && process.env.INIT_CWD ? process.env.INIT_CWD : process.cwd();
 
 const child = spawn(process.execPath, [serverPath, ...args], {
   cwd: invokerCwd,

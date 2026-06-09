@@ -46,6 +46,7 @@ async function startServer(options = {}) {
       SKRIBE_AGENT_RUNTIME: "stub",
       SKRIBE_AGENT_MODEL: "auto",
       SKRIBE_AGENT_EFFORT: "auto",
+      SKRIBE_NO_OPEN_BROWSER: "1",
       ...(options.env ?? {})
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -84,7 +85,8 @@ async function runSkribeInvocation({ port, configDir, dataDir, args = [] }) {
       SKRIBE_DATA_DIR: dataDir,
       SKRIBE_AGENT_RUNTIME: "stub",
       SKRIBE_AGENT_MODEL: "auto",
-      SKRIBE_AGENT_EFFORT: "auto"
+      SKRIBE_AGENT_EFFORT: "auto",
+      SKRIBE_NO_OPEN_BROWSER: "1"
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -212,7 +214,7 @@ test("a second invocation opens another document in the running server", async (
     });
 
     assert.equal(handoff.code, 0);
-    assert.match(handoff.output, /Skribe is already running/);
+    assert.match(handoff.output, /Open Skribe in your browser/);
     assert.doesNotMatch(handoff.output, /EADDRINUSE/);
 
     const opened = await jsonRequest(server.baseUrl, "/api/document");
