@@ -7,9 +7,22 @@ import test from "node:test";
 
 const root = new URL("..", import.meta.url).pathname;
 const serverPath = join(root, "server", "index.mjs");
+const binPath = join(root, "bin", "skribe.mjs");
 
 function runSkribe(args, env = {}) {
   return spawnSync(process.execPath, [serverPath, ...args], {
+    cwd: root,
+    env: {
+      ...process.env,
+      PORT: String(48000 + Math.floor(Math.random() * 1000)),
+      ...env
+    },
+    encoding: "utf8"
+  });
+}
+
+function runSkribeBin(args, env = {}) {
+  return spawnSync(process.execPath, [binPath, ...args], {
     cwd: root,
     env: {
       ...process.env,
@@ -29,6 +42,18 @@ test("CLI prints version and help without starting the server", () => {
   assert.equal(help.status, 0);
   assert.match(help.stdout, /skribe doctor/);
   assert.match(help.stdout, /skribe runtimes/);
+});
+
+test("published bin wrapper forwards version and help flags", () => {
+  const version = runSkribeBin(["--version"]);
+  assert.equal(version.status, 0);
+  assert.match(version.stdout.trim(), /^\d+\.\d+\.\d+/);
+  assert.doesNotMatch(version.stdout, /Skribe running at/);
+
+  const help = runSkribeBin(["--help"]);
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /skribe doctor/);
+  assert.doesNotMatch(help.stdout, /Skribe running at/);
 });
 
 test("CLI status reports when no local server is running", () => {
