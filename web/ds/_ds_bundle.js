@@ -2,6 +2,8 @@
 
 (() => {
 
+const __EMPTY_LIST = [];
+
 const __ds_ns = (window.SkribeDesignSystem_a6e4e0 = window.SkribeDesignSystem_a6e4e0 || {});
 
 const __ds_scope = {};
@@ -66,9 +68,7 @@ function Button({
 }) {
   ensureButtonStyles();
   const classes = ["sk-btn", `sk-btn--${variant}`, size === "small" ? "sk-btn--small" : "", active ? "is-active" : "", className].filter(Boolean).join(" ");
-  return /*#__PURE__*/React.createElement("button", _extends({
-    className: classes
-  }, rest), icon, children);
+  return /*#__PURE__*/React.createElement("button", Object.assign({ type: "button", className: classes }, rest), icon, children);
 }
 Object.assign(__ds_scope, { Button });
 })(); } catch (e) { __ds_ns.__errors.push({ path: "components/buttons/Button.jsx", error: String((e && e.message) || e) }); }
@@ -116,9 +116,7 @@ function IconButton({
 }) {
   ensureIconButtonStyles();
   const classes = ["sk-icon-btn", size === "mini" ? "sk-icon-btn--mini" : "", className].filter(Boolean).join(" ");
-  return /*#__PURE__*/React.createElement("button", _extends({
-    className: classes
-  }, rest), children);
+  return /*#__PURE__*/React.createElement("button", Object.assign({ type: "button", className: classes }, rest), children);
 }
 Object.assign(__ds_scope, { IconButton });
 })(); } catch (e) { __ds_ns.__errors.push({ path: "components/buttons/IconButton.jsx", error: String((e && e.message) || e) }); }
@@ -178,7 +176,7 @@ function ensureSelectStyles() {
   document.head.appendChild(el);
 }
 function Select({
-  options = [],
+  options = __EMPTY_LIST,
   value,
   onChange,
   disabled = false,
@@ -318,7 +316,7 @@ function ensureTabsStyles() {
   document.head.appendChild(el);
 }
 function Tabs({
-  tabs = [],
+  tabs = __EMPTY_LIST,
   value,
   onChange,
   fill = false,
@@ -337,6 +335,7 @@ function Tabs({
     const active = tab.value === value;
     return /*#__PURE__*/React.createElement("button", {
       key: tab.value,
+      type: "button",
       role: "tab",
       "aria-selected": active,
       className: `sk-tab${active ? " is-active" : ""}`,
@@ -547,9 +546,7 @@ function ThreadCard({
 }) {
   ensureThreadCardStyles();
   const classes = ["sk-thread-card", active ? "is-active" : "", resolved ? "is-resolved" : "", className].filter(Boolean).join(" ");
-  return /*#__PURE__*/React.createElement("button", _extends({
-    className: classes
-  }, rest), /*#__PURE__*/React.createElement("span", {
+  return /*#__PURE__*/React.createElement("button", Object.assign({ type: "button", className: classes }, rest), /*#__PURE__*/React.createElement("span", {
     className: "sk-thread-index"
   }, index), /*#__PURE__*/React.createElement("span", {
     className: "sk-thread-body"
@@ -707,6 +704,7 @@ try { (() => {
     })), /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("strong", null, "Skribe"), /*#__PURE__*/React.createElement("span", null, DATA.doc.title))), /*#__PURE__*/React.createElement("div", {
       className: "topbar-actions"
     }, /*#__PURE__*/React.createElement("button", {
+      type: "button",
       className: "agent-config-button" + (agentRunning ? " is-running" : ""),
       onClick: onToggleAgent
     }, /*#__PURE__*/React.createElement(I.Spark, null), /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("strong", null, "Claude Code"), /*#__PURE__*/React.createElement("small", null, "Opus 4.8 \xB7 High")), /*#__PURE__*/React.createElement("em", null, agentRunning ? "Run" : "Idle"), /*#__PURE__*/React.createElement(I.ChevDown, {
@@ -736,6 +734,7 @@ try { (() => {
     return /*#__PURE__*/React.createElement("aside", {
       className: "left-rail"
     }, /*#__PURE__*/React.createElement("button", {
+      type: "button",
       className: "rail-collapse-button",
       "aria-label": "Collapse"
     }, /*#__PURE__*/React.createElement(I.ChevLeft, null)), /*#__PURE__*/React.createElement("div", {
@@ -843,6 +842,7 @@ try { (() => {
       className: "toolbar-divider"
     }) : /*#__PURE__*/React.createElement("button", {
       key: t.key,
+      type: "button",
       className: t.key === "comment" ? "" : "",
       "aria-label": t.key
     }, t.node)))), /*#__PURE__*/React.createElement("div", {
@@ -857,6 +857,7 @@ try { (() => {
         const st = anchorState[run.anchor];
         return /*#__PURE__*/React.createElement("button", {
           key: ri,
+          type: "button",
           className: "anchor-highlight" + (st && st.active ? " is-active" : ""),
           style: {
             font: "inherit",
@@ -894,7 +895,7 @@ try { (() => {
       className: "panel-body"
     }, /*#__PURE__*/React.createElement("div", {
       className: "panel-toolbar"
-    }, /*#__PURE__*/React.createElement("span", null, open.length, " visible \xB7 ", threads.length - open.length, " resolved"), /*#__PURE__*/React.createElement("button", null, /*#__PURE__*/React.createElement(I.Eye, null), " Show resolved")), !active && open.length === 0 && /*#__PURE__*/React.createElement("p", {
+    }, /*#__PURE__*/React.createElement("span", null, open.length, " visible \xB7 ", threads.length - open.length, " resolved"), /*#__PURE__*/React.createElement("button", { type: "button" }, /*#__PURE__*/React.createElement(I.Eye, null), " Show resolved")), !active && open.length === 0 && /*#__PURE__*/React.createElement("p", {
       className: "empty-note"
     }, "Select text in the canvas, then use the comment button in the toolbar."), /*#__PURE__*/React.createElement("div", {
       className: "thread-list"
@@ -919,6 +920,7 @@ try { (() => {
       size: "small",
       onClick: () => onResolve(active.id)
     }, "Resolve"))), /*#__PURE__*/React.createElement("button", {
+      type: "button",
       className: "thread-anchor-preview",
       onClick: () => onAnchorScroll(active.id)
     }, active.anchor), /*#__PURE__*/React.createElement("div", {
@@ -971,7 +973,8 @@ try { (() => {
     onSend
   }) {
     const [draft, setDraft] = useState("");
-    const [skills, setSkills] = useState(chat.skills);
+    const [removedSkills, setRemovedSkills] = useState(() => new Set());
+    const skills = chat.skills.filter((skill) => !removedSkills.has(skill));
     return /*#__PURE__*/React.createElement("div", {
       className: "panel-body chat-panel"
     }, /*#__PURE__*/React.createElement("div", {
@@ -993,7 +996,7 @@ try { (() => {
       className: "skill-chip-row"
     }, skills.map(s => /*#__PURE__*/React.createElement(SkillChip, {
       key: s,
-      onRemove: () => setSkills(skills.filter(x => x !== s))
+      onRemove: () => setRemovedSkills((prev) => new Set(prev).add(s))
     }, s))), /*#__PURE__*/React.createElement("textarea", {
       rows: 3,
       value: draft,
@@ -1019,44 +1022,114 @@ try { (() => {
   }
 
   // ---------- App ----------
-  function EditorApp() {
-    const [tab, setTab] = useState("threads");
-    const [threads, setThreads] = useState(DATA.threads.map(t => ({
+  const editorInitialState = () => ({
+    tab: "threads",
+    threads: DATA.threads.map(t => ({
       ...t
-    })));
-    const [activeThread, setActiveThread] = useState("t1");
-    const [chat, setChat] = useState(DATA.chat);
-    const [saveState, setSaveState] = useState("saved");
-    const [agentRunning, setAgentRunning] = useState(false);
-    const [toast, setToast] = useState("");
-    const [commentBtn, setCommentBtn] = useState(null);
+    })),
+    activeThread: "t1",
+    chat: DATA.chat,
+    saveState: "saved",
+    agentRunning: false,
+    toast: "",
+    commentBtn: null
+  });
+  function editorReducer(state, action) {
+    switch (action.type) {
+      case "patch":
+        return {
+          ...state,
+          ...action.value
+        };
+      case "updateThreads":
+        return {
+          ...state,
+          threads: action.updater(state.threads)
+        };
+      case "updateChat":
+        return {
+          ...state,
+          chat: action.updater(state.chat)
+        };
+      default:
+        return state;
+    }
+  }
+  function EditorApp() {
+    const [state, dispatch] = useReducer(editorReducer, undefined, editorInitialState);
+    const {
+      tab,
+      threads,
+      activeThread,
+      chat,
+      saveState,
+      agentRunning,
+      toast,
+      commentBtn
+    } = state;
     const canvasRef = useRef(null);
     const toastTimer = useRef(null);
     const flashToast = msg => {
-      setToast(msg);
+      dispatch({
+        type: "patch",
+        value: {
+          toast: msg
+        }
+      });
       clearTimeout(toastTimer.current);
-      toastTimer.current = setTimeout(() => setToast(""), 1900);
+      toastTimer.current = setTimeout(() => dispatch({
+        type: "patch",
+        value: {
+          toast: ""
+        }
+      }), 1900);
     };
     const openCount = threads.filter(t => !t.resolved).length;
     const onAnchorClick = id => {
-      setTab("threads");
-      setActiveThread(id);
+      dispatch({
+        type: "patch",
+        value: {
+          tab: "threads",
+          activeThread: id
+        }
+      });
     };
     const onAccept = id => {
-      setThreads(ts => ts.map(t => t.id === id ? {
-        ...t,
-        accepted: true
-      } : t));
-      setSaveState("saving");
-      setTimeout(() => setSaveState("saved"), 900);
+      dispatch({
+        type: "updateThreads",
+        updater: ts => ts.map(t => t.id === id ? {
+          ...t,
+          accepted: true
+        } : t)
+      });
+      dispatch({
+        type: "patch",
+        value: {
+          saveState: "saving"
+        }
+      });
+      setTimeout(() => dispatch({
+        type: "patch",
+        value: {
+          saveState: "saved"
+        }
+      }), 900);
       flashToast("Change accepted");
     };
     const onResolve = id => {
-      setThreads(ts => ts.map(t => t.id === id ? {
-        ...t,
-        resolved: true
-      } : t));
-      setActiveThread(null);
+      dispatch({
+        type: "updateThreads",
+        updater: ts => ts.map(t => t.id === id ? {
+          ...t,
+          resolved: true
+        } : t)
+      });
+      dispatch({
+        type: "patch",
+        value: {
+          activeThread: null
+        }
+      });
       flashToast("Thread resolved");
     };
     const onSend = text => {
@@ -1067,33 +1140,45 @@ try { (() => {
         variant: "human",
         text
       };
-      setChat(c => ({
-        ...c,
-        messages: [...c.messages, human]
-      }));
-      setAgentRunning(true);
       const typingId = "typing";
-      setChat(c => ({
-        ...c,
-        messages: [...c.messages, human, {
-          id: typingId,
-          author: "Agent",
-          variant: "agent",
-          typing: true
-        }]
-      }));
-      setTimeout(() => {
-        setChat(c => ({
+      dispatch({
+        type: "updateChat",
+        updater: c => ({
           ...c,
-          messages: c.messages.filter(m => m.id !== typingId).concat({
-            id: "a" + Date.now(),
+          messages: [...c.messages, human, {
+            id: typingId,
             author: "Agent",
-            time: "now",
             variant: "agent",
-            text: "On it — I'll return a reviewable diff that sharpens that pass while keeping the founder-to-founder voice."
+            typing: true
+          }]
+        })
+      });
+      dispatch({
+        type: "patch",
+        value: {
+          agentRunning: true
+        }
+      });
+      setTimeout(() => {
+        dispatch({
+          type: "updateChat",
+          updater: c => ({
+            ...c,
+            messages: c.messages.filter(m => m.id !== typingId).concat({
+              id: "a" + Date.now(),
+              author: "Agent",
+              time: "now",
+              variant: "agent",
+              text: "On it — I'll return a reviewable diff that sharpens that pass while keeping the founder-to-founder voice."
+            })
           })
-        }));
-        setAgentRunning(false);
+        });
+        dispatch({
+          type: "patch",
+          value: {
+            agentRunning: false
+          }
+        });
       }, 1500);
     };
 
@@ -1101,23 +1186,43 @@ try { (() => {
     const onComment = () => {
       const sel = window.getSelection();
       if (!sel || sel.isCollapsed || !canvasRef.current) {
-        setCommentBtn(null);
+        dispatch({
+          type: "patch",
+          value: {
+            commentBtn: null
+          }
+        });
         return;
       }
       const range = sel.getRangeAt(0);
       if (!canvasRef.current.contains(range.commonAncestorContainer)) {
-        setCommentBtn(null);
+        dispatch({
+          type: "patch",
+          value: {
+            commentBtn: null
+          }
+        });
         return;
       }
       const rect = range.getBoundingClientRect();
       if (rect.width < 2) {
-        setCommentBtn(null);
+        dispatch({
+          type: "patch",
+          value: {
+            commentBtn: null
+          }
+        });
         return;
       }
-      setCommentBtn({
-        x: rect.left + rect.width / 2,
-        y: rect.top - 8,
-        text: sel.toString()
+      dispatch({
+        type: "patch",
+        value: {
+          commentBtn: {
+            x: rect.left + rect.width / 2,
+            y: rect.top - 8,
+            text: sel.toString()
+          }
+        }
       });
     };
     const addThread = () => {
@@ -1131,35 +1236,40 @@ try { (() => {
         title: text,
         meta: "1 message · open",
         resolved: false,
-        messages: [{
-          id: "nm",
-          author: "Human",
-          time: "now",
-          variant: "human",
-          text: ""
-        }],
+        messages: [],
         suggestion: null
       };
-      // keep messages empty-friendly: drop the empty seed
-      nt.messages = [];
-      setThreads(ts => [...ts, nt]);
-      setTab("threads");
-      setActiveThread(id);
-      setCommentBtn(null);
+      dispatch({
+        type: "updateThreads",
+        updater: ts => [...ts, nt]
+      });
+      dispatch({
+        type: "patch",
+        value: {
+          tab: "threads",
+          activeThread: id,
+          commentBtn: null
+        }
+      });
       window.getSelection().removeAllRanges();
       flashToast("Comment thread added");
     };
-    useEffect(() => {
-      const clear = () => setCommentBtn(null);
-      window.addEventListener("scroll", clear, true);
-      return () => window.removeEventListener("scroll", clear, true);
-    }, []);
     return /*#__PURE__*/React.createElement("div", {
-      className: "app-shell"
+      className: "app-shell",
+      onScrollCapture: () => {
+        if (commentBtn) {
+          dispatch({
+            type: "patch",
+            value: {
+              commentBtn: null
+            }
+          });
+        }
+      }
     }, /*#__PURE__*/React.createElement(Topbar, {
       saveState: saveState,
       agentRunning: agentRunning,
-      onToggleAgent: () => setAgentRunning(v => !v)
+      onToggleAgent: () => dispatch({ type: "patch", value: { agentRunning: !agentRunning } })
     }), /*#__PURE__*/React.createElement("div", {
       className: "workspace"
     }, /*#__PURE__*/React.createElement(LeftRail, {
@@ -1178,12 +1288,13 @@ try { (() => {
     }, /*#__PURE__*/React.createElement("div", {
       className: "panel-tabs"
     }, /*#__PURE__*/React.createElement("button", {
+      type: "button",
       className: "right-collapse-button in-panel",
       "aria-label": "Collapse"
     }, /*#__PURE__*/React.createElement(I.ChevRight, null)), /*#__PURE__*/React.createElement(Tabs, {
       fill: true,
       value: tab,
-      onChange: setTab,
+      onChange: tabValue => dispatch({ type: "patch", value: { tab: tabValue } }),
       tabs: [{
         value: "threads",
         label: "Threads",
@@ -1196,7 +1307,7 @@ try { (() => {
     })), tab === "threads" ? /*#__PURE__*/React.createElement(ThreadsPanel, {
       threads: threads,
       activeThread: activeThread,
-      setActiveThread: setActiveThread,
+      setActiveThread: id => dispatch({ type: "patch", value: { activeThread: id } }),
       onAccept: onAccept,
       onResolve: onResolve,
       onAnchorScroll: onAnchorClick
@@ -1210,6 +1321,7 @@ try { (() => {
         top: commentBtn.y
       }
     }, /*#__PURE__*/React.createElement("button", {
+      type: "button",
       onMouseDown: e => {
         e.preventDefault();
         addThread();

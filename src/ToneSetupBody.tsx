@@ -1,7 +1,7 @@
 import { RotateCcw, Send, Sparkles } from "lucide-react";
-import type { Dispatch } from "react";
+import { useLayoutEffect, useRef, type Dispatch } from "react";
 import { AgentTypingIndicator } from "./AgentTypingIndicator";
-import { useStickToBottomScroll } from "./useStickToBottomScroll";
+import { stickToBottomIfNear } from "./useStickToBottomScroll";
 import {
   toneArchetypeOptions,
   toneLinkSlots
@@ -36,7 +36,10 @@ export function ToneSetupBody({
     builderState,
     errorMessage
   } = toneState;
-  const interviewMessagesRef = useStickToBottomScroll<HTMLDivElement>([interviewMessages, interviewState, interviewDraft]);
+  const interviewMessagesRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    stickToBottomIfNear(interviewMessagesRef.current);
+  }, [interviewMessages, interviewState, interviewDraft]);
 
   return (
     <div className="tone-setup-body">
