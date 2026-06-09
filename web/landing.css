@@ -284,11 +284,14 @@ body {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 0;
-  border: 1px solid var(--line-ink);
-  background: var(--line-ink);
+  border-top: 1px solid var(--line-ink);
+  border-left: 1px solid var(--line-ink);
+  background: transparent;
 }
 .feature {
   background: var(--paper-white);
+  border-right: 1px solid var(--line-ink);
+  border-bottom: 1px solid var(--line-ink);
   padding: 30px 28px 34px;
   display: flex;
   flex-direction: column;
