@@ -858,9 +858,16 @@ button {
   color: var(--accent-ink);
 }
 
-.primary-button:hover {
+.primary-button:hover:not(:disabled) {
   box-shadow: var(--hard-shadow);
   transform: translate(6px, -6px);
+}
+
+.tone-interview-composer .primary-button:hover:not(:disabled),
+.skill-composer-actions .primary-button:hover:not(:disabled) {
+  transform: none;
+  box-shadow: none;
+  filter: brightness(1.05);
 }
 
 .primary-button:active {
@@ -3334,6 +3341,12 @@ select:focus,
 
 .tone-interview-composer .primary-button {
   justify-self: end;
+}
+
+.first-run-agent-intro {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
 }
 
 .tone-link-list {

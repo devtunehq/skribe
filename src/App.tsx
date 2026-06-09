@@ -135,7 +135,9 @@ import {
   diffViewModeOptions,
   documentFontOptions
 } from "./settingsOptions";
+import { FirstRunAgentDialog } from "./FirstRunAgentDialog";
 import { ToneSetupDialog } from "./ToneSetupDialog";
+import { useStickToBottomScroll } from "./useStickToBottomScroll";
 import type {
   AgentSession,
   AgentRuntimeConfig,
@@ -827,6 +829,7 @@ function useSkribeController() {
     appSettings,
     settingsDraft,
     isSettingsOpen,
+    firstRunStep,
     toneSetupInvocation,
     settingsSaveState,
     revisionState,
@@ -863,6 +866,7 @@ function useSkribeController() {
     setAppSettings,
     setSettingsDraft,
     setIsSettingsOpen,
+    setFirstRunStep,
     setToneSetupInvocation,
     setSettingsSaveState,
     setRevisionState,
@@ -971,7 +975,7 @@ function useSkribeController() {
         setAgentSkills(skills);
         setAgentRuntimeConfig(runtimeConfig);
         setAgentModelDraft(agentModelDraftFromConfiguredModel(runtimeConfig.configuredModel));
-        if (!loadedSettings.toneOfVoiceSetupComplete) setToneSetupInvocation("first-run");
+        if (!loadedSettings.toneOfVoiceSetupComplete) setFirstRunStep("agent");
         setSaveState("saved");
       })
       .catch(() => setSaveState("error"));
@@ -987,8 +991,8 @@ function useSkribeController() {
     setNewThreadSkillIds,
     setRevisionState,
     setSaveState,
-    setSettingsDraft,
-    setToneSetupInvocation
+    setFirstRunStep,
+    setSettingsDraft
   ]);
 
   useEffect(() => {
@@ -1157,6 +1161,7 @@ function useSkribeController() {
       toneOfVoiceSetupComplete: true
     });
     await persistSettings(nextSettings);
+    setFirstRunStep(null);
     setToneSetupInvocation(null);
   }
 
@@ -1165,8 +1170,24 @@ function useSkribeController() {
       ...toneSettingsBase(),
       toneOfVoiceSetupComplete: true
     });
+    setFirstRunStep(null);
     setToneSetupInvocation(null);
     await persistSettings(nextSettings);
+  }
+
+  function beginFirstRunToneSetup() {
+    setFirstRunStep("tone");
+    setToneSetupInvocation("first-run");
+  }
+
+  async function continueFirstRunAgentSetup() {
+    await persistSettings(settingsDraft);
+    beginFirstRunToneSetup();
+  }
+
+  function skipFirstRunAgentSetup() {
+    setSettingsDraft(appSettings);
+    beginFirstRunToneSetup();
   }
 
   function updatePanelState(patch: Partial<AppSettings["panelState"]>) {
@@ -3121,6 +3142,7 @@ function useSkribeController() {
     appSettings,
     settingsDraft,
     isSettingsOpen,
+    firstRunStep,
     toneSetupInvocation,
     settingsSaveState,
     revisionState,
@@ -3226,6 +3248,8 @@ function useSkribeController() {
     toneSettingsBase,
     saveToneOfVoiceSetup,
     skipToneOfVoiceSetup,
+    continueFirstRunAgentSetup,
+    skipFirstRunAgentSetup,
     updatePanelState,
     restoreRevision,
     updateActiveBlockShape,
@@ -4052,6 +4076,7 @@ function SkribeOverlays() {
     linkPopover,
     linkRangeRef,
     linkTargetRef,
+    firstRunStep,
     providerOptions,
     resolvedRuntime,
     selectionContextMenu,
@@ -4062,6 +4087,7 @@ function SkribeOverlays() {
     applyInlineCommand,
     applyLink,
     cancelSettingsDialog,
+    continueFirstRunAgentSetup,
     copyActiveSelectionToClipboard,
     cutActiveSelectionToClipboard,
     openLinkPopover,
@@ -4072,6 +4098,7 @@ function SkribeOverlays() {
     setLinkPopover,
     setSelectionContextMenu,
     setToneSetupInvocation,
+    skipFirstRunAgentSetup,
     skipToneOfVoiceSetup,
     startCommentFromSelection,
     toneSettingsBase,
@@ -4126,6 +4153,17 @@ function SkribeOverlays() {
           onOpenToneSetup={() => setToneSetupInvocation("settings")}
           onSave={saveSettingsDraft}
           onCancel={cancelSettingsDialog}
+        />
+      ) : null}
+
+      {firstRunStep === "agent" ? (
+        <FirstRunAgentDialog
+          settings={settingsDraft}
+          runtimeOptions={providerOptions}
+          resolvedRuntime={resolvedRuntime}
+          onChange={updateSettingsDraft}
+          onContinue={continueFirstRunAgentSetup}
+          onSkip={skipFirstRunAgentSetup}
         />
       ) : null}
 
@@ -5851,6 +5889,7 @@ function ChatPanel({
   onRequestProposalRevision
 }: ChatPanelProps) {
   const isAgentWorkingInChat = agentSession?.status === "running" && agentSession.activeTurn?.source === "chat";
+  const chatStackRef = useStickToBottomScroll<HTMLDivElement>([messages, proposals, isAgentWorkingInChat]);
   const openProposals = proposals
     .filter((proposal) => proposal.status === "open" || proposal.status === "reviewed")
     .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
@@ -5863,7 +5902,7 @@ function ChatPanel({
   ).length;
   return (
     <div className="panel-body chat-panel">
-      <div className="message-stack chat-stack">
+      <div className="message-stack chat-stack" ref={chatStackRef}>
         <section className="memory-card">
           <div className="memory-card-header">
             <span>Context memory</span>

@@ -809,6 +809,8 @@ test("first-run tone setup uses a native dialog and can be skipped", async (t) =
 
   try {
     await navigate(browser.cdp, server.baseUrl);
+    await waitFor(browser.cdp, "Boolean(document.querySelector('dialog.first-run-agent-backdrop[open]'))");
+    assert.equal(await clickButtonByText(browser.cdp, ".first-run-agent-dialog .settings-dialog-actions", "Skip"), true);
     await waitFor(browser.cdp, "Boolean(document.querySelector('dialog.tone-setup-backdrop[open]'))");
     assert.equal(
       await evaluate(browser.cdp, "document.querySelector('dialog.tone-setup-backdrop')?.getAttribute('aria-labelledby')"),

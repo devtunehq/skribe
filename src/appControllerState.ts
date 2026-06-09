@@ -11,6 +11,7 @@ import type {
 export type PanelMode = "threads" | "chat";
 export type SaveState = "loading" | "saved" | "saving" | "error";
 export type ToneSetupInvocation = "first-run" | "settings";
+export type FirstRunStep = "agent" | "tone";
 
 export type FloatingToolbarState = {
   left: number;
@@ -34,6 +35,7 @@ export interface AppControllerState {
   appSettings: AppSettings;
   settingsDraft: AppSettings;
   isSettingsOpen: boolean;
+  firstRunStep: FirstRunStep | null;
   toneSetupInvocation: ToneSetupInvocation | null;
   settingsSaveState: SaveState;
   revisionState: RevisionState;
@@ -78,6 +80,7 @@ export function createAppControllerState(defaultSettings: AppSettings): AppContr
     appSettings: defaultSettings,
     settingsDraft: defaultSettings,
     isSettingsOpen: false,
+    firstRunStep: null,
     toneSetupInvocation: null,
     settingsSaveState: "saved",
     revisionState: { revisions: [], currentRevisionId: null },
@@ -147,6 +150,7 @@ export function createAppControllerSetters(dispatch: Dispatch<AppControllerActio
     setAppSettings: controllerSetter(dispatch, "appSettings"),
     setSettingsDraft: controllerSetter(dispatch, "settingsDraft"),
     setIsSettingsOpen: controllerSetter(dispatch, "isSettingsOpen"),
+    setFirstRunStep: controllerSetter(dispatch, "firstRunStep"),
     setToneSetupInvocation: controllerSetter(dispatch, "toneSetupInvocation"),
     setSettingsSaveState: controllerSetter(dispatch, "settingsSaveState"),
     setRevisionState: controllerSetter(dispatch, "revisionState"),

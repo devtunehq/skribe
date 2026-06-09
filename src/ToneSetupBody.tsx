@@ -1,6 +1,7 @@
 import { RotateCcw, Send, Sparkles } from "lucide-react";
 import type { Dispatch } from "react";
 import { AgentTypingIndicator } from "./AgentTypingIndicator";
+import { useStickToBottomScroll } from "./useStickToBottomScroll";
 import {
   toneArchetypeOptions,
   toneLinkSlots
@@ -35,6 +36,7 @@ export function ToneSetupBody({
     builderState,
     errorMessage
   } = toneState;
+  const interviewMessagesRef = useStickToBottomScroll<HTMLDivElement>([interviewMessages, interviewState, interviewDraft]);
 
   return (
     <div className="tone-setup-body">
@@ -59,7 +61,7 @@ export function ToneSetupBody({
               Start over
             </button>
           </div>
-          <div className="tone-interview-messages" aria-live="polite">
+          <div className="tone-interview-messages" ref={interviewMessagesRef} aria-live="polite">
             {interviewMessages.map((message, index) => (
               <article key={`${message.role}-${index}`} className={`tone-interview-message is-${message.role}`}>
                 <strong>{message.role === "agent" ? "Skribe" : "You"}</strong>

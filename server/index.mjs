@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { cp, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
@@ -34,7 +34,8 @@ const host = "127.0.0.1";
 const appUrl = `http://${host}:${port}`;
 const skillRegistryTtlMs = 30000;
 const runtimeRegistryTtlMs = 30000;
-const cliInvocation = parseCliInvocation(process.argv.slice(2));
+const { argv: cliArgv, noOpenBrowser } = stripGlobalFlags(process.argv.slice(2));
+const cliInvocation = parseCliInvocation(cliArgv);
 const requestedMarkdownArg = requestedDocumentPath();
 let activeDocument = resolveActiveDocument(requestedMarkdownArg);
 
@@ -155,13 +156,49 @@ async function ensureAppStorage() {
   }
 }
 
+function userWorkingDirectory() {
+  return process.env.INIT_CWD || process.cwd();
+}
+
+function resolveUserPath(pathArg) {
+  if (!pathArg) return pathArg;
+  return resolve(userWorkingDirectory(), pathArg);
+}
+
+function stripGlobalFlags(argv) {
+  const args = [...argv];
+  let noOpenBrowser = false;
+  const filtered = args.filter((arg) => {
+    if (arg === "--no-open") {
+      noOpenBrowser = true;
+      return false;
+    }
+    return true;
+  });
+  return { argv: filtered, noOpenBrowser };
+}
+
+function assertExternalDocumentExists() {
+  if (activeDocument.source !== "external") return;
+  if (existsSync(activeDocument.markdownPath)) return;
+
+  console.error(`Document not found: ${activeDocument.markdownPath}`);
+  if (requestedMarkdownArg && !requestedMarkdownArg.startsWith("/")) {
+    console.error(`Relative paths resolve from: ${userWorkingDirectory()}`);
+  }
+  process.exit(1);
+}
+
 async function ensureDocumentFiles() {
   await mkdir(activeDocument.docDir, { recursive: true });
   await mkdir(activeDocument.snapshotsDir, { recursive: true });
   await mkdir(activeDocument.assetsDir, { recursive: true });
-  await mkdir(dirname(activeDocument.markdownPath), { recursive: true });
 
   if (!existsSync(activeDocument.markdownPath)) {
+    if (activeDocument.source === "external") {
+      assertExternalDocumentExists();
+    }
+    await mkdir(dirname(activeDocument.markdownPath), { recursive: true });
     const markdown =
       activeDocument.source === "internal" && existsSync(legacyDraftPath)
         ? await readFile(legacyDraftPath, "utf8")
@@ -447,7 +484,7 @@ function resolveActiveDocument(markdownArg) {
     });
   }
 
-  const markdownPath = resolve(process.cwd(), markdownArg);
+  const markdownPath = resolveUserPath(markdownArg);
   return buildDocumentPaths({
     id: `file_${hashString(markdownPath)}`,
     source: "external",
@@ -461,8 +498,8 @@ async function handOffToExistingServer(markdownArg) {
   if (!isSkribeHealthResponse(health.payload)) return false;
 
   if (!markdownArg) {
-    console.log(`Skribe is already running at ${appUrl}`);
     if (health.payload.markdownPath) console.log(`Document: ${health.payload.markdownPath}`);
+    console.log(`Open Skribe in your browser: ${appUrl}`);
     return true;
   }
 
@@ -480,8 +517,8 @@ async function handOffToExistingServer(markdownArg) {
   }
 
   const document = response.payload?.document;
-  console.log(`Skribe is already running at ${appUrl}`);
   console.log(`Opened: ${document?.fileInfo?.markdownPath || activeDocument.markdownPath}`);
+  console.log(`Open Skribe in your browser: ${appUrl}`);
   return true;
 }
 
@@ -528,13 +565,45 @@ Utility:
   skribe export [file.md]       Print clean Markdown from a running app or file
   skribe export --out out.md    Write exported Markdown to a file
 
+Options:
+  --no-open                     Do not open the app URL in your browser on startup
+
 Environment:
   PORT                          Local server port, default 4327
+  SKRIBE_NO_OPEN_BROWSER=1      Do not open the app URL in your browser on startup
   SKRIBE_CONFIG_DIR             Settings and local app state directory
   SKRIBE_DATA_DIR               Document sidecar and internal document data directory
   SKRIBE_AGENT_RUNTIME          auto, codex, claude, or stub
   SKRIBE_AGENT_RUNTIME_PRIORITY Runtime order for auto, default codex,claude
   SKRIBE_SKILL_ROOTS            Extra colon-separated skill directories`);
+}
+
+function shouldOpenBrowser() {
+  if (noOpenBrowser) return false;
+  if (process.env.SKRIBE_NO_OPEN_BROWSER === "1") return false;
+  return true;
+}
+
+function openBrowser(url) {
+  if (!shouldOpenBrowser()) return;
+
+  const platform = process.platform;
+  const command = platform === "darwin" ? "open" : platform === "win32" ? "cmd" : "xdg-open";
+  const args = platform === "win32" ? ["/c", "start", "", url] : [url];
+  execFile(command, args, { detached: true, stdio: "ignore" }, (error) => {
+    if (error) {
+      console.error(`Could not open browser automatically. Open ${url} manually.`);
+    }
+  });
+}
+
+function printStartupSummary() {
+  console.log(`Document: ${activeDocument.markdownPath}`);
+  console.log(`Review state: ${activeDocument.docDir}`);
+  console.log(`Agent runtime: ${getDocument().agentSession.configuredRuntime}`);
+  console.log(`Agent model: ${getDocument().agentSession.configuredModel}`);
+  console.log("");
+  console.log(`Open Skribe in your browser: ${appUrl}`);
 }
 
 function formatRuntimeStatus(runtime) {
@@ -642,7 +711,7 @@ async function exportMarkdownFromCli(args) {
   if (runningExport !== null && !cliInvocation.markdownPath) {
     markdown = runningExport;
   } else if (cliInvocation.markdownPath) {
-    const markdownPath = resolve(process.cwd(), cliInvocation.markdownPath);
+    const markdownPath = resolveUserPath(cliInvocation.markdownPath);
     markdown = await readFile(markdownPath, "utf8");
   } else {
     console.error(`No running Skribe server found at ${appUrl}, and no Markdown file was provided.`);
@@ -651,8 +720,9 @@ async function exportMarkdownFromCli(args) {
   }
 
   if (outPath) {
-    await writeFile(resolve(process.cwd(), outPath), markdown, "utf8");
-    console.log(`Exported Markdown to ${resolve(process.cwd(), outPath)}`);
+    const resolvedOutPath = resolveUserPath(outPath);
+    await writeFile(resolvedOutPath, markdown, "utf8");
+    console.log(`Exported Markdown to ${resolvedOutPath}`);
   } else {
     process.stdout.write(markdown);
   }
@@ -1218,6 +1288,7 @@ async function agentRuntimeConfigResponse() {
 async function loadDocumentIntoMemory() {
   await ensureAppStorage();
   settingsMemory = normalizeAppSettings(await readJson(settingsPath, defaultSettings));
+  assertExternalDocumentExists();
   await ensureDocumentFiles();
   const [markdown, review, agentSession, draftStat, reviewStat] = await Promise.all([
     readFile(activeDocument.markdownPath, "utf8"),
@@ -3408,8 +3479,6 @@ try {
   throw error;
 }
 
-console.log(`Skribe running at ${appUrl}`);
-console.log(`Document: ${activeDocument.markdownPath}`);
-console.log(`Review state: ${activeDocument.docDir}`);
-console.log(`Agent runtime: ${getDocument().agentSession.configuredRuntime}`);
-console.log(`Agent model: ${getDocument().agentSession.configuredModel}`);
+console.log("Skribe is running.");
+printStartupSummary();
+openBrowser(appUrl);

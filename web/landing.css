@@ -279,7 +279,7 @@ body {
 .window img { display: block; width: 100%; height: auto; }
 
 /* ============ FEATURES ============ */
-.section { padding: clamp(48px, 7vw, 96px) 0; }
+.section { padding-block: clamp(48px, 7vw, 96px); }
 .features-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

@@ -7,10 +7,15 @@ const binDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(binDir, "..");
 const serverPath = resolve(projectRoot, "server", "index.mjs");
 const args = process.argv.slice(2);
+const invokerCwd = process.env.INIT_CWD || process.cwd();
 
 const child = spawn(process.execPath, [serverPath, ...args], {
-  cwd: projectRoot,
-  stdio: "inherit"
+  cwd: invokerCwd,
+  stdio: "inherit",
+  env: {
+    ...process.env,
+    INIT_CWD: invokerCwd
+  }
 });
 
 child.on("exit", (code, signal) => {
