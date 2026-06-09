@@ -137,6 +137,35 @@ skribe ~/draft.md
 
 Skribe starts a local server and prints the browser URL.
 
+## CLI Commands
+
+Common commands:
+
+```bash
+skribe [file.md]              # open a Markdown file or the default local draft
+skribe open [file.md]         # same as skribe [file.md]
+skribe --version              # print the installed version
+skribe --help                 # show CLI help
+```
+
+Diagnostics:
+
+```bash
+skribe doctor                 # check storage, build assets, port, runtimes, and skills
+skribe runtimes               # list detected agent CLIs, models, and effort support
+skribe skills                 # list discovered local skills
+skribe config                 # print resolved local paths and defaults
+skribe status                 # show the running local app status
+```
+
+Utility:
+
+```bash
+skribe export                 # print clean Markdown from the running app
+skribe export ~/draft.md      # print a Markdown file
+skribe export --out clean.md  # write exported Markdown to a file
+```
+
 ## Opening Multiple Documents
 
 Skribe runs one local app instance and keeps one document open at a time.
@@ -228,6 +257,8 @@ Supported runtime values:
 - `codex` - use Codex CLI
 - `claude` - use Claude Code
 - `stub` - deterministic local responses for development and tests
+
+If neither Codex CLI nor Claude Code is detected, Skribe still works as a local Markdown editor with threads, revisions, settings, and export. Agent chat and comment replies are disabled until a supported local CLI is installed and signed in. Run `skribe doctor` or `skribe runtimes` to see what Skribe can detect.
 
 Useful environment variables:
 

@@ -715,6 +715,11 @@ button {
   color: var(--danger);
 }
 
+.agent-config-shell.is-unavailable .agent-config-button {
+  border-color: var(--coral-red);
+  background: color-mix(in srgb, var(--coral-red) 8%, var(--paper-white));
+}
+
 .agent-config-popover {
   position: absolute;
   top: calc(100% + 8px);
@@ -745,6 +750,23 @@ button {
   font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
+}
+
+.agent-runtime-warning,
+.agent-unavailable-note {
+  margin: 0;
+  border: 1px solid color-mix(in srgb, var(--coral-red) 55%, var(--line));
+  background: color-mix(in srgb, var(--coral-red) 8%, var(--paper-white));
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.agent-runtime-warning code,
+.agent-unavailable-note code {
+  font-size: 11px;
 }
 
 .save-pill,

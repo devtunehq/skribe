@@ -3082,6 +3082,8 @@ function useSkribeController() {
   const configuredEffort = currentConfiguredEffort();
   const runtimeOptions = agentRuntimeConfig?.runtimes ?? [];
   const providerOptions = runtimeOptions.filter((runtime) => runtime.id !== "stub");
+  const hasAvailableAgentRuntime = providerOptions.some((runtime) => runtime.available);
+  const agentRuntimeUnavailable = Boolean(agentRuntimeConfig && providerOptions.length > 0 && !hasAvailableAgentRuntime);
   const providerSelectValue = providerOptions.some((runtime) => runtime.id === configuredRuntime)
     ? configuredRuntime
     : providerOptions.some((runtime) => runtime.id === resolvedRuntime)
@@ -3099,8 +3101,10 @@ function useSkribeController() {
     ? `${selectedRuntimeStatus.label}${selectedRuntimeStatus.version ? ` ${selectedRuntimeStatus.version}` : ""}${
         selectedRuntimeStatus.notes.length > 0 ? `: ${selectedRuntimeStatus.notes.join(" ")}` : ""
       }`
-    : "Agent runtime";
-  const selectedRuntimeLabel = selectedRuntimeStatus?.label ?? resolvedRuntime ?? "Agent";
+    : agentRuntimeUnavailable
+      ? "No supported agent runtime detected. Install or sign in to Codex CLI or Claude Code, then check runtimes in Settings."
+      : "Agent runtime";
+  const selectedRuntimeLabel = agentRuntimeUnavailable ? "No agent CLI" : selectedRuntimeStatus?.label ?? resolvedRuntime ?? "Agent";
   const selectedModelOption = modelOptions.find((model) => model.id === configuredModel);
   const selectedModelLabel = configuredModel === "auto" ? "Default model" : selectedModelOption?.label ?? configuredModel;
   const selectedEffortOption = effortOptions.find((level) => level.id === configuredEffort);
@@ -3147,6 +3151,7 @@ function useSkribeController() {
     lastCopied,
     blockResetKeys,
     agentSession,
+    agentRuntimeUnavailable,
     canvasRef,
     fileInputRef,
     imageInputRef,
@@ -3431,6 +3436,7 @@ function AgentConfigControl() {
     agentConfigDisabled,
     agentModelDraft,
     agentRuntimeTitle,
+    agentRuntimeUnavailable,
     agentSession,
     agentStatusLabel,
     configuredModel,
@@ -3457,7 +3463,7 @@ function AgentConfigControl() {
   } = useSkribeControllerContext();
 
   return (
-    <div className={`agent-config-shell ${isAgentConfigOpen ? "is-open" : ""}`}>
+    <div className={`agent-config-shell ${isAgentConfigOpen ? "is-open" : ""} ${agentRuntimeUnavailable ? "is-unavailable" : ""}`}>
       <button
         type="button"
         className={`agent-config-button is-${agentSession?.status ?? "idle"}`}
@@ -3490,6 +3496,7 @@ function AgentConfigControl() {
                 disabled={agentConfigDisabled}
                 aria-label="Agent runtime"
               >
+                {providerSelectValue ? null : <option value="">No runtime detected</option>}
                 {providerOptions.map((runtime) => (
                   <option key={runtime.id} value={runtime.id} disabled={!runtime.available}>
                     {runtime.label}{runtime.available ? "" : " unavailable"}
@@ -3594,6 +3601,11 @@ function AgentConfigControl() {
                 </select>
               </label>
             </div>
+          ) : null}
+          {agentRuntimeUnavailable ? (
+            <p className="agent-runtime-warning">
+              No agent CLI detected. Install or sign in to Codex CLI or Claude Code, then run <code>skribe doctor</code>.
+            </p>
           ) : null}
         </div>
       ) : null}
@@ -3855,6 +3867,7 @@ function RightPanel() {
   const {
     activeThread,
     activeThreadId,
+    agentRuntimeUnavailable,
     agentSession,
     agentSkills,
     appSettings,
@@ -3938,6 +3951,7 @@ function RightPanel() {
             threadSkillIds={threadSkillIds}
             defaultSkillIds={appSettings.defaultSkills}
             humanLabel={humanLabel}
+            agentRuntimeUnavailable={agentRuntimeUnavailable}
             showResolvedThreads={showResolvedThreads}
             resolvedThreadCount={resolvedThreadCount}
             onSetNewComment={setNewComment}
@@ -3976,6 +3990,7 @@ function RightPanel() {
             selectedSkillIds={chatSkillIds}
             diffViewMode={appSettings.diffViewMode}
             humanLabel={humanLabel}
+            agentRuntimeUnavailable={agentRuntimeUnavailable}
             onSetChatDraft={setChatDraft}
             onSetSelectedSkillIds={setChatSkillIds}
             onSend={addChatMessage}
@@ -4232,7 +4247,9 @@ function SkillComposer({
   rows,
   submitLabel,
   submitIcon,
-  onSubmit
+  onSubmit,
+  disabled = false,
+  disabledReason
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -4245,6 +4262,8 @@ function SkillComposer({
   submitLabel: string;
   submitIcon: React.ReactNode;
   onSubmit: () => void;
+  disabled?: boolean;
+  disabledReason?: string;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [cursor, setCursor] = useState(0);
@@ -4306,6 +4325,7 @@ function SkillComposer({
 
   return (
     <div className="skill-composer">
+      {disabled && disabledReason ? <p className="agent-unavailable-note">{disabledReason}</p> : null}
       {selectedSkills.length > 0 ? (
         <div className="skill-chip-row" aria-label="Selected agent skills">
           {selectedSkills.map((skill) => (
@@ -4359,6 +4379,7 @@ function SkillComposer({
           rows={rows}
           placeholder={placeholder}
           aria-label={ariaLabel}
+          disabled={disabled}
         />
 
         {autocompleteOptions.length > 0 && slashCommand ? (
@@ -4444,7 +4465,7 @@ function SkillComposer({
           <Sparkles size={14} />
           Skills
         </button>
-        <button type="button" className="primary-button" onClick={onSubmit}>
+        <button type="button" className="primary-button" onClick={onSubmit} disabled={disabled}>
           {submitIcon}
           {submitLabel}
         </button>
@@ -5270,6 +5291,7 @@ interface ThreadPanelProps {
   threadSkillIds: Record<string, string[]>;
   defaultSkillIds: string[];
   humanLabel: string;
+  agentRuntimeUnavailable: boolean;
   showResolvedThreads: boolean;
   resolvedThreadCount: number;
   onSetNewComment: (value: string) => void;
@@ -5301,6 +5323,7 @@ function ThreadPanel(props: ThreadPanelProps) {
     threadSkillIds,
     defaultSkillIds,
     humanLabel,
+    agentRuntimeUnavailable,
     showResolvedThreads,
     resolvedThreadCount,
     onSetNewComment,
@@ -5342,6 +5365,8 @@ function ThreadPanel(props: ThreadPanelProps) {
             submitLabel="Add thread"
             submitIcon={<MessageSquare size={15} />}
             onSubmit={onAddThread}
+            disabled={agentRuntimeUnavailable}
+            disabledReason="No agent CLI detected. Install or sign in to Codex CLI or Claude Code, then run skribe doctor."
           />
           <div className="button-row">
             <button type="button" className="ghost-button" onClick={onClearSelection}>
@@ -5405,8 +5430,9 @@ function ThreadPanel(props: ThreadPanelProps) {
             <div className="thread-actions">
               <button type="button"
                 className="secondary-button small"
-                disabled={isAgentWorkingForActiveThread}
+                disabled={isAgentWorkingForActiveThread || agentRuntimeUnavailable}
                 onClick={() => onRequestAgentReply(activeThread.id)}
+                title={agentRuntimeUnavailable ? "No agent CLI detected. Run skribe doctor." : undefined}
               >
                 <Sparkles size={14} />
                 Ask agent
@@ -5507,6 +5533,8 @@ function ThreadPanel(props: ThreadPanelProps) {
               submitLabel="Reply"
               submitIcon={<Send size={15} />}
               onSubmit={() => onAddMessage(activeThread.id)}
+              disabled={agentRuntimeUnavailable}
+              disabledReason="No agent CLI detected. Install or sign in to Codex CLI or Claude Code, then run skribe doctor."
             />
           </div>
 
@@ -5757,6 +5785,7 @@ interface ChatPanelProps {
   selectedSkillIds: string[];
   diffViewMode: SupportedDiffViewMode;
   humanLabel: string;
+  agentRuntimeUnavailable: boolean;
   onSetChatDraft: (value: string) => void;
   onSetSelectedSkillIds: (value: string[]) => void;
   onSend: () => void;
@@ -5775,6 +5804,7 @@ function ChatPanel({
   selectedSkillIds,
   diffViewMode,
   humanLabel,
+  agentRuntimeUnavailable,
   onSetChatDraft,
   onSetSelectedSkillIds,
   onSend,
@@ -5864,6 +5894,8 @@ function ChatPanel({
           submitLabel="Send"
           submitIcon={<Send size={15} />}
           onSubmit={onSend}
+          disabled={agentRuntimeUnavailable}
+          disabledReason="No agent CLI detected. Install or sign in to Codex CLI or Claude Code, then run skribe doctor."
         />
       </div>
     </div>

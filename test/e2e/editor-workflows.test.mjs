@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -25,7 +28,7 @@ async function withApp(t, markdown, callback, options = {}) {
   if (!browser) return;
 
   const { rootDir, markdownPath } = await makeMarkdownDoc(options.name ?? "draft.md", markdown);
-  const server = await startSkribeServer(markdownPath);
+  const server = await startSkribeServer(markdownPath, { env: options.env });
 
   try {
     const baseSettings = await disableToneSetup(server.baseUrl);
@@ -583,6 +586,45 @@ test("user name setting labels human-authored chat UI", async (t) => {
       }
     }
   );
+});
+
+test("agent composers explain when no local agent runtime is detected", async (t) => {
+  const emptyPathDir = await mkdtemp(join(tmpdir(), "skribe-empty-path-"));
+  try {
+    await symlink(process.execPath, join(emptyPathDir, "node"));
+    await withApp(
+      t,
+      "# Draft\n\nBody.\n",
+      async ({ browser }) => {
+        await waitFor(browser.cdp, "Boolean(document.querySelector('.agent-config-shell.is-unavailable'))");
+        assert.match(
+          await evaluate(browser.cdp, "document.querySelector('.agent-config-button strong')?.textContent || ''"),
+          /No agent CLI/i
+        );
+        await evaluate(
+          browser.cdp,
+          `Array.from(document.querySelectorAll('.panel-tabs button')).find((button) => button.textContent.includes('Chat'))?.click()`
+        );
+        await waitFor(browser.cdp, "Boolean(document.querySelector('.chat-composer textarea'))");
+        assert.equal(
+          await evaluate(browser.cdp, "document.querySelector('.chat-composer textarea')?.disabled === true"),
+          true
+        );
+        assert.match(
+          await evaluate(browser.cdp, "document.querySelector('.agent-unavailable-note')?.textContent || ''"),
+          /skribe doctor/
+        );
+      },
+      {
+        env: {
+          PATH: emptyPathDir,
+          SKRIBE_AGENT_RUNTIME: "auto"
+        }
+      }
+    );
+  } finally {
+    await removeTempDir(emptyPathDir);
+  }
 });
 
 test("accepting an inline proposal block hides it and preserves unrelated manual edits", async (t) => {

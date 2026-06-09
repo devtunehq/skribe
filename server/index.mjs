@@ -34,6 +34,7 @@ const host = "127.0.0.1";
 const appUrl = `http://${host}:${port}`;
 const skillRegistryTtlMs = 30000;
 const runtimeRegistryTtlMs = 30000;
+const cliInvocation = parseCliInvocation(process.argv.slice(2));
 const requestedMarkdownArg = requestedDocumentPath();
 let activeDocument = resolveActiveDocument(requestedMarkdownArg);
 
@@ -349,7 +350,52 @@ function sessionWithAgentSettings(session, settings = getSettings()) {
 function requestedDocumentPath() {
   const envPath = process.env.SKRIBE_DOCUMENT || process.env.SKRIBE_DOCUMENT_PATH;
   if (envPath) return envPath;
-  return process.argv.slice(2).find((arg) => arg && !arg.startsWith("-")) ?? null;
+  return cliInvocation.markdownPath;
+}
+
+function parseCliInvocation(argv) {
+  const args = [...argv];
+  const first = args[0] || "";
+  const commandNames = new Set(["doctor", "runtimes", "skills", "config", "status", "export", "open"]);
+  const flagCommands = new Map([
+    ["--version", "version"],
+    ["-v", "version"],
+    ["--help", "help"],
+    ["-h", "help"]
+  ]);
+
+  if (flagCommands.has(first)) {
+    return { command: flagCommands.get(first), args: args.slice(1), markdownPath: null };
+  }
+
+  if (commandNames.has(first)) {
+    const command = first;
+    const rest = args.slice(1);
+    return {
+      command: command === "open" ? null : command,
+      args: rest,
+      markdownPath: firstNonOptionValue(rest, new Set(["--out", "-o"])) ?? null
+    };
+  }
+
+  return {
+    command: null,
+    args,
+    markdownPath: firstNonOptionValue(args) ?? null
+  };
+}
+
+function firstNonOptionValue(args, valueTakingOptions = new Set()) {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) continue;
+    if (valueTakingOptions.has(arg)) {
+      index += 1;
+      continue;
+    }
+    if (!arg.startsWith("-")) return arg;
+  }
+  return null;
 }
 
 function hashString(value) {
@@ -454,6 +500,192 @@ async function requestExistingServer(path, options = {}) {
     return { ok: false, status: 0, payload: null };
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+async function readPackageVersion() {
+  const packageJson = await readJson(join(root, "package.json"), {});
+  return typeof packageJson.version === "string" ? packageJson.version : "0.0.0";
+}
+
+function printCliHelp() {
+  console.log(`Skribe - local-first Markdown writing with an AI review partner.
+
+Usage:
+  skribe [file.md]              Open a Markdown file, or the default local draft
+  skribe open [file.md]         Same as skribe [file.md]
+  skribe --version, -v          Print the installed version
+  skribe --help, -h             Show this help
+
+Diagnostics:
+  skribe doctor                 Check storage, build assets, port, runtimes, and skills
+  skribe runtimes               List detected agent CLI runtimes and models
+  skribe skills                 List discovered local agent skills
+  skribe config                 Print effective local paths and defaults
+  skribe status                 Show the running local app status, if any
+
+Utility:
+  skribe export [file.md]       Print clean Markdown from a running app or file
+  skribe export --out out.md    Write exported Markdown to a file
+
+Environment:
+  PORT                          Local server port, default 4327
+  SKRIBE_CONFIG_DIR             Settings and local app state directory
+  SKRIBE_DATA_DIR               Document sidecar and internal document data directory
+  SKRIBE_AGENT_RUNTIME          auto, codex, claude, or stub
+  SKRIBE_AGENT_RUNTIME_PRIORITY Runtime order for auto, default codex,claude
+  SKRIBE_SKILL_ROOTS            Extra colon-separated skill directories`);
+}
+
+function formatRuntimeStatus(runtime) {
+  const availability = runtime.available ? "available" : "unavailable";
+  const version = runtime.version ? ` ${runtime.version}` : "";
+  const modelCount = runtime.models?.length ? `, ${runtime.models.length} model${runtime.models.length === 1 ? "" : "s"}` : "";
+  const effortCount = runtime.effortLevels?.length
+    ? `, ${runtime.effortLevels.length} effort level${runtime.effortLevels.length === 1 ? "" : "s"}`
+    : "";
+  return `${runtime.label} (${runtime.id}): ${availability}${version}${modelCount}${effortCount}`;
+}
+
+async function printRuntimeReport() {
+  const config = await agentRuntimeConfigResponse();
+  console.log(`Configured runtime: ${config.configuredRuntime}`);
+  console.log(`Resolved runtime: ${config.resolvedRuntime || "none"}`);
+  console.log(`Configured model: ${config.configuredModel}`);
+  console.log(`Configured effort: ${config.configuredEffort}`);
+  console.log("");
+  for (const runtime of config.runtimes.filter((item) => item.id !== "stub")) {
+    console.log(formatRuntimeStatus(runtime));
+    for (const note of runtime.notes || []) console.log(`  - ${note}`);
+    if (runtime.models?.length) {
+      const models = runtime.models.slice(0, 12).map((model) => model.label || model.id).join(", ");
+      const suffix = runtime.models.length > 12 ? `, +${runtime.models.length - 12} more` : "";
+      console.log(`  models: ${models}${suffix}`);
+    }
+    if (runtime.effortLevels?.length) {
+      console.log(`  effort: ${runtime.effortLevels.map((level) => level.label || level.id).join(", ")}`);
+    }
+  }
+}
+
+async function printSkillsReport() {
+  const skills = await discoverAgentSkills();
+  if (skills.length === 0) {
+    console.log("No local skills discovered.");
+    console.log(`Roots checked: ${defaultSkillRoots().join(delimiter)}`);
+    return;
+  }
+
+  console.log(`${skills.length} skill${skills.length === 1 ? "" : "s"} discovered:`);
+  for (const skill of skills) {
+    console.log(`/${skill.id} (${skill.source})${skill.description ? ` - ${skill.description}` : ""}`);
+  }
+}
+
+async function printConfigReport() {
+  await ensureAppStorage();
+  settingsMemory = normalizeAppSettings(await readJson(settingsPath, defaultSettings));
+  const settings = getSettings();
+  console.log(`Config dir: ${appConfigDir}`);
+  console.log(`Data dir: ${dataDir}`);
+  console.log(`Settings: ${settingsPath}`);
+  console.log(`Default document: ${join(docsDir, defaultDocId, "draft.md")}`);
+  console.log(`URL: ${appUrl}`);
+  console.log(`Agent runtime: ${settings.agentRuntime}`);
+  console.log(`Agent model: ${settings.agentModel}`);
+  console.log(`Agent effort: ${settings.agentEffort}`);
+  console.log(`Editor language: ${settings.editorLanguage}`);
+  console.log(`Theme: ${settings.theme}`);
+  console.log(`Document font: ${settings.documentFont}`);
+}
+
+async function printStatusReport() {
+  const health = await requestExistingServer("/api/health");
+  if (!health.ok || !isSkribeHealthResponse(health.payload)) {
+    console.log(`Skribe is not running at ${appUrl}`);
+    return;
+  }
+
+  console.log(`Skribe is running at ${appUrl}`);
+  console.log(`Document: ${health.payload.markdownPath || "unknown"}`);
+  console.log(`Agent status: ${health.payload.agentStatus || "unknown"}`);
+  console.log(`Agent runtime: ${health.payload.runtime || health.payload.configuredRuntime || "unknown"}`);
+  console.log(`Agent model: ${health.payload.model || health.payload.configuredModel || "default"}`);
+}
+
+async function printDoctorReport() {
+  console.log(`Skribe ${await readPackageVersion()}`);
+  console.log(`Node.js ${process.version}`);
+  console.log("");
+  await printConfigReport();
+  console.log("");
+  console.log(existsSync(distDir) ? "Build assets: present" : "Build assets: missing. Run npm run build.");
+  const health = await requestExistingServer("/api/health");
+  console.log(health.ok ? `Server: running at ${appUrl}` : `Server: not running at ${appUrl}`);
+  console.log("");
+  await printRuntimeReport();
+  console.log("");
+  const skills = await discoverAgentSkills();
+  console.log(`Skills: ${skills.length} discovered`);
+}
+
+async function exportMarkdownFromCli(args) {
+  const outIndex = args.findIndex((arg) => arg === "--out" || arg === "-o");
+  const outPath = outIndex >= 0 ? args[outIndex + 1] : null;
+
+  let markdown = "";
+  const runningExport = await fetch(`${appUrl}/api/export.md`).then(
+    async (response) => (response.ok ? await response.text() : null),
+    () => null
+  );
+
+  if (runningExport !== null && !cliInvocation.markdownPath) {
+    markdown = runningExport;
+  } else if (cliInvocation.markdownPath) {
+    const markdownPath = resolve(process.cwd(), cliInvocation.markdownPath);
+    markdown = await readFile(markdownPath, "utf8");
+  } else {
+    console.error(`No running Skribe server found at ${appUrl}, and no Markdown file was provided.`);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (outPath) {
+    await writeFile(resolve(process.cwd(), outPath), markdown, "utf8");
+    console.log(`Exported Markdown to ${resolve(process.cwd(), outPath)}`);
+  } else {
+    process.stdout.write(markdown);
+  }
+}
+
+async function handleCliCommand() {
+  switch (cliInvocation.command) {
+    case "version":
+      console.log(await readPackageVersion());
+      return true;
+    case "help":
+      printCliHelp();
+      return true;
+    case "doctor":
+      await printDoctorReport();
+      return true;
+    case "runtimes":
+      await printRuntimeReport();
+      return true;
+    case "skills":
+      await printSkillsReport();
+      return true;
+    case "config":
+      await printConfigReport();
+      return true;
+    case "status":
+      await printStatusReport();
+      return true;
+    case "export":
+      await exportMarkdownFromCli(cliInvocation.args);
+      return true;
+    default:
+      return false;
   }
 }
 
@@ -3150,6 +3382,10 @@ async function startServer() {
     });
   });
   return server;
+}
+
+if (await handleCliCommand()) {
+  process.exit(process.exitCode ?? 0);
 }
 
 if (await handOffToExistingServer(requestedMarkdownArg)) {
