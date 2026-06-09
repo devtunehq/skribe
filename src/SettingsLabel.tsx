@@ -40,9 +40,9 @@ export function SettingsLabel({
   return (
     <span className="settings-label">
       <span>{label}</span>
-      <span
+      <button
+        type="button"
         className="settings-info"
-        tabIndex={0}
         title={tooltip}
         aria-label={tooltip}
         onMouseOver={(event) => showTooltip(event.currentTarget)}
@@ -52,7 +52,7 @@ export function SettingsLabel({
         onBlur={() => setPosition(null)}
       >
         i
-      </span>
+      </button>
       {position
         ? createPortal(
             <span

@@ -39,7 +39,8 @@
     "test:coverage": "node --experimental-test-coverage --test test/*.test.mjs",
     "test:e2e": "npm run build && node --test test/e2e/*.test.mjs",
     "typecheck": "tsc -b",
-    "doctor": "npx react-doctor@latest"
+    "doctor": "npx react-doctor@latest",
+    "doctor:diff": "npx react-doctor@latest --verbose --diff main"
   },
   "devDependencies": {
     "@pierre/diffs": "^1.2.4",
