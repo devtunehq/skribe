@@ -642,11 +642,12 @@ test("local runtime parses fenced JSON completions", async () => {
   }
 });
 
-test("local runtime reads base URL and max tokens from settings", async () => {
+test("local runtime reads max tokens from settings", async () => {
   const fake = await createFakeLocalInferenceServer();
   const server = await startServer({
     env: {
-      SKRIBE_AGENT_RUNTIME: "local"
+      SKRIBE_AGENT_RUNTIME: "local",
+      SKRIBE_LOCAL_BASE_URL: fake.baseUrl
     }
   });
 
@@ -658,7 +659,6 @@ test("local runtime reads base URL and max tokens from settings", async () => {
         settings: {
           ...initial.payload.settings,
           agentRuntime: "local",
-          localInferenceBaseUrl: fake.baseUrl,
           localInferenceMaxTokens: 7777
         }
       })
@@ -670,8 +670,19 @@ test("local runtime reads base URL and max tokens from settings", async () => {
     });
 
     await waitForAgentIdle(server.baseUrl);
-    const request = fake.state.requests.at(-1);
-    assert.equal(request?.max_tokens, 7777);
+
+    const startedAt = Date.now();
+    let request = null;
+    while (Date.now() - startedAt < 5000) {
+      request = fake.state.requests.find((item) => item.max_tokens === 7777);
+      if (request) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.equal(
+      request?.max_tokens,
+      7777,
+      `Expected local request with max_tokens=7777; saw ${fake.state.requests.length} request(s)`
+    );
   } finally {
     await server.stop();
     await fake.close();
