@@ -2,9 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  AGENT_RUNTIME_UNAVAILABLE_LABEL,
   agentModelDraftFromConfiguredModel,
+  effectiveRuntimeId,
   mergeRuntimeConfigFromSession,
-  modelIsAdvertisedByDifferentRuntime
+  modelIsAdvertisedByDifferentRuntime,
+  providerSelectValue,
+  selectedRuntimeDisplayLabel
 } from "../src/agentRuntimeState.ts";
 
 const runtimeConfig = {
@@ -59,6 +63,41 @@ test("model ownership check only flags models advertised by another runtime", ()
   assert.equal(modelIsAdvertisedByDifferentRuntime("gpt-5-codex", "claude", runtimeConfig.runtimes), true);
   assert.equal(modelIsAdvertisedByDifferentRuntime("unknown-custom-model", "claude", runtimeConfig.runtimes), false);
   assert.equal(modelIsAdvertisedByDifferentRuntime("auto", "claude", runtimeConfig.runtimes), false);
+});
+
+test("provider select value prefers auto and explicit runtime ids", () => {
+  const runtimes = [
+    { id: "codex", available: true, models: [] },
+    { id: "local", available: true, models: [] }
+  ];
+
+  assert.equal(providerSelectValue("auto", "codex", runtimes), "auto");
+  assert.equal(providerSelectValue("local", "codex", runtimes), "local");
+  assert.equal(providerSelectValue("missing", "codex", runtimes), "codex");
+});
+
+test("selected runtime label shows auto with resolved provider", () => {
+  assert.equal(
+    selectedRuntimeDisplayLabel({
+      agentRuntimeUnavailable: false,
+      configuredRuntime: "auto",
+      runtimeLabel: "Codex CLI"
+    }),
+    "Auto (Codex CLI)"
+  );
+  assert.equal(
+    selectedRuntimeDisplayLabel({
+      agentRuntimeUnavailable: true,
+      configuredRuntime: "auto",
+      runtimeLabel: "Codex CLI"
+    }),
+    AGENT_RUNTIME_UNAVAILABLE_LABEL
+  );
+});
+
+test("effective runtime id follows auto resolution", () => {
+  assert.equal(effectiveRuntimeId("auto", "local"), "local");
+  assert.equal(effectiveRuntimeId("claude", "codex"), "claude");
 });
 
 test("runtime config merges live agent session fields without losing detected options", () => {

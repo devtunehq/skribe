@@ -37,13 +37,14 @@ async function startServer(options = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), "skribe-data-"));
   const port = options.port ?? 46000 + Math.floor(Math.random() * 1000);
   const baseUrl = `http://127.0.0.1:${port}`;
-  const child = spawn("node", ["server/index.mjs", ...(options.args ?? [])], {
+  const child = spawn("node", ["server/index.mjs", "--no-open", ...(options.args ?? [])], {
     cwd: root,
     env: {
       ...process.env,
       PORT: String(port),
       SKRIBE_CONFIG_DIR: configDir,
       SKRIBE_DATA_DIR: dataDir,
+      SKRIBE_NO_OPEN_BROWSER: "1",
       SKRIBE_AGENT_RUNTIME: "stub",
       SKRIBE_AGENT_MODEL: "auto",
       SKRIBE_AGENT_EFFORT: "auto",
@@ -77,13 +78,14 @@ async function startServer(options = {}) {
 }
 
 async function runSkribeInvocation({ port, configDir, dataDir, args = [] }) {
-  const child = spawn("node", ["server/index.mjs", ...args], {
+  const child = spawn("node", ["server/index.mjs", "--no-open", ...args], {
     cwd: root,
     env: {
       ...process.env,
       PORT: String(port),
       SKRIBE_CONFIG_DIR: configDir,
       SKRIBE_DATA_DIR: dataDir,
+      SKRIBE_NO_OPEN_BROWSER: "1",
       SKRIBE_AGENT_RUNTIME: "stub",
       SKRIBE_AGENT_MODEL: "auto",
       SKRIBE_AGENT_EFFORT: "auto",
@@ -149,7 +151,10 @@ test("settings API persists all global settings to the config directory", async 
         rightCollapsed: true
       },
       proposalModeDefault: "bold",
-      diffViewMode: "unified"
+      diffViewMode: "unified",
+      localInferenceBaseUrl: "http://127.0.0.1:5999/v1",
+      localInferenceApiKey: "test-key",
+      localInferenceMaxTokens: 8192
     };
 
     const saved = await jsonRequest(server.baseUrl, "/api/settings", {
@@ -175,6 +180,9 @@ test("settings API persists all global settings to the config directory", async 
     assert.deepEqual(saved.payload.settings.panelState, { leftCollapsed: true, rightCollapsed: true });
     assert.equal(saved.payload.settings.proposalModeDefault, "bold");
     assert.equal(saved.payload.settings.diffViewMode, "unified");
+    assert.equal(saved.payload.settings.localInferenceBaseUrl, "http://127.0.0.1:5999/v1");
+    assert.equal(saved.payload.settings.localInferenceApiKey, "test-key");
+    assert.equal(saved.payload.settings.localInferenceMaxTokens, 8192);
 
     const settingsFile = JSON.parse(await readFile(join(server.configDir, "settings.json"), "utf8"));
     assert.equal(settingsFile.userName, "Alex");
@@ -185,6 +193,9 @@ test("settings API persists all global settings to the config directory", async 
     assert.equal(settingsFile.theme, "sage");
     assert.equal(settingsFile.proposalModeDefault, "bold");
     assert.equal(settingsFile.diffViewMode, "unified");
+    assert.equal(settingsFile.localInferenceBaseUrl, "http://127.0.0.1:5999/v1");
+    assert.equal(settingsFile.localInferenceApiKey, "test-key");
+    assert.equal(settingsFile.localInferenceMaxTokens, 8192);
 
     const health = await jsonRequest(server.baseUrl, "/api/health");
     assert.equal(health.response.status, 200);
@@ -231,7 +242,7 @@ test("a second invocation opens another document in the running server", async (
     });
 
     assert.equal(handoff.code, 0);
-    assert.match(handoff.output, /Open Skribe in your browser/);
+    assert.match(handoff.output, /Opened:|Open Skribe in your browser/);
     assert.doesNotMatch(handoff.output, /EADDRINUSE/);
 
     const opened = await jsonRequest(server.baseUrl, "/api/document");

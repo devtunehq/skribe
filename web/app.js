@@ -71,6 +71,9 @@ function Topbar() {
     href: "#surfaces"
   }, "Threads & Chat"), /*#__PURE__*/React.createElement("a", {
     className: "navlink nav-hide-sm",
+    href: "#local-inference"
+  }, "Local inference"), /*#__PURE__*/React.createElement("a", {
+    className: "navlink nav-hide-sm",
     href: "#quickstart"
   }, "Quick start"), /*#__PURE__*/React.createElement(Button, {
     variant: "secondary",
@@ -108,13 +111,13 @@ function Hero() {
     "aria-label": "Copy install command"
   }, copied ? /*#__PURE__*/React.createElement(I.Check, null) : /*#__PURE__*/React.createElement(I.Copy, null), copied ? "Copied" : "Copy")), /*#__PURE__*/React.createElement("p", {
     className: "cta__note"
-  }, "Run without installing. Bring your own AI subscription \u2014 Codex CLI, Claude Code, more to come.", " ", /*#__PURE__*/React.createElement("a", {
+  }, "Run without installing. Bring your own AI — Codex CLI, Claude Code, or any OpenAI-compatible local inference server such as Ollama.", " ", /*#__PURE__*/React.createElement("a", {
     href: REPO,
     target: "_blank",
     rel: "noopener"
   }, "Read the docs \u2192"))), /*#__PURE__*/React.createElement("div", {
     className: "trust"
-  }, /*#__PURE__*/React.createElement(Pill, null, "MIT licensed"), /*#__PURE__*/React.createElement(Pill, null, "Flow mode"), /*#__PURE__*/React.createElement(Pill, null, "Provider-agnostic"), /*#__PURE__*/React.createElement(Pill, null, "Local-only storage")));
+  }, /*#__PURE__*/React.createElement(Pill, null, "MIT licensed"), /*#__PURE__*/React.createElement(Pill, null, "Flow mode"), /*#__PURE__*/React.createElement(Pill, null, "Provider-agnostic"), /*#__PURE__*/React.createElement(Pill, null, "Local inference"), /*#__PURE__*/React.createElement(Pill, null, "Local-only storage")));
 }
 
 /* ---------------- Product shot ---------------- */
@@ -161,6 +164,10 @@ const FEATURES = [{
   title: "Agent skills",
   body: "Reusable /slash writing passes — voice, humanising, copyediting — from any local skill your CLI runtime knows."
 }, {
+  icon: "Server",
+  title: "Local inference",
+  body: "Point Skribe at any OpenAI-compatible /v1 endpoint — Ollama, LM Studio, llama.cpp, vLLM — and configure base URL, model, and max tokens in Settings."
+}, {
   icon: "Disk",
   title: "Stays local",
   body: "The Markdown file, review state, settings and revisions are stored on your machine. Nothing leaves it."
@@ -186,6 +193,45 @@ function Features() {
       className: "feature__icon"
     }, Icon && /*#__PURE__*/React.createElement(Icon, null)), /*#__PURE__*/React.createElement("h3", null, f.title), /*#__PURE__*/React.createElement("p", null, f.body));
   }))));
+}
+
+/* ---------------- Local inference ---------------- */
+function LocalInference() {
+  return /*#__PURE__*/React.createElement("section", {
+    className: "section local-inference",
+    id: "local-inference",
+    style: {
+      background: "var(--canvas-oat)"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "wrap"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "section-head"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "eyebrow"
+  }, "Bring your own model"), /*#__PURE__*/React.createElement("h2", null, "Cloud CLI or local inference"), /*#__PURE__*/React.createElement("p", null, "Skribe talks to Codex CLI and Claude Code when you already have them signed in. Or point it at any OpenAI-compatible ", /*#__PURE__*/React.createElement("code", null, "/v1/chat/completions"), " server you run yourself. Ollama is the common example, but LM Studio, llama.cpp, vLLM and similar tools work the same way.")), /*#__PURE__*/React.createElement("div", {
+    className: "local-grid"
+  }, /*#__PURE__*/React.createElement("article", {
+    className: "local-card"
+  }, /*#__PURE__*/React.createElement("h3", null, I.Server && /*#__PURE__*/React.createElement(I.Server, null), " Configure in Settings"), /*#__PURE__*/React.createElement("p", null, "Open ", /*#__PURE__*/React.createElement("strong", null, "Settings \u2192 Agent"), " to choose ", /*#__PURE__*/React.createElement("strong", null, "Local inference"), ", set a base URL, optional API key, max completion tokens, and default model. No shell env vars required for day-to-day use.")), /*#__PURE__*/React.createElement("article", {
+    className: "local-card"
+  }, /*#__PURE__*/React.createElement("h3", null, I.Code && /*#__PURE__*/React.createElement(I.Code, null), " Example: Ollama"), /*#__PURE__*/React.createElement("div", {
+    className: "codeblock"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "ln"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "p"
+  }, "ollama"), " pull qwen2.5:14b-instruct"), /*#__PURE__*/React.createElement("span", {
+    className: "ln"
+  }, "OLLAMA_NUM_CTX=32768 ollama serve"), /*#__PURE__*/React.createElement("span", {
+    className: "ln"
+  }, "skribe ~/draft.md")), /*#__PURE__*/React.createElement("p", null, "Leave the base URL blank and Skribe auto-detects Ollama, LM Studio, and llama.cpp on the usual localhost ports."))), /*#__PURE__*/React.createElement("p", {
+    className: "local-foot"
+  }, "Skills still work on the local path. Skribe inlines selected ", /*#__PURE__*/React.createElement("code", null, "SKILL.md"), " instructions into the prompt when there is no CLI skill loader. See the ", /*#__PURE__*/React.createElement("a", {
+    href: REPO + "#local-inference",
+    target: "_blank",
+    rel: "noopener"
+  }, "README"), " for troubleshooting, model tips, and env overrides.")));
 }
 
 /* ---------------- Threads vs Chat ---------------- */
@@ -314,7 +360,7 @@ function QuickStart() {
     className: "section-head"
   }, /*#__PURE__*/React.createElement("p", {
     className: "eyebrow"
-  }, "Quick start"), /*#__PURE__*/React.createElement("h2", null, "Open a draft in seconds"), /*#__PURE__*/React.createElement("p", null, "Skribe starts a local server and prints the browser URL. It drives the native agent CLI you already have signed in.")), /*#__PURE__*/React.createElement("div", {
+  }, "Quick start"), /*#__PURE__*/React.createElement("h2", null, "Open a draft in seconds"), /*#__PURE__*/React.createElement("p", null, "Skribe starts a local server and prints the browser URL. Use a cloud agent CLI you already have signed in, or configure local inference in Settings.")), /*#__PURE__*/React.createElement("div", {
     className: "qs-grid"
   }, /*#__PURE__*/React.createElement("div", {
     className: "qs-card"
@@ -328,7 +374,7 @@ function QuickStart() {
     className: "p"
   }, "npx"), " skribe-editor ~/draft.md")), /*#__PURE__*/React.createElement("p", {
     className: "qs-req"
-  }, /*#__PURE__*/React.createElement("strong", null, "Requires"), /*#__PURE__*/React.createElement("br", null), "Node.js 20+ and npm. Optionally Codex CLI or Claude Code for live agent replies from your existing subscription.")), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("strong", null, "Requires"), /*#__PURE__*/React.createElement("br", null), "Node.js 20+ and npm. Optionally Codex CLI, Claude Code, or any OpenAI-compatible local inference server for live agent replies.")), /*#__PURE__*/React.createElement("div", {
     className: "qs-card"
   }, /*#__PURE__*/React.createElement("span", {
     className: "qs-card__label"
@@ -342,7 +388,7 @@ function QuickStart() {
     className: "ln"
   }, "skribe ~/draft.md")), /*#__PURE__*/React.createElement("p", {
     className: "qs-req"
-  }, /*#__PURE__*/React.createElement("strong", null, "Runtime"), /*#__PURE__*/React.createElement("br", null), "Set ", /*#__PURE__*/React.createElement("code", null, "SKRIBE_AGENT_RUNTIME"), " to ", /*#__PURE__*/React.createElement("code", null, "codex"), ", ", /*#__PURE__*/React.createElement("code", null, "claude"), " or ", /*#__PURE__*/React.createElement("code", null, "auto"), ". Your CLI still owns auth, models and billing."))), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("strong", null, "Runtime"), /*#__PURE__*/React.createElement("br", null), "Choose ", /*#__PURE__*/React.createElement("code", null, "Auto"), ", ", /*#__PURE__*/React.createElement("code", null, "Codex"), ", ", /*#__PURE__*/React.createElement("code", null, "Claude"), ", or ", /*#__PURE__*/React.createElement("code", null, "Local inference"), " in Settings \u2192 Agent. Env vars still override when set."))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: "var(--space-3)",
@@ -388,6 +434,8 @@ function Footer() {
   }, "Features"), /*#__PURE__*/React.createElement("a", {
     href: "#surfaces"
   }, "Threads & Chat"), /*#__PURE__*/React.createElement("a", {
+    href: "#local-inference"
+  }, "Local inference"), /*#__PURE__*/React.createElement("a", {
     href: "#quickstart"
   }, "Quick start")), /*#__PURE__*/React.createElement("div", {
     className: "footer__col"
@@ -408,6 +456,6 @@ function Footer() {
   }, /*#__PURE__*/React.createElement("span", null, "\xA9 2026 THE PRODUCT-LED GEEK \xB7 MIT"), /*#__PURE__*/React.createElement("span", null, "Local-first. Your words stay yours."))));
 }
 function App() {
-  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Topbar, null), /*#__PURE__*/React.createElement("main", null, /*#__PURE__*/React.createElement(Hero, null), /*#__PURE__*/React.createElement(Showcase, null), /*#__PURE__*/React.createElement(Features, null), /*#__PURE__*/React.createElement(Surfaces, null), /*#__PURE__*/React.createElement(Shots, null), /*#__PURE__*/React.createElement(QuickStart, null)), /*#__PURE__*/React.createElement(Footer, null));
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Topbar, null), /*#__PURE__*/React.createElement("main", null, /*#__PURE__*/React.createElement(Hero, null), /*#__PURE__*/React.createElement(Showcase, null), /*#__PURE__*/React.createElement(Features, null), /*#__PURE__*/React.createElement(LocalInference, null), /*#__PURE__*/React.createElement(Surfaces, null), /*#__PURE__*/React.createElement(Shots, null), /*#__PURE__*/React.createElement(QuickStart, null)), /*#__PURE__*/React.createElement(Footer, null));
 }
 ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/React.createElement(App, null));

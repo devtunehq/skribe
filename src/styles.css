@@ -2156,6 +2156,8 @@ select:focus,
 
 .thread-detail {
   margin-top: 12px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .thread-detail-header {
@@ -2202,12 +2204,15 @@ select:focus,
 .message-stack {
   display: grid;
   gap: 10px;
+  min-width: 0;
 }
 
 .message-bubble {
   border: 1px solid var(--line-ink);
   padding: 12px;
   background: var(--paper-white);
+  min-width: 0;
+  max-width: 100%;
 }
 
 .message-bubble.is-agent {
@@ -2248,6 +2253,9 @@ select:focus,
   line-height: 1.5;
   font-size: 14px;
   color: var(--text);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
 }
 
 .message-bubble.is-typing p {
@@ -3036,6 +3044,30 @@ select:focus,
   display: grid;
   gap: 12px;
   align-items: start;
+}
+
+.settings-subsection {
+  display: grid;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.settings-subsection-title {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-strong);
+}
+
+.settings-subsection-copy {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .settings-field {

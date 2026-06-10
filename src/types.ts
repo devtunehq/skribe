@@ -124,6 +124,9 @@ export interface AppSettings {
   agentRuntime: string;
   agentModel: string;
   agentEffort: string;
+  localInferenceBaseUrl: string;
+  localInferenceApiKey: string;
+  localInferenceMaxTokens: number;
   defaultSkills: string[];
   autoReplyToComments: boolean;
   showResolvedThreads: boolean;

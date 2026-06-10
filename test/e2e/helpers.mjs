@@ -59,13 +59,14 @@ export async function startSkribeServer(markdownPath, options = {}) {
   const configDir = await mkdtemp(join(tmpdir(), "skribe-e2e-config-"));
   const dataDir = await mkdtemp(join(tmpdir(), "skribe-e2e-data-"));
   const port = options.port ?? randomPort();
-  const child = spawn("node", ["server/index.mjs", markdownPath], {
+  const child = spawn("node", ["server/index.mjs", "--no-open", markdownPath], {
     cwd: root,
     env: {
       ...process.env,
       PORT: String(port),
       SKRIBE_CONFIG_DIR: configDir,
       SKRIBE_DATA_DIR: dataDir,
+      SKRIBE_NO_OPEN_BROWSER: "1",
       SKRIBE_AGENT_RUNTIME: "stub",
       SKRIBE_AGENT_MODEL: "auto",
       SKRIBE_AGENT_EFFORT: "auto",
@@ -173,7 +174,7 @@ async function startBrowser() {
   );
 
   const targetsUrl = `http://127.0.0.1:${debugPort}/json/list`;
-  const targets = await waitForHttpJson(targetsUrl);
+  const targets = await waitForHttpJson(targetsUrl, 20000);
   const target = targets.find((item) => item.type === "page");
   if (!target) throw new Error("No browser page target available");
 

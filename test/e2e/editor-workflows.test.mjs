@@ -639,7 +639,7 @@ test("agent composers explain when no local agent runtime is detected", async (t
         await waitFor(browser.cdp, "Boolean(document.querySelector('.agent-config-shell.is-unavailable'))");
         assert.match(
           await evaluate(browser.cdp, "document.querySelector('.agent-config-button strong')?.textContent || ''"),
-          /No agent CLI/i
+          /No agent runtime/i
         );
         await evaluate(
           browser.cdp,
