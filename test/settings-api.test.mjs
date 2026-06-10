@@ -36,13 +36,14 @@ async function startServer(options = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), "skribe-data-"));
   const port = options.port ?? 46000 + Math.floor(Math.random() * 1000);
   const baseUrl = `http://127.0.0.1:${port}`;
-  const child = spawn("node", ["server/index.mjs", ...(options.args ?? [])], {
+  const child = spawn("node", ["server/index.mjs", "--no-open", ...(options.args ?? [])], {
     cwd: root,
     env: {
       ...process.env,
       PORT: String(port),
       SKRIBE_CONFIG_DIR: configDir,
       SKRIBE_DATA_DIR: dataDir,
+      SKRIBE_NO_OPEN_BROWSER: "1",
       SKRIBE_AGENT_RUNTIME: "stub",
       SKRIBE_AGENT_MODEL: "auto",
       SKRIBE_AGENT_EFFORT: "auto",
@@ -75,13 +76,14 @@ async function startServer(options = {}) {
 }
 
 async function runSkribeInvocation({ port, configDir, dataDir, args = [] }) {
-  const child = spawn("node", ["server/index.mjs", ...args], {
+  const child = spawn("node", ["server/index.mjs", "--no-open", ...args], {
     cwd: root,
     env: {
       ...process.env,
       PORT: String(port),
       SKRIBE_CONFIG_DIR: configDir,
       SKRIBE_DATA_DIR: dataDir,
+      SKRIBE_NO_OPEN_BROWSER: "1",
       SKRIBE_AGENT_RUNTIME: "stub",
       SKRIBE_AGENT_MODEL: "auto",
       SKRIBE_AGENT_EFFORT: "auto"

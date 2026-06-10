@@ -233,24 +233,48 @@ Skribe keeps the `.md` file as the clean document source. Comments, chat, propos
 
 ## Agent Runtime
 
-Skribe invokes an external CLI behind the scenes. It does not hard-code one model provider.
+Skribe can use cloud agent CLIs (Codex CLI, Claude Code) or a local OpenAI-compatible inference server (Ollama, LM Studio, llama.cpp, vLLM). It does not hard-code one model provider.
 
-That means your normal CLI setup still owns authentication, model access, limits, and billing. Use Codex CLI if that is where you work. Use Claude Code if that is where you work. Leave Skribe on `auto` if you want it to pick the first healthy local runtime.
+For cloud CLIs, your normal setup still owns authentication, model access, limits, and billing. For local inference, Skribe talks directly to a server you run on your machine. Leave Skribe on `auto` if you want it to pick the first healthy runtime.
 
 ```bash
 SKRIBE_AGENT_RUNTIME=auto npm run serve -- ~/draft.md
 SKRIBE_AGENT_RUNTIME=claude SKRIBE_AGENT_MODEL=opus SKRIBE_AGENT_EFFORT=high npm run serve -- ~/draft.md
 SKRIBE_AGENT_RUNTIME=codex SKRIBE_AGENT_MODEL=gpt-5 npm run serve -- ~/draft.md
+SKRIBE_AGENT_RUNTIME=local SKRIBE_LOCAL_BASE_URL=http://127.0.0.1:11434/v1 npm run serve -- ~/draft.md
 ```
 
 Supported runtime values:
 
-- `auto` - pick the first healthy local CLI from `SKRIBE_AGENT_RUNTIME_PRIORITY`
+- `auto` - pick the first healthy runtime from `SKRIBE_AGENT_RUNTIME_PRIORITY`
 - `codex` - use Codex CLI
 - `claude` - use Claude Code
+- `local` - use an OpenAI-compatible local inference server
 - `stub` - deterministic local responses for development and tests
 
-If neither Codex CLI nor Claude Code is detected, Skribe still works as a local Markdown editor with threads, revisions, settings, and export. Agent chat and comment replies are disabled until a supported local CLI is installed and signed in. Run `skribe doctor` or `skribe runtimes` to see what Skribe can detect.
+If no cloud CLI or local inference server is detected, Skribe still works as a local Markdown editor with threads, revisions, settings, and export. Agent chat and comment replies are disabled until a supported runtime is available. Run `skribe doctor` or `skribe runtimes` to see what Skribe can detect.
+
+### Local inference
+
+Skribe's `local` runtime sends each agent turn to an OpenAI-compatible `chat/completions` endpoint. You run the inference server separately; Skribe does not bundle model weights or GPU binaries.
+
+Quick start with Ollama:
+
+```bash
+ollama pull qwen2.5:14b-instruct
+ollama serve
+SKRIBE_AGENT_RUNTIME=local npm run serve -- ~/draft.md
+```
+
+By default, Skribe probes these endpoints when `SKRIBE_LOCAL_BASE_URL` is unset:
+
+- `http://127.0.0.1:11434/v1` (Ollama)
+- `http://127.0.0.1:1234/v1` (LM Studio)
+- `http://127.0.0.1:8080/v1` (llama.cpp server)
+
+Set `SKRIBE_LOCAL_BASE_URL` to point at a custom server. Skribe inlines selected skill instructions into the prompt for local runtimes because there is no CLI skill loader.
+
+Local models vary in JSON compliance and context size. Instruction-tuned models with 32k+ context work best for chat, threads, and document proposals.
 
 Useful environment variables:
 
@@ -260,11 +284,13 @@ Useful environment variables:
 | `SKRIBE_CONFIG_DIR` | Config root. Defaults to `~/.config/skribe`. |
 | `SKRIBE_DATA_DIR` | Local document/review storage root. Defaults to `~/.config/skribe/data`. |
 | `SKRIBE_DOCUMENT` / `SKRIBE_DOCUMENT_PATH` | Markdown file to open when no CLI path is passed. |
-| `SKRIBE_AGENT_RUNTIME` | `auto`, `codex`, `claude`, or `stub`. |
-| `SKRIBE_AGENT_RUNTIME_PRIORITY` | Comma-separated runtime order for `auto`. Defaults to `codex,claude`. |
-| `SKRIBE_AGENT_MODEL` | Model id, or `auto` to let the selected CLI decide. |
+| `SKRIBE_AGENT_RUNTIME` | `auto`, `codex`, `claude`, `local`, or `stub`. |
+| `SKRIBE_AGENT_RUNTIME_PRIORITY` | Comma-separated runtime order for `auto`. Defaults to `codex,claude,local`. |
+| `SKRIBE_AGENT_MODEL` | Model id, or `auto` to let the selected runtime decide. |
 | `SKRIBE_AGENT_EFFORT` | Reasoning effort where supported. |
 | `SKRIBE_AGENT_TIMEOUT_MS` | Agent command timeout. Defaults to 10 minutes. |
+| `SKRIBE_LOCAL_BASE_URL` | OpenAI-compatible base URL for the `local` runtime, e.g. `http://127.0.0.1:11434/v1`. |
+| `SKRIBE_LOCAL_API_KEY` | Optional bearer token for local inference servers that require auth. |
 | `SKRIBE_SKILL_ROOTS` | Additional skill roots for slash-command style skills. |
 
 You can also change runtime, model, effort, language, document font, theme, tone, default skills, split/unified diff view, and review preferences from the settings panel.

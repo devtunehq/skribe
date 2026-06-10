@@ -571,17 +571,26 @@ Options:
 Environment:
   PORT                          Local server port, default 4327
   SKRIBE_NO_OPEN_BROWSER=1      Do not open the app URL in your browser on startup
+  SKRIBE_OPEN_BROWSER=1         Open the app URL even for direct node server/index.mjs runs
+  SKRIBE_CLI_INVOCATION=1       Set by the skribe CLI wrapper; enables browser open on startup
   SKRIBE_CONFIG_DIR             Settings and local app state directory
   SKRIBE_DATA_DIR               Document sidecar and internal document data directory
-  SKRIBE_AGENT_RUNTIME          auto, codex, claude, or stub
-  SKRIBE_AGENT_RUNTIME_PRIORITY Runtime order for auto, default codex,claude
+  SKRIBE_AGENT_RUNTIME          auto, codex, claude, local, or stub
+  SKRIBE_AGENT_RUNTIME_PRIORITY Runtime order for auto, default codex,claude,local
+  SKRIBE_LOCAL_BASE_URL         OpenAI-compatible base URL for local inference
+  SKRIBE_LOCAL_API_KEY          Optional bearer token for local inference servers
   SKRIBE_SKILL_ROOTS            Extra colon-separated skill directories`);
 }
 
 function shouldOpenBrowser() {
   if (noOpenBrowser) return false;
   if (process.env.SKRIBE_NO_OPEN_BROWSER === "1") return false;
-  return true;
+  if (process.env.CI === "true" || process.env.CI === "1") return false;
+  if (process.env.npm_lifecycle_event === "test") return false;
+  if (process.env.SKRIBE_OPEN_BROWSER === "1") return true;
+  if (process.env.SKRIBE_CLI_INVOCATION === "1") return true;
+  if (process.env.npm_lifecycle_event === "serve") return true;
+  return false;
 }
 
 function openBrowser(url) {
@@ -865,7 +874,8 @@ async function discoverAgentSkills({ force = false } = {}) {
         id,
         name: parsed.name,
         description: parsed.description,
-        source: skillSourceForPath(skillPath)
+        source: skillSourceForPath(skillPath),
+        path: skillPath
       });
     } catch {
       // Ignore unreadable skills; the registry should be best-effort.
@@ -893,11 +903,142 @@ async function enrichSelectedSkills(selectedSkills) {
 }
 
 function runtimePriority() {
-  const configured = process.env.SKRIBE_AGENT_RUNTIME_PRIORITY || "codex,claude";
+  const configured = process.env.SKRIBE_AGENT_RUNTIME_PRIORITY || "codex,claude,local";
   return configured
     .split(",")
     .map((item) => normalizeConfiguredRuntime(item))
     .filter(Boolean);
+}
+
+const localInferenceProbeTimeoutMs = 2000;
+const localSkillInlineMaxChars = 6000;
+const localInferenceDefaultEndpoints = [
+  { label: "Ollama", baseUrl: "http://127.0.0.1:11434/v1" },
+  { label: "LM Studio", baseUrl: "http://127.0.0.1:1234/v1" },
+  { label: "llama.cpp", baseUrl: "http://127.0.0.1:8080/v1" }
+];
+
+function normalizeLocalBaseUrl(value) {
+  const trimmed = String(value || "").trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+}
+
+function localInferenceApiKey() {
+  return process.env.SKRIBE_LOCAL_API_KEY || "";
+}
+
+function localInferenceBaseUrlCandidates() {
+  const configured = normalizeLocalBaseUrl(process.env.SKRIBE_LOCAL_BASE_URL);
+  if (configured) return [{ label: "configured", baseUrl: configured }];
+  return localInferenceDefaultEndpoints;
+}
+
+function localInferenceRequestHeaders(contentType = null) {
+  const headers = { accept: "application/json" };
+  if (contentType) headers["content-type"] = contentType;
+  const apiKey = localInferenceApiKey();
+  if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+  return headers;
+}
+
+async function fetchLocalInferenceModels(baseUrl, timeoutMs = localInferenceProbeTimeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${baseUrl}/models`, {
+      signal: controller.signal,
+      headers: localInferenceRequestHeaders()
+    });
+    if (!response.ok) return null;
+
+    const payload = await response.json();
+    const rawModels = Array.isArray(payload?.data)
+      ? payload.data
+      : Array.isArray(payload?.models)
+        ? payload.models
+        : [];
+    return rawModels
+      .map((item) => {
+        const id = String(item?.id || item?.name || "").trim();
+        if (!id) return null;
+        return { id, label: id, source: "endpoint" };
+      })
+      .filter(Boolean);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function resolveLocalInferenceEndpoint() {
+  for (const candidate of localInferenceBaseUrlCandidates()) {
+    const models = await fetchLocalInferenceModels(candidate.baseUrl);
+    if (models !== null) {
+      return {
+        baseUrl: candidate.baseUrl,
+        label: candidate.label,
+        models
+      };
+    }
+  }
+  return null;
+}
+
+async function postLocalChatCompletion(baseUrl, body, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: localInferenceRequestHeaders("application/json"),
+      body: JSON.stringify(body)
+    });
+    const responseText = await response.text();
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        errorText: responseText.slice(0, 4000),
+        content: ""
+      };
+    }
+
+    let payload;
+    try {
+      payload = JSON.parse(responseText);
+    } catch {
+      return {
+        ok: false,
+        status: response.status,
+        errorText: "Invalid JSON response from local inference server.",
+        content: ""
+      };
+    }
+
+    const content = payload?.choices?.[0]?.message?.content;
+    if (typeof content !== "string" || !content.trim()) {
+      return {
+        ok: false,
+        status: response.status,
+        errorText: "Local inference server returned an empty completion.",
+        content: ""
+      };
+    }
+
+    return { ok: true, status: response.status, content };
+  } catch (error) {
+    return {
+      ok: false,
+      status: null,
+      errorText: error instanceof Error ? error.message : String(error),
+      content: ""
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function parseHelpModels(helpText, patterns) {
@@ -1108,6 +1249,55 @@ async function detectClaudeRuntime() {
   };
 }
 
+async function detectLocalRuntime() {
+  const configuredBaseUrl = normalizeLocalBaseUrl(process.env.SKRIBE_LOCAL_BASE_URL);
+  const endpoint = await resolveLocalInferenceEndpoint();
+  if (!endpoint) {
+    const notes = [
+      "No local inference server detected. Start Ollama, LM Studio, or llama-server, or set SKRIBE_LOCAL_BASE_URL."
+    ];
+    if (configuredBaseUrl) notes.unshift(`Configured endpoint not reachable: ${configuredBaseUrl}`);
+    return {
+      id: "local",
+      label: "Local inference",
+      command: null,
+      available: false,
+      version: null,
+      supportsModelFlag: true,
+      supportsStructuredOutput: true,
+      supportsManualModel: true,
+      models: [],
+      defaultModel: null,
+      supportsEffort: false,
+      effortLevels: [],
+      defaultEffort: null,
+      notes
+    };
+  }
+
+  return {
+    id: "local",
+    label: "Local inference",
+    command: null,
+    available: true,
+    version: endpoint.baseUrl,
+    supportsModelFlag: true,
+    supportsStructuredOutput: true,
+    supportsManualModel: true,
+    models: endpoint.models,
+    defaultModel: endpoint.models[0]?.id ?? null,
+    supportsEffort: false,
+    effortLevels: [],
+    defaultEffort: null,
+    notes: [
+      `OpenAI-compatible endpoint: ${endpoint.baseUrl}`,
+      endpoint.models.length > 0
+        ? `${endpoint.models.length} model${endpoint.models.length === 1 ? "" : "s"} available.`
+        : "Endpoint reachable, but no models were listed."
+    ]
+  };
+}
+
 async function detectStubRuntime() {
   return {
     id: "stub",
@@ -1145,6 +1335,12 @@ const agentRuntimeAdapters = {
     label: "Claude Code",
     detect: detectClaudeRuntime,
     run: runClaudeAgent
+  },
+  local: {
+    id: "local",
+    label: "Local inference",
+    detect: detectLocalRuntime,
+    run: runLocalAgent
   }
 };
 
@@ -2809,10 +3005,11 @@ function clipAroundNeedle(text, needle, maxChars) {
   return `${prefix}${text.slice(start, end)}${suffix}`;
 }
 
-function markdownForAgentTurn(turn) {
+function markdownForAgentTurn(turn, runtimeId = null) {
   const doc = getDocument();
   const policy = buildResponsePolicy(turn);
-  const maxChars = Number(process.env.SKRIBE_AGENT_MARKDOWN_MAX_CHARS || 24000);
+  const defaultMax = runtimeId === "local" ? 16000 : 24000;
+  const maxChars = Number(process.env.SKRIBE_AGENT_MARKDOWN_MAX_CHARS || defaultMax);
   if (doc.markdown.length <= maxChars) return doc.markdown;
 
   if (policy.intent === "anchored_thread") {
@@ -2900,10 +3097,45 @@ function buildProposalModeInstruction(responsePolicy) {
   ].filter(Boolean).join("\n");
 }
 
-function buildAgentPrompt(turn) {
+async function loadInlinedSkillInstructions(selectedSkills) {
+  if (!Array.isArray(selectedSkills) || selectedSkills.length === 0) return "";
+
+  const registry = await discoverAgentSkills();
+  const byId = new Map(registry.map((skill) => [skill.id, skill]));
+  const sections = [];
+
+  for (const skill of selectedSkills) {
+    const registered = byId.get(skill.id);
+    if (!registered?.path) continue;
+    try {
+      const markdown = await readFile(registered.path, "utf8");
+      sections.push(`### Skill: ${registered.name || skill.id}\n${clipText(markdown, localSkillInlineMaxChars)}`);
+    } catch {
+      // Ignore unreadable skills; inlining is best-effort.
+    }
+  }
+
+  if (sections.length === 0) return "";
+  return `\nRequested skill instructions:\n${sections.join("\n\n")}\n`;
+}
+
+async function buildAgentPrompt(turn, runtimeSelection = null) {
   const contextPacket = buildAgentContextPacket(turn);
-  const currentMarkdown = markdownForAgentTurn(turn);
+  const runtimeId = runtimeSelection?.status?.id ?? runtimeSelection?.adapter?.id ?? null;
+  const currentMarkdown = markdownForAgentTurn(turn, runtimeId);
   const proposalModeInstruction = buildProposalModeInstruction(contextPacket.responsePolicy);
+  const isLocalRuntime = runtimeId === "local";
+  const inlinedSkills = isLocalRuntime ? await loadInlinedSkillInstructions(turn.skills) : "";
+  const skillRules = isLocalRuntime
+    ? [
+        "- Follow the requested skill instructions included below before producing the JSON response.",
+        "- Apply skill guidance to your answer; do not paste long skill instructions back into Skribe."
+      ]
+    : [
+        "- You have access to the configured agent runtime's local skills. If requestedSkills is non-empty, load and follow those skills before producing the JSON response.",
+        "- If the human names a skill in the message, or a skill clearly fits the writing task, use the runtime's skill mechanism when available.",
+        "- Apply skill guidance to your answer; do not paste long skill instructions back into Skribe."
+      ];
 
   return `You are Skribe's local writing partner for one Markdown document.
 
@@ -2913,9 +3145,7 @@ Rules:
 - Do not edit files.
 - Reply only as valid JSON. No Markdown fences.
 - Be concise and specific.
-- You have access to the configured agent runtime's local skills. If requestedSkills is non-empty, load and follow those skills before producing the JSON response.
-- If the human names a skill in the message, or a skill clearly fits the writing task, use the runtime's skill mechanism when available.
-- Apply skill guidance to your answer; do not paste long skill instructions back into Skribe.
+${skillRules.map((rule) => `\n${rule}`).join("")}
 - Respect document.editorLanguage for spelling conventions in replies and proposed edits.
 - Respect writingPreferences.toneOfVoice as the default style for replies and proposed edits. Current user instructions, requested skills, and anchored comment context override the global tone when they conflict.
 - Follow responsePolicy exactly.
@@ -2933,7 +3163,7 @@ Rules:
 - When the user asks you to revise one proposal block, return a new documentProposals entry with a revised full replacementMarkdown.
 - Treat Context Memory as durable editorial memory. It contains previous human decisions, accepted/declined changes, revision requests, thread state changes, and agent outputs.
 - Respect prior accepted/rejected decisions unless the current user explicitly asks you to revisit them.
-
+${inlinedSkills}
 Output shape:
 {
   "reply": "short answer for the active chat or thread",
@@ -2954,7 +3184,7 @@ ${currentMarkdown}
 async function runAgentRuntime(turn, runtimeSelection) {
   return runtimeSelection.adapter.run({
     turn,
-    prompt: buildAgentPrompt(turn),
+    prompt: await buildAgentPrompt(turn, runtimeSelection),
     model: runtimeSelection.model,
     effort: runtimeSelection.effort,
     timeoutMs: agentTimeoutMs
@@ -3026,6 +3256,55 @@ async function runClaudeAgent({ prompt, model, effort, timeoutMs }) {
   });
 
   return parseAgentOutput(result.stdout);
+}
+
+async function runLocalAgent({ prompt, model, timeoutMs }) {
+  const endpoint = await resolveLocalInferenceEndpoint();
+  if (!endpoint) {
+    throw new Error(
+      "Local inference server is not available. Start Ollama, LM Studio, or llama-server, or set SKRIBE_LOCAL_BASE_URL."
+    );
+  }
+
+  const resolvedModel = model || endpoint.models[0]?.id;
+  if (!resolvedModel) {
+    throw new Error(`No model available at ${endpoint.baseUrl}. Pull or load a model first.`);
+  }
+
+  const requestBody = {
+    model: resolvedModel,
+    messages: [{ role: "user", content: prompt }],
+    temperature: 0.2,
+    stream: false,
+    response_format: { type: "json_object" }
+  };
+
+  await appendEvent({
+    type: "agent:spawn",
+    at: nowIso(),
+    args: ["local", `${endpoint.baseUrl}/chat/completions`, resolvedModel]
+  });
+
+  let result = await postLocalChatCompletion(endpoint.baseUrl, requestBody, timeoutMs);
+  if (!result.ok && result.status === 400 && requestBody.response_format) {
+    const retryBody = { ...requestBody };
+    delete retryBody.response_format;
+    result = await postLocalChatCompletion(endpoint.baseUrl, retryBody, timeoutMs);
+  }
+
+  if (!result.ok) {
+    throw new Error(result.errorText || "Local inference request failed.");
+  }
+
+  await appendEvent({
+    type: "agent:raw-output",
+    at: nowIso(),
+    stdout: result.content.slice(-4000),
+    stderr: "",
+    finalText: result.content.slice(-4000)
+  });
+
+  return parseAgentOutput(result.content);
 }
 
 async function runStubAgent(turn) {

@@ -14,7 +14,8 @@ const child = spawn(process.execPath, [serverPath, ...args], {
   stdio: "inherit",
   env: {
     ...process.env,
-    INIT_CWD: invokerCwd
+    INIT_CWD: invokerCwd,
+    SKRIBE_CLI_INVOCATION: "1"
   }
 });
 

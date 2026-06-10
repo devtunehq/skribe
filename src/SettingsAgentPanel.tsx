@@ -39,7 +39,7 @@ export function SettingsAgentPanel({
     <>
       <div className="settings-grid">
         <label className="settings-field">
-          <SettingsLabel tooltip="Default local CLI runtime Skribe should use for agent turns.">
+          <SettingsLabel tooltip="Default agent runtime Skribe should use for agent turns: cloud CLI or local inference.">
             Agent provider
           </SettingsLabel>
           <select
@@ -60,10 +60,11 @@ export function SettingsAgentPanel({
               </option>
             ))}
           </select>
+          {selectedRuntimeStatus?.notes?.length ? <small>{selectedRuntimeStatus.notes.join(" ")}</small> : null}
         </label>
 
         <label className="settings-field">
-          <SettingsLabel tooltip="Default model for the selected CLI when the runtime exposes model selection.">
+          <SettingsLabel tooltip="Default model for the selected runtime when model selection is supported.">
             Agent model
           </SettingsLabel>
           <select
