@@ -240,7 +240,7 @@ body {
 }
 
 /* ============ PRODUCT SHOT ============ */
-.showcase { padding: clamp(40px, 6vw, 72px) 0 clamp(48px, 7vw, 88px); }
+.showcase { padding: clamp(40px, 6vw, 72px) 32px clamp(48px, 7vw, 88px); }
 .window {
   border: 1px solid var(--line-ink);
   background: var(--paper-white);
