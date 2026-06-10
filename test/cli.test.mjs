@@ -9,11 +9,16 @@ const root = new URL("..", import.meta.url).pathname;
 const serverPath = join(root, "server", "index.mjs");
 const binPath = join(root, "bin", "skribe.mjs");
 
+const testEnv = {
+  SKRIBE_NO_OPEN_BROWSER: "1"
+};
+
 function runSkribe(args, env = {}) {
   return spawnSync(process.execPath, [serverPath, ...args], {
     cwd: root,
     env: {
       ...process.env,
+      ...testEnv,
       PORT: String(48000 + Math.floor(Math.random() * 1000)),
       ...env
     },
@@ -26,6 +31,7 @@ function runSkribeBin(args, env = {}) {
     cwd: root,
     env: {
       ...process.env,
+      ...testEnv,
       PORT: String(48000 + Math.floor(Math.random() * 1000)),
       ...env
     },
@@ -87,11 +93,12 @@ test("published bin resolves relative document paths from the invoker cwd", asyn
       cwd: rootDir,
       env: {
         ...process.env,
+        ...testEnv,
         PORT: String(48000 + Math.floor(Math.random() * 1000))
       },
       encoding: "utf8"
     });
-    assert.equal(exported.status, 0);
+    assert.equal(exported.status, 0, exported.stderr || exported.stdout);
     assert.equal(exported.stdout, "# Draft\n\nBody.\n");
   } finally {
     await rm(rootDir, { recursive: true, force: true });
@@ -104,6 +111,7 @@ test("CLI fails clearly when an external document path does not exist", () => {
   });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Document not found/);
+  assert.match(result.stderr, /--create/);
 });
 
 test("CLI export can print or write a Markdown file", async () => {

@@ -1,5 +1,7 @@
 import { createServer } from "node:http";
 import { execFile, spawn } from "node:child_process";
+import { stdin as input, stdout as output } from "node:process";
+import { createInterface } from "node:readline/promises";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { cp, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
@@ -34,7 +36,7 @@ const host = "127.0.0.1";
 const appUrl = `http://${host}:${port}`;
 const skillRegistryTtlMs = 30000;
 const runtimeRegistryTtlMs = 30000;
-const { argv: cliArgv, noOpenBrowser } = stripGlobalFlags(process.argv.slice(2));
+const { argv: cliArgv, noOpenBrowser, createMissingDocument } = stripGlobalFlags(process.argv.slice(2));
 const cliInvocation = parseCliInvocation(cliArgv);
 const requestedMarkdownArg = requestedDocumentPath();
 let activeDocument = resolveActiveDocument(requestedMarkdownArg);
@@ -171,25 +173,54 @@ function resolveUserPath(pathArg) {
 function stripGlobalFlags(argv) {
   const args = [...argv];
   let noOpenBrowser = false;
+  let createMissingDocument = false;
   const filtered = args.filter((arg) => {
     if (arg === "--no-open") {
       noOpenBrowser = true;
       return false;
     }
+    if (arg === "--create" || arg === "-c") {
+      createMissingDocument = true;
+      return false;
+    }
     return true;
   });
-  return { argv: filtered, noOpenBrowser };
+  return { argv: filtered, noOpenBrowser, createMissingDocument };
 }
 
-function assertExternalDocumentExists() {
-  if (activeDocument.source !== "external") return;
-  if (existsSync(activeDocument.markdownPath)) return;
+function defaultMarkdownForPath(markdownPath, title) {
+  const heading = titleFromPath(markdownPath) || title;
+  if (heading && heading !== "Untitled Draft") {
+    return `# ${heading}\n\n`;
+  }
+  return defaultMarkdown;
+}
 
+function printMissingDocumentHelp() {
   console.error(`Document not found: ${activeDocument.markdownPath}`);
   if (requestedMarkdownArg && !requestedMarkdownArg.startsWith("/")) {
     console.error(`Relative paths resolve from: ${userWorkingDirectory()}`);
   }
-  process.exit(1);
+  console.error("Run with --create to create a new file at this path.");
+}
+
+async function offerToCreateExternalDocument() {
+  if (createMissingDocument) return true;
+
+  const canPrompt = input.isTTY && output.isTTY;
+  if (!canPrompt) {
+    printMissingDocumentHelp();
+    return false;
+  }
+
+  const rl = createInterface({ input, output });
+  try {
+    const answer = await rl.question(`Create new document at ${activeDocument.markdownPath}? [Y/n] `);
+    const trimmed = answer.trim();
+    return trimmed === "" || /^y(es)?$/i.test(trimmed);
+  } finally {
+    rl.close();
+  }
 }
 
 async function ensureDocumentFiles() {
@@ -199,13 +230,20 @@ async function ensureDocumentFiles() {
 
   if (!existsSync(activeDocument.markdownPath)) {
     if (activeDocument.source === "external") {
-      assertExternalDocumentExists();
+      const shouldCreate = await offerToCreateExternalDocument();
+      if (!shouldCreate) {
+        console.error(input.isTTY && output.isTTY ? "Document not created." : "");
+        process.exit(1);
+      }
+      console.log(`Creating new document: ${activeDocument.markdownPath}`);
     }
     await mkdir(dirname(activeDocument.markdownPath), { recursive: true });
     const markdown =
       activeDocument.source === "internal" && existsSync(legacyDraftPath)
         ? await readFile(legacyDraftPath, "utf8")
-        : defaultMarkdown;
+        : activeDocument.source === "external"
+          ? defaultMarkdownForPath(activeDocument.markdownPath, activeDocument.title)
+          : defaultMarkdown;
     await writeFile(activeDocument.markdownPath, markdown, "utf8");
   }
 
@@ -261,13 +299,16 @@ function normalizeDiffViewMode(value) {
 
 function normalizeDefaultSkills(value) {
   if (!Array.isArray(value)) return [];
-  return Array.from(
-    new Set(
-      value
-        .map((skillId) => String(skillId || "").trim())
-        .filter((skillId) => /^[a-z0-9:_-]+$/i.test(skillId))
-    )
-  ).slice(0, 20);
+  const normalized = [];
+  const seen = new Set();
+  for (const skillId of value) {
+    const trimmed = String(skillId || "").trim();
+    if (!/^[a-z0-9:_-]+$/i.test(trimmed) || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    normalized.push(trimmed);
+    if (normalized.length >= 20) break;
+  }
+  return normalized;
 }
 
 function normalizePanelState(value) {
@@ -597,6 +638,7 @@ Utility:
   skribe export --out out.md    Write exported Markdown to a file
 
 Options:
+  --create, -c                  Create the Markdown file if it does not exist yet
   --no-open                     Do not open the app URL in your browser on startup
 
 Environment:
@@ -668,8 +710,9 @@ async function printRuntimeReport() {
     console.log(formatRuntimeStatus(runtime));
     for (const note of runtime.notes || []) console.log(`  - ${note}`);
     if (runtime.models?.length) {
+      const modelCount = runtime.models.length;
       const models = runtime.models.slice(0, 12).map((model) => model.label || model.id).join(", ");
-      const suffix = runtime.models.length > 12 ? `, +${runtime.models.length - 12} more` : "";
+      const suffix = modelCount > 12 ? `, +${modelCount - 12} more` : "";
       console.log(`  models: ${models}${suffix}`);
     }
     if (runtime.effortLevels?.length) {
@@ -836,17 +879,21 @@ function parseSkillFrontmatter(markdown, fallbackName) {
 
 function defaultSkillRoots() {
   const home = process.env.HOME || "";
-  return [
+  const roots = [];
+  for (const entry of [
     process.env.SKRIBE_SKILL_ROOTS,
     home ? join(home, ".agents", "skills") : null,
     home ? join(home, ".claude", "skills") : null,
     home ? join(home, ".codex", "skills") : null,
     home ? join(home, ".codex", "plugins", "cache") : null
-  ]
-    .filter(Boolean)
-    .flatMap((entry) => String(entry).split(delimiter))
-    .map((entry) => entry.trim())
-    .filter(Boolean);
+  ]) {
+    if (!entry) continue;
+    for (const part of String(entry).split(delimiter)) {
+      const trimmed = part.trim();
+      if (trimmed) roots.push(trimmed);
+    }
+  }
+  return roots;
 }
 
 function skillSourceForPath(path) {
@@ -872,11 +919,21 @@ async function findSkillFiles(rootPath, maxDepth = 7, maxFiles = 500) {
       return;
     }
 
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      if (entry.name === "node_modules" || entry.name === ".git" || entry.name === "dist" || entry.name === "data") continue;
-      await walk(join(dir, entry.name), depth + 1);
-      if (files.length >= maxFiles) return;
+    const subdirs = entries.filter(
+      (entry) =>
+        entry.isDirectory() &&
+        entry.name !== "node_modules" &&
+        entry.name !== ".git" &&
+        entry.name !== "dist" &&
+        entry.name !== "data"
+    );
+    if (files.length < maxFiles && subdirs.length > 0) {
+      await Promise.all(
+        subdirs.map(async (entry) => {
+          if (files.length >= maxFiles) return;
+          await walk(join(dir, entry.name), depth + 1);
+        })
+      );
     }
   }
 
@@ -889,32 +946,36 @@ async function discoverAgentSkills({ force = false } = {}) {
   if (!force && skillRegistryCache && now - skillRegistryCachedAt < skillRegistryTtlMs) return skillRegistryCache;
 
   const roots = Array.from(new Set(defaultSkillRoots()));
-  const skillFiles = [];
-  for (const rootPath of roots) {
-    skillFiles.push(...(await findSkillFiles(rootPath)));
-  }
+  const skillFiles = (await Promise.all(roots.map((rootPath) => findSkillFiles(rootPath)))).flat();
+
+  const parsedSkills = await Promise.all(
+    skillFiles.map(async (skillPath) => {
+      try {
+        const markdown = await readFile(skillPath, "utf8");
+        const fallbackName = skillPath.split("/").at(-2) || "skill";
+        const parsed = parseSkillFrontmatter(markdown, fallbackName);
+        const id = slugSkillName(parsed.name);
+        if (!id) return null;
+        return {
+          id,
+          name: parsed.name,
+          description: parsed.description,
+          source: skillSourceForPath(skillPath),
+          path: skillPath
+        };
+      } catch {
+        return null;
+      }
+    })
+  );
 
   const byId = new Map();
-  for (const skillPath of skillFiles) {
-    try {
-      const markdown = await readFile(skillPath, "utf8");
-      const fallbackName = skillPath.split("/").at(-2) || "skill";
-      const parsed = parseSkillFrontmatter(markdown, fallbackName);
-      const id = slugSkillName(parsed.name);
-      if (!id || byId.has(id)) continue;
-      byId.set(id, {
-        id,
-        name: parsed.name,
-        description: parsed.description,
-        source: skillSourceForPath(skillPath),
-        path: skillPath
-      });
-    } catch {
-      // Ignore unreadable skills; the registry should be best-effort.
-    }
+  for (const skill of parsedSkills) {
+    if (!skill || byId.has(skill.id)) continue;
+    byId.set(skill.id, skill);
   }
 
-  const skills = [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+  const skills = [...byId.values()].toSorted((a, b) => a.id.localeCompare(b.id));
   skillRegistryCache = skills;
   skillRegistryCachedAt = now;
   return skills;
@@ -936,10 +997,12 @@ async function enrichSelectedSkills(selectedSkills) {
 
 function runtimePriority() {
   const configured = process.env.SKRIBE_AGENT_RUNTIME_PRIORITY || "codex,claude,local";
-  return configured
-    .split(",")
-    .map((item) => normalizeConfiguredRuntime(item))
-    .filter(Boolean);
+  const priorities = [];
+  for (const item of configured.split(",")) {
+    const normalized = normalizeConfiguredRuntime(item);
+    if (normalized) priorities.push(normalized);
+  }
+  return priorities;
 }
 
 const localInferenceProbeTimeoutMs = 2000;
@@ -1158,11 +1221,13 @@ function parseHelpEffortLevels(helpText) {
   const match = helpText.match(/--effort[\s\S]*?\(([^)]+)\)/i);
   if (!match) return [];
 
-  return match[1]
-    .split(/[,|/]\s*/)
-    .map((value) => value.replace(/['"`().]/g, "").trim().toLowerCase())
-    .filter(Boolean)
-    .map((effort) => ({ id: effort, label: effortLabel(effort), source: "help" }));
+  const efforts = [];
+  for (const value of match[1].split(/[,|/]\s*/)) {
+    const effort = value.replace(/['"`().]/g, "").trim().toLowerCase();
+    if (!effort) continue;
+    efforts.push({ id: effort, label: effortLabel(effort), source: "help" });
+  }
+  return efforts;
 }
 
 function mergeEffortLevels(levelGroups) {
@@ -1434,12 +1499,12 @@ async function detectAgentRuntimes({ force = false } = {}) {
   const now = Date.now();
   if (!force && runtimeRegistryCache && now - runtimeRegistryCachedAt < runtimeRegistryTtlMs) return runtimeRegistryCache;
 
-  const statuses = [];
-  for (const adapter of Object.values(agentRuntimeAdapters)) {
-    try {
-      statuses.push(await adapter.detect());
-    } catch (error) {
-      statuses.push({
+  const statuses = await Promise.all(
+    Object.values(agentRuntimeAdapters).map(async (adapter) => {
+      try {
+        return await adapter.detect();
+      } catch (error) {
+        return {
         id: adapter.id,
         label: adapter.label,
         command: adapter.id,
@@ -1454,9 +1519,10 @@ async function detectAgentRuntimes({ force = false } = {}) {
         effortLevels: [],
         defaultEffort: null,
         notes: [error instanceof Error ? error.message : String(error)]
-      });
-    }
-  }
+        };
+      }
+    })
+  );
 
   runtimeRegistryCache = statuses;
   runtimeRegistryCachedAt = now;
@@ -1570,7 +1636,6 @@ async function agentRuntimeConfigResponse({ force = false } = {}) {
 async function loadDocumentIntoMemory() {
   await ensureAppStorage();
   settingsMemory = normalizeAppSettings(await readJson(settingsPath, defaultSettings));
-  assertExternalDocumentExists();
   await ensureDocumentFiles();
   const [markdown, review, agentSession, draftStat, reviewStat] = await Promise.all([
     readFile(activeDocument.markdownPath, "utf8"),
@@ -1692,19 +1757,21 @@ function countWords(markdown) {
 
 async function readRevisionState() {
   const raw = await readJson(activeDocument.revisionsPath, defaultRevisionState);
-  const revisions = Array.isArray(raw?.revisions)
-    ? raw.revisions
-        .filter((revision) => revision && typeof revision.id === "string")
-        .map((revision) => ({
-          id: revision.id,
-          parentId: typeof revision.parentId === "string" ? revision.parentId : null,
-          createdAt: typeof revision.createdAt === "string" ? revision.createdAt : nowIso(),
-          reason: typeof revision.reason === "string" ? revision.reason : "Saved draft",
-          title: typeof revision.title === "string" ? revision.title : "Untitled Draft",
-          words: Number.isFinite(revision.words) ? revision.words : 0,
-          hash: typeof revision.hash === "string" ? revision.hash : ""
-        }))
-    : [];
+  const revisions = [];
+  if (Array.isArray(raw?.revisions)) {
+    for (const revision of raw.revisions) {
+      if (!revision || typeof revision.id !== "string") continue;
+      revisions.push({
+        id: revision.id,
+        parentId: typeof revision.parentId === "string" ? revision.parentId : null,
+        createdAt: typeof revision.createdAt === "string" ? revision.createdAt : nowIso(),
+        reason: typeof revision.reason === "string" ? revision.reason : "Saved draft",
+        title: typeof revision.title === "string" ? revision.title : "Untitled Draft",
+        words: Number.isFinite(revision.words) ? revision.words : 0,
+        hash: typeof revision.hash === "string" ? revision.hash : ""
+      });
+    }
+  }
   const currentRevisionId =
     typeof raw?.currentRevisionId === "string" && revisions.some((revision) => revision.id === raw.currentRevisionId)
       ? raw.currentRevisionId
@@ -1932,7 +1999,16 @@ function stripHtmlToText(html) {
 
 function uniqueToneItems(value, maxItems) {
   if (!Array.isArray(value)) return [];
-  return Array.from(new Set(value.map((item) => String(item || "").trim()).filter(Boolean))).slice(0, maxItems);
+  const items = [];
+  const seen = new Set();
+  for (const item of value) {
+    const trimmed = String(item || "").trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    items.push(trimmed);
+    if (items.length >= maxItems) break;
+  }
+  return items;
 }
 
 function sentenceStats(text) {
@@ -2009,7 +2085,11 @@ function composeToneProfile({ sourceText, interviewAnswers = [], editorLanguage 
   const language = normalizeToneLanguage(editorLanguage);
   const sampleText = cleanToneSourceText([sourceText, ...interviewAnswers].filter(Boolean).join(" "));
   const style = toneStyleFromText(sampleText);
-  const answers = interviewAnswers.map((answer) => cleanToneSourceText(answer, 500)).filter(Boolean);
+  const answers = [];
+  for (const answer of interviewAnswers) {
+    const cleaned = cleanToneSourceText(answer, 500);
+    if (cleaned) answers.push(cleaned);
+  }
   const audience = answers[0] ? `Write for ${answers[0].replace(/[.]+$/g, "")}.` : "";
   const outcome = answers[1] ? `The reader should come away with: ${answers[1].replace(/[.]+$/g, "")}.` : "";
   const avoid = answers[2] ? `Avoid: ${answers[2].replace(/[.]+$/g, "")}.` : style.avoids.join(" ");
@@ -2042,27 +2122,36 @@ function extractUrlsFromText(value) {
 }
 
 function extractToneInterviewUrls(messages) {
-  return uniqueToneItems(
-    normalizeToneInterviewMessages(messages).flatMap((message) => extractUrlsFromText(message.body)),
-    5
-  );
+  const urls = [];
+  for (const message of normalizeToneInterviewMessages(messages)) {
+    for (const url of extractUrlsFromText(message.body)) {
+      urls.push(url);
+    }
+  }
+  return uniqueToneItems(urls, 5);
 }
 
 function normalizeToneInterviewMessages(value) {
   if (!Array.isArray(value)) return [];
-  return value
-    .map((message) => ({
+  const messages = [];
+  for (const message of value) {
+    const body = cleanToneSourceText(message?.body, 2000);
+    if (!body) continue;
+    messages.push({
       role: message?.role === "agent" ? "agent" : "human",
-      body: cleanToneSourceText(message?.body, 2000)
-    }))
-    .filter((message) => message.body)
-    .slice(-20);
+      body
+    });
+  }
+  return messages.slice(-20);
 }
 
 function toneInterviewAnswers(messages) {
-  return normalizeToneInterviewMessages(messages)
-    .filter((message) => message.role === "human")
-    .map((message) => message.body);
+  const answers = [];
+  for (const message of normalizeToneInterviewMessages(messages)) {
+    if (message.role !== "human") continue;
+    answers.push(message.body);
+  }
+  return answers;
 }
 
 function nextToneInterviewQuestion(messages) {
@@ -2813,16 +2902,19 @@ async function handleApi(req, res) {
     const source = body.source === "thread" ? "thread" : "chat";
     const bodyText = typeof body.body === "string" ? body.body : "";
     const threadId = typeof body.threadId === "string" ? body.threadId : null;
-    const selectedSkills = Array.isArray(body.skills)
-      ? body.skills
-          .filter((skill) => skill && typeof skill.id === "string")
-          .map((skill) => ({
-            id: slugSkillName(skill.id),
-            name: typeof skill.name === "string" ? skill.name : skill.id
-          }))
-          .filter((skill) => skill.id)
-          .slice(0, 8)
-      : [];
+    const selectedSkills = [];
+    if (Array.isArray(body.skills)) {
+      for (const skill of body.skills) {
+        if (!skill || typeof skill.id !== "string") continue;
+        const id = slugSkillName(skill.id);
+        if (!id) continue;
+        selectedSkills.push({
+          id,
+          name: typeof skill.name === "string" ? skill.name : skill.id
+        });
+        if (selectedSkills.length >= 8) break;
+      }
+    }
     const skills = await enrichSelectedSkills(selectedSkills);
     enqueueAgentTurn({ source, threadId, body: bodyText, skills });
     sendJson(res, 202, getDocument());
@@ -2879,15 +2971,12 @@ function updateSession(patch, reason) {
   );
 }
 
-async function drainAgentQueue() {
-  if (agentRunning) return;
-  agentRunning = true;
+async function processAgentQueueTurn() {
+  const turn = agentQueue.shift();
+  if (!turn) return;
 
-  while (agentQueue.length > 0) {
-    const turn = agentQueue.shift();
-
-    try {
-      const runtimeSelection = await resolveAgentRuntimeSelection(getDocument().agentSession);
+  try {
+    const runtimeSelection = await resolveAgentRuntimeSelection(getDocument().agentSession);
       updateSession(
         {
           status: "running",
@@ -2930,10 +3019,19 @@ async function drainAgentQueue() {
       applyAgentOutput(turn, { reply });
       updateSession({ status: "idle", queueDepth: agentQueue.length, activeTurn: null, lastError: message }, "agent:error");
     }
-  }
 
-  agentRunning = false;
-  if (agentQueue.length > 0) void drainAgentQueue();
+  await processAgentQueueTurn();
+}
+
+async function drainAgentQueue() {
+  if (agentRunning) return;
+  agentRunning = true;
+  try {
+    await processAgentQueueTurn();
+  } finally {
+    agentRunning = false;
+    if (agentQueue.length > 0) void drainAgentQueue();
+  }
 }
 
 function summarizeProposalForContext(proposal) {
@@ -3558,8 +3656,7 @@ async function runClaudeAgent({ prompt, model, effort, timeoutMs }) {
   return parseAgentOutput(result.stdout);
 }
 
-async function runStubAgent(turn) {
-  await new Promise((resolve) => setTimeout(resolve, 350));
+function buildStubAgentResult(turn) {
   if (turn.source === "thread" && asksForDocumentProposal(turn)) {
     const doc = getDocument();
     return {
@@ -3603,6 +3700,12 @@ async function runStubAgent(turn) {
     };
   }
   return { chatReply: "I am ready for an article-level pass. Add anchored comments for line edits or ask me for a structural pass here." };
+}
+
+async function runStubAgent(turn) {
+  const result = buildStubAgentResult(turn);
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  return result;
 }
 
 async function runProcessNoThrow(command, args, stdin, timeoutMs, options = {}) {
@@ -3984,9 +4087,10 @@ function applyAgentOutput(turn, output) {
       );
     }
 
-    const createdProposals = documentProposals
-      .filter((proposal) => proposal && typeof proposal.replacementMarkdown === "string" && proposal.replacementMarkdown.trim())
-      .map((proposal) => ({
+    const createdProposals = [];
+    for (const proposal of documentProposals) {
+      if (!proposal || typeof proposal.replacementMarkdown !== "string" || !proposal.replacementMarkdown.trim()) continue;
+      createdProposals.push({
         id: makeId("proposal"),
         source: turn.source,
         threadId: turn.threadId,
@@ -3998,7 +4102,8 @@ function applyAgentOutput(turn, output) {
         changeDecisions: {},
         author: "agent",
         createdAt
-      }));
+      });
+    }
     createdProposals.forEach((proposal) => {
       ledgerEvents.push(
         makeLedgerEvent({

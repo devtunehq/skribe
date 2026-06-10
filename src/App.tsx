@@ -1,4 +1,4 @@
-import React, { use, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import React, { use, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { MultiFileDiff } from "@pierre/diffs/react";
 import {
   Bold,
@@ -144,7 +144,7 @@ import {
 } from "./settingsOptions";
 import { FirstRunAgentDialog } from "./FirstRunAgentDialog";
 import { ToneSetupDialog } from "./ToneSetupDialog";
-import { useStickToBottomScroll } from "./useStickToBottomScroll";
+import { stickToBottomIfNear } from "./useStickToBottomScroll";
 import type {
   AgentSession,
   AgentRuntimeConfig,
@@ -5920,7 +5920,10 @@ function ChatPanel({
   onRequestProposalRevision
 }: ChatPanelProps) {
   const isAgentWorkingInChat = agentSession?.status === "running" && agentSession.activeTurn?.source === "chat";
-  const chatStackRef = useStickToBottomScroll<HTMLDivElement>([messages, proposals, isAgentWorkingInChat]);
+  const chatStackRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    stickToBottomIfNear(chatStackRef.current);
+  }, [messages, proposals, isAgentWorkingInChat]);
   const openProposals = proposals
     .filter((proposal) => proposal.status === "open" || proposal.status === "reviewed")
     .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -47,6 +48,7 @@ async function startServer(options = {}) {
       SKRIBE_AGENT_RUNTIME: "stub",
       SKRIBE_AGENT_MODEL: "auto",
       SKRIBE_AGENT_EFFORT: "auto",
+      SKRIBE_NO_OPEN_BROWSER: "1",
       ...(options.env ?? {})
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -86,7 +88,8 @@ async function runSkribeInvocation({ port, configDir, dataDir, args = [] }) {
       SKRIBE_NO_OPEN_BROWSER: "1",
       SKRIBE_AGENT_RUNTIME: "stub",
       SKRIBE_AGENT_MODEL: "auto",
-      SKRIBE_AGENT_EFFORT: "auto"
+      SKRIBE_AGENT_EFFORT: "auto",
+      SKRIBE_NO_OPEN_BROWSER: "1"
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -203,6 +206,22 @@ test("settings API persists all global settings to the config directory", async 
   }
 });
 
+test("open creates a missing external document when --create is passed", async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), "skribe-create-doc-"));
+  const markdownPath = join(rootDir, "newdoc.md");
+  const server = await startServer({ args: ["--create", markdownPath] });
+
+  try {
+    assert.ok(existsSync(markdownPath));
+    assert.match(await readFile(markdownPath, "utf8"), /# newdoc/);
+    const health = await jsonRequest(server.baseUrl, "/api/health");
+    assert.equal(health.payload.markdownPath, markdownPath);
+  } finally {
+    await server.stop();
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
 test("a second invocation opens another document in the running server", async () => {
   const rootDir = await mkdtemp(join(tmpdir(), "skribe-open-doc-"));
   const firstPath = join(rootDir, "first.md");
@@ -223,7 +242,7 @@ test("a second invocation opens another document in the running server", async (
     });
 
     assert.equal(handoff.code, 0);
-    assert.match(handoff.output, /Opened:/);
+    assert.match(handoff.output, /Opened:|Open Skribe in your browser/);
     assert.doesNotMatch(handoff.output, /EADDRINUSE/);
 
     const opened = await jsonRequest(server.baseUrl, "/api/document");

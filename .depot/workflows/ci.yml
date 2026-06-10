@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -41,6 +43,12 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
+
+      - name: Fetch main for react-doctor diff
+        run: git fetch origin main:main
+
+      - name: React Doctor (diff)
+        run: npm run doctor:diff
 
       - name: Unit tests
         run: npm test

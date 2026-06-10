@@ -105,6 +105,7 @@ function Hero() {
   }, /*#__PURE__*/React.createElement("span", {
     className: "cmd__prompt"
   }, "$"), NPX), /*#__PURE__*/React.createElement("button", {
+    type: "button",
     className: "cmd__copy" + (copied ? " is-copied" : ""),
     onClick: () => copyCmd(setCopied),
     "aria-label": "Copy install command"
