@@ -928,6 +928,8 @@ function useSkribeController() {
   const redoStackRef = useRef<HistorySnapshot[]>([]);
   const liveEditHistoryActiveRef = useRef(false);
   const historyRestoreRef = useRef(false);
+  const agentRuntimeRefreshInFlightRef = useRef(false);
+  const agentRuntimeRefreshAtRef = useRef(0);
   const agentSession = documentState?.agentSession;
 
   const clearPendingEditTimers = useCallback(() => {
@@ -970,12 +972,20 @@ function useSkribeController() {
   );
 
   const refreshAgentRuntimes = useCallback(async () => {
+    const now = Date.now();
+    if (agentRuntimeRefreshInFlightRef.current) return;
+    if (now - agentRuntimeRefreshAtRef.current < 3000) return;
+
+    agentRuntimeRefreshInFlightRef.current = true;
     try {
       const runtimeConfig = await fetchAgentRuntimes({ refresh: true });
       setAgentRuntimeConfig(mergeRuntimeConfigFromSession(runtimeConfig, stateRef.current?.agentSession));
       setAgentModelDraft(agentModelDraftFromConfiguredModel(runtimeConfig.configuredModel));
+      agentRuntimeRefreshAtRef.current = Date.now();
     } catch {
       // Runtime detection is best-effort; keep the last known config on failure.
+    } finally {
+      agentRuntimeRefreshInFlightRef.current = false;
     }
   }, [setAgentModelDraft, setAgentRuntimeConfig]);
 
