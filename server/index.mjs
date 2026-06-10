@@ -1459,9 +1459,9 @@ async function resolveAgentRuntimeSelection(session) {
   };
 }
 
-async function agentRuntimeConfigResponse() {
+async function agentRuntimeConfigResponse({ force = false } = {}) {
   const session = normalizeAgentSession(getDocument().agentSession);
-  const runtimes = await detectAgentRuntimes();
+  const runtimes = await detectAgentRuntimes({ force });
   const byId = new Map(runtimes.map((runtime) => [runtime.id, runtime]));
   const resolvedRuntime =
     session.configuredRuntime === "auto"
@@ -2551,7 +2551,8 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/agent/runtimes") {
-    sendJson(res, 200, await agentRuntimeConfigResponse());
+    const force = url.searchParams.get("refresh") === "1";
+    sendJson(res, 200, await agentRuntimeConfigResponse({ force }));
     return true;
   }
 

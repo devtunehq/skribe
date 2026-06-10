@@ -61,8 +61,14 @@ import {
   uniqueSkillIds
 } from "./agentDrafts";
 import {
+  AGENT_RUNTIME_UNAVAILABLE_MESSAGE,
+  AGENT_RUNTIME_UNAVAILABLE_SHORT,
+  AGENT_RUNTIME_UNAVAILABLE_TITLE,
   agentModelDraftFromConfiguredModel,
-  mergeRuntimeConfigFromSession
+  effectiveRuntimeId,
+  mergeRuntimeConfigFromSession,
+  providerSelectValue as resolveProviderSelectValue,
+  selectedRuntimeDisplayLabel
 } from "./agentRuntimeState";
 import {
   applySuggestion,
@@ -958,6 +964,16 @@ function useSkribeController() {
       setSettingsDraft
     ]
   );
+
+  const refreshAgentRuntimes = useCallback(async () => {
+    try {
+      const runtimeConfig = await fetchAgentRuntimes({ refresh: true });
+      setAgentRuntimeConfig(mergeRuntimeConfigFromSession(runtimeConfig, stateRef.current?.agentSession));
+      setAgentModelDraft(agentModelDraftFromConfiguredModel(runtimeConfig.configuredModel));
+    } catch {
+      // Runtime detection is best-effort; keep the last known config on failure.
+    }
+  }, [setAgentModelDraft, setAgentRuntimeConfig]);
 
   useEffect(() => {
     Promise.all([fetchAppSettings(), fetchDocument(), fetchRevisionHistory(), fetchAgentSkills(), fetchAgentRuntimes()])
@@ -3106,12 +3122,9 @@ function useSkribeController() {
   const providerOptions = runtimeOptions.filter((runtime) => runtime.id !== "stub");
   const hasAvailableAgentRuntime = providerOptions.some((runtime) => runtime.available);
   const agentRuntimeUnavailable = Boolean(agentRuntimeConfig && providerOptions.length > 0 && !hasAvailableAgentRuntime);
-  const providerSelectValue = providerOptions.some((runtime) => runtime.id === configuredRuntime)
-    ? configuredRuntime
-    : providerOptions.some((runtime) => runtime.id === resolvedRuntime)
-      ? resolvedRuntime ?? ""
-      : "";
-  const selectedRuntimeStatus = runtimeOptions.find((runtime) => runtime.id === resolvedRuntime) ?? null;
+  const effectiveRuntime = effectiveRuntimeId(configuredRuntime, resolvedRuntime);
+  const providerSelectValue = resolveProviderSelectValue(configuredRuntime, resolvedRuntime, providerOptions);
+  const selectedRuntimeStatus = runtimeOptions.find((runtime) => runtime.id === effectiveRuntime) ?? null;
   const modelOptions = selectedRuntimeStatus?.models ?? [];
   const effortOptions = selectedRuntimeStatus?.effortLevels ?? [];
   const effortSelectValue = effortOptions.some((level) => level.id === configuredEffort) ? configuredEffort : "auto";
@@ -3124,9 +3137,15 @@ function useSkribeController() {
         selectedRuntimeStatus.notes.length > 0 ? `: ${selectedRuntimeStatus.notes.join(" ")}` : ""
       }`
     : agentRuntimeUnavailable
-      ? "No supported agent runtime detected. Install or sign in to Codex CLI or Claude Code, then check runtimes in Settings."
-      : "Agent runtime";
-  const selectedRuntimeLabel = agentRuntimeUnavailable ? "No agent CLI" : selectedRuntimeStatus?.label ?? resolvedRuntime ?? "Agent";
+      ? AGENT_RUNTIME_UNAVAILABLE_TITLE
+      : configuredRuntime === "auto"
+        ? "Auto picks the first healthy agent runtime from your configured priority."
+        : "Agent runtime";
+  const selectedRuntimeLabel = selectedRuntimeDisplayLabel({
+    agentRuntimeUnavailable,
+    configuredRuntime,
+    runtimeLabel: selectedRuntimeStatus?.label ?? resolvedRuntime
+  });
   const selectedModelOption = modelOptions.find((model) => model.id === configuredModel);
   const selectedModelLabel = configuredModel === "auto" ? "Default model" : selectedModelOption?.label ?? configuredModel;
   const selectedEffortOption = effortOptions.find((level) => level.id === configuredEffort);
@@ -3242,6 +3261,7 @@ function useSkribeController() {
     commitAgentModel,
     selectAgentModel,
     updateAgentEffort,
+    refreshAgentRuntimes,
     persistSettings,
     updateSettingsDraft,
     saveSettingsDraft,
@@ -3515,7 +3535,8 @@ function AgentConfigControl() {
     setIsAgentConfigOpen,
     setIsAgentModelMenuOpen,
     updateAgentEffort,
-    updateAgentRuntime
+    updateAgentRuntime,
+    refreshAgentRuntimes
   } = useSkribeControllerContext();
 
   return (
@@ -3524,7 +3545,11 @@ function AgentConfigControl() {
         type="button"
         className={`agent-config-button is-${agentSession?.status ?? "idle"}`}
         onClick={() => {
-          setIsAgentConfigOpen((open) => !open);
+          setIsAgentConfigOpen((open) => {
+            const nextOpen = !open;
+            if (nextOpen) void refreshAgentRuntimes();
+            return nextOpen;
+          });
           setIsAgentModelMenuOpen(false);
         }}
         title={`${agentRuntimeTitle}. ${selectedModelLabel}. ${selectedEffortLabel}. Status: ${agentStatusLabel}.`}
@@ -3552,7 +3577,8 @@ function AgentConfigControl() {
                 disabled={agentConfigDisabled}
                 aria-label="Agent runtime"
               >
-                {providerSelectValue ? null : <option value="">No runtime detected</option>}
+                <option value="auto">Auto</option>
+                {providerSelectValue === "" ? <option value="">No runtime detected</option> : null}
                 {providerOptions.map((runtime) => (
                   <option key={runtime.id} value={runtime.id} disabled={!runtime.available}>
                     {runtime.label}{runtime.available ? "" : " unavailable"}
@@ -3567,7 +3593,7 @@ function AgentConfigControl() {
               className="agent-model-shell"
               title={
                 selectedRuntimeStatus?.supportsManualModel
-                  ? "Agent model. Use Default model to let the selected CLI choose."
+                  ? "Agent model. Use Default model to let the selected runtime choose."
                   : "Selected runtime does not expose model selection."
               }
             >
@@ -3610,7 +3636,7 @@ function AgentConfigControl() {
                     aria-pressed={configuredModel === "auto"}
                   >
                     <strong>Default model</strong>
-                    <span>{selectedRuntimeStatus?.label || "Selected CLI"} decides</span>
+                    <span>{selectedRuntimeStatus?.label || "Selected runtime"} decides</span>
                   </button>
                   {modelOptions.map((model) => (
                     <button
@@ -3639,7 +3665,7 @@ function AgentConfigControl() {
                 title={
                   selectedRuntimeStatus?.defaultEffort
                     ? `Reasoning effort. Default: ${selectedRuntimeStatus.defaultEffort}.`
-                    : "Reasoning effort. Use Default effort to let the selected CLI choose."
+                    : "Reasoning effort. Use Default effort to let the selected runtime choose."
                 }
               >
                 <select
@@ -3660,7 +3686,8 @@ function AgentConfigControl() {
           ) : null}
           {agentRuntimeUnavailable ? (
             <p className="agent-runtime-warning">
-              No agent CLI detected. Install or sign in to Codex CLI or Claude Code, then run <code>skribe doctor</code>.
+              {AGENT_RUNTIME_UNAVAILABLE_MESSAGE}
+              <code>skribe doctor</code>.
             </p>
           ) : null}
         </div>
@@ -5442,7 +5469,7 @@ function ThreadPanel(props: ThreadPanelProps) {
             submitIcon={<MessageSquare size={15} />}
             onSubmit={onAddThread}
             disabled={agentRuntimeUnavailable}
-            disabledReason="No agent CLI detected. Install or sign in to Codex CLI or Claude Code, then run skribe doctor."
+            disabledReason={`${AGENT_RUNTIME_UNAVAILABLE_MESSAGE}skribe doctor.`}
           />
           <div className="button-row">
             <button type="button" className="ghost-button" onClick={onClearSelection}>
@@ -5508,7 +5535,7 @@ function ThreadPanel(props: ThreadPanelProps) {
                 className="secondary-button small"
                 disabled={isAgentWorkingForActiveThread || agentRuntimeUnavailable}
                 onClick={() => onRequestAgentReply(activeThread.id)}
-                title={agentRuntimeUnavailable ? "No agent CLI detected. Run skribe doctor." : undefined}
+                title={agentRuntimeUnavailable ? AGENT_RUNTIME_UNAVAILABLE_SHORT : undefined}
               >
                 <Sparkles size={14} />
                 Ask agent
@@ -5610,7 +5637,7 @@ function ThreadPanel(props: ThreadPanelProps) {
               submitIcon={<Send size={15} />}
               onSubmit={() => onAddMessage(activeThread.id)}
               disabled={agentRuntimeUnavailable}
-              disabledReason="No agent CLI detected. Install or sign in to Codex CLI or Claude Code, then run skribe doctor."
+              disabledReason={`${AGENT_RUNTIME_UNAVAILABLE_MESSAGE}skribe doctor.`}
             />
           </div>
 
@@ -5972,7 +5999,7 @@ function ChatPanel({
           submitIcon={<Send size={15} />}
           onSubmit={onSend}
           disabled={agentRuntimeUnavailable}
-          disabledReason="No agent CLI detected. Install or sign in to Codex CLI or Claude Code, then run skribe doctor."
+          disabledReason={`${AGENT_RUNTIME_UNAVAILABLE_MESSAGE}skribe doctor.`}
         />
       </div>
     </div>

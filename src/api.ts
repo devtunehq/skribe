@@ -127,8 +127,9 @@ export async function fetchAgentSkills(): Promise<AgentSkill[]> {
   return Array.isArray(payload.skills) ? payload.skills : [];
 }
 
-export async function fetchAgentRuntimes(): Promise<AgentRuntimeConfig> {
-  const response = await fetch("/api/agent/runtimes", { cache: "no-store" });
+export async function fetchAgentRuntimes(options?: { refresh?: boolean }): Promise<AgentRuntimeConfig> {
+  const query = options?.refresh ? "?refresh=1" : "";
+  const response = await fetch(`/api/agent/runtimes${query}`, { cache: "no-store" });
   if (!response.ok) throw new Error(`Unable to load agent runtimes: ${response.status}`);
   return response.json();
 }
