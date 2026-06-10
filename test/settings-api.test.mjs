@@ -148,7 +148,10 @@ test("settings API persists all global settings to the config directory", async 
         rightCollapsed: true
       },
       proposalModeDefault: "bold",
-      diffViewMode: "unified"
+      diffViewMode: "unified",
+      localInferenceBaseUrl: "http://127.0.0.1:5999/v1",
+      localInferenceApiKey: "test-key",
+      localInferenceMaxTokens: 8192
     };
 
     const saved = await jsonRequest(server.baseUrl, "/api/settings", {
@@ -174,6 +177,9 @@ test("settings API persists all global settings to the config directory", async 
     assert.deepEqual(saved.payload.settings.panelState, { leftCollapsed: true, rightCollapsed: true });
     assert.equal(saved.payload.settings.proposalModeDefault, "bold");
     assert.equal(saved.payload.settings.diffViewMode, "unified");
+    assert.equal(saved.payload.settings.localInferenceBaseUrl, "http://127.0.0.1:5999/v1");
+    assert.equal(saved.payload.settings.localInferenceApiKey, "test-key");
+    assert.equal(saved.payload.settings.localInferenceMaxTokens, 8192);
 
     const settingsFile = JSON.parse(await readFile(join(server.configDir, "settings.json"), "utf8"));
     assert.equal(settingsFile.userName, "Alex");
@@ -184,6 +190,9 @@ test("settings API persists all global settings to the config directory", async 
     assert.equal(settingsFile.theme, "sage");
     assert.equal(settingsFile.proposalModeDefault, "bold");
     assert.equal(settingsFile.diffViewMode, "unified");
+    assert.equal(settingsFile.localInferenceBaseUrl, "http://127.0.0.1:5999/v1");
+    assert.equal(settingsFile.localInferenceApiKey, "test-key");
+    assert.equal(settingsFile.localInferenceMaxTokens, 8192);
 
     const health = await jsonRequest(server.baseUrl, "/api/health");
     assert.equal(health.response.status, 200);
@@ -214,7 +223,7 @@ test("a second invocation opens another document in the running server", async (
     });
 
     assert.equal(handoff.code, 0);
-    assert.match(handoff.output, /Skribe is already running/);
+    assert.match(handoff.output, /Opened:/);
     assert.doesNotMatch(handoff.output, /EADDRINUSE/);
 
     const opened = await jsonRequest(server.baseUrl, "/api/document");

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  displayAgentMessageBody,
   getActiveSlashCommand,
   prepareAgentTurnDraft,
   skillMatchesQuery,
@@ -51,6 +52,14 @@ test("unknown slash commands remain in the message body", () => {
   assert.equal(draft.body, "Use /unknown-pass carefully.");
   assert.equal(draft.summary, "Use /unknown-pass carefully.");
   assert.deepEqual(draft.skillIds, []);
+});
+
+test("displayAgentMessageBody unwraps stored JSON thread replies", () => {
+  const body = JSON.stringify({
+    threadReplies: [{ threadId: "thread_1", body: "First idea.\n\nSecond idea." }]
+  });
+
+  assert.equal(displayAgentMessageBody(body), "First idea.\n\nSecond idea.");
 });
 
 test("slash command parsing and skill matching support autocomplete", () => {

@@ -50,6 +50,9 @@ const defaultSettings = {
   agentRuntime: defaultConfiguredRuntime,
   agentModel: defaultConfiguredModel,
   agentEffort: defaultConfiguredEffort,
+  localInferenceBaseUrl: "",
+  localInferenceApiKey: "",
+  localInferenceMaxTokens: 4096,
   defaultSkills: [],
   autoReplyToComments: true,
   showResolvedThreads: false,
@@ -276,6 +279,20 @@ function normalizePanelState(value) {
   };
 }
 
+function normalizeLocalInferenceBaseUrl(value) {
+  return typeof value === "string" ? value.trim().slice(0, 240) : defaultSettings.localInferenceBaseUrl;
+}
+
+function normalizeLocalInferenceApiKey(value) {
+  return typeof value === "string" ? value.trim().slice(0, 240) : defaultSettings.localInferenceApiKey;
+}
+
+function normalizeLocalInferenceMaxTokens(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return defaultSettings.localInferenceMaxTokens;
+  return Math.min(32768, Math.max(512, Math.round(parsed)));
+}
+
 function normalizeAppSettings(settings) {
   const source = settings && typeof settings === "object" ? settings : {};
   const userName = typeof source.userName === "string" ? source.userName.slice(0, 120) : defaultSettings.userName;
@@ -295,6 +312,11 @@ function normalizeAppSettings(settings) {
     agentRuntime: normalizeConfiguredRuntime(source.agentRuntime ?? defaultSettings.agentRuntime),
     agentModel: normalizeConfiguredModel(source.agentModel ?? defaultSettings.agentModel),
     agentEffort: normalizeConfiguredEffort(source.agentEffort ?? defaultSettings.agentEffort),
+    localInferenceBaseUrl: normalizeLocalInferenceBaseUrl(source.localInferenceBaseUrl),
+    localInferenceApiKey: normalizeLocalInferenceApiKey(source.localInferenceApiKey),
+    localInferenceMaxTokens: normalizeLocalInferenceMaxTokens(
+      source.localInferenceMaxTokens ?? defaultSettings.localInferenceMaxTokens
+    ),
     defaultSkills: normalizeDefaultSkills(source.defaultSkills),
     autoReplyToComments:
       typeof source.autoReplyToComments === "boolean"
@@ -315,11 +337,20 @@ function getSettings() {
 }
 
 async function setSettings(nextSettings) {
+  const previous = getSettings();
   settingsMemory = normalizeAppSettings({
-    ...getSettings(),
+    ...previous,
     ...(nextSettings && typeof nextSettings === "object" ? nextSettings : {}),
     updatedAt: nowIso()
   });
+  if (
+    previous.localInferenceBaseUrl !== settingsMemory.localInferenceBaseUrl ||
+    previous.localInferenceApiKey !== settingsMemory.localInferenceApiKey ||
+    previous.localInferenceMaxTokens !== settingsMemory.localInferenceMaxTokens
+  ) {
+    runtimeRegistryCache = null;
+    runtimeRegistryCachedAt = 0;
+  }
   await mkdir(appConfigDir, { recursive: true });
   await atomicWrite(settingsPath, JSON.stringify(settingsMemory, null, 2));
   return settingsMemory;
@@ -579,6 +610,7 @@ Environment:
   SKRIBE_AGENT_RUNTIME_PRIORITY Runtime order for auto, default codex,claude,local
   SKRIBE_LOCAL_BASE_URL         OpenAI-compatible base URL for local inference
   SKRIBE_LOCAL_API_KEY          Optional bearer token for local inference servers
+  SKRIBE_LOCAL_MAX_TOKENS       Max completion tokens for local inference requests
   SKRIBE_SKILL_ROOTS            Extra colon-separated skill directories`);
 }
 
@@ -912,6 +944,8 @@ function runtimePriority() {
 
 const localInferenceProbeTimeoutMs = 2000;
 const localSkillInlineMaxChars = 6000;
+const localSkillInlinePerSkillMaxChars = 1000;
+const localSkillInlineTotalMaxChars = 2500;
 const localInferenceDefaultEndpoints = [
   { label: "Ollama", baseUrl: "http://127.0.0.1:11434/v1" },
   { label: "LM Studio", baseUrl: "http://127.0.0.1:1234/v1" },
@@ -924,12 +958,18 @@ function normalizeLocalBaseUrl(value) {
   return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
 }
 
-function localInferenceApiKey() {
-  return process.env.SKRIBE_LOCAL_API_KEY || "";
+function resolvedLocalInferenceBaseUrl() {
+  const fromEnv = normalizeLocalBaseUrl(process.env.SKRIBE_LOCAL_BASE_URL);
+  if (fromEnv) return fromEnv;
+  return normalizeLocalBaseUrl(getSettings().localInferenceBaseUrl);
+}
+
+function resolvedLocalInferenceApiKey() {
+  return process.env.SKRIBE_LOCAL_API_KEY || getSettings().localInferenceApiKey || "";
 }
 
 function localInferenceBaseUrlCandidates() {
-  const configured = normalizeLocalBaseUrl(process.env.SKRIBE_LOCAL_BASE_URL);
+  const configured = resolvedLocalInferenceBaseUrl();
   if (configured) return [{ label: "configured", baseUrl: configured }];
   return localInferenceDefaultEndpoints;
 }
@@ -937,7 +977,7 @@ function localInferenceBaseUrlCandidates() {
 function localInferenceRequestHeaders(contentType = null) {
   const headers = { accept: "application/json" };
   if (contentType) headers["content-type"] = contentType;
-  const apiKey = localInferenceApiKey();
+  const apiKey = resolvedLocalInferenceApiKey();
   if (apiKey) headers.authorization = `Bearer ${apiKey}`;
   return headers;
 }
@@ -986,6 +1026,47 @@ async function resolveLocalInferenceEndpoint() {
   return null;
 }
 
+function normalizeMessageContent(value) {
+  if (typeof value === "string") return value;
+  if (value == null) return "";
+  if (Array.isArray(value)) {
+    return value
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (typeof part?.text === "string") return part.text;
+        if (typeof part?.content === "string") return part.content;
+        return "";
+      })
+      .join("");
+  }
+  return "";
+}
+
+function extractLocalCompletionContent(payload) {
+  const choice = payload?.choices?.[0];
+  if (!choice) {
+    return normalizeMessageContent(payload?.content || payload?.response).trim();
+  }
+
+  const message = choice.message && typeof choice.message === "object" ? choice.message : {};
+  const candidates = [
+    message.content,
+    message.reasoning_content,
+    message.reasoning,
+    choice.text,
+    choice.content,
+    payload?.content,
+    payload?.response
+  ];
+
+  for (const candidate of candidates) {
+    const text = normalizeMessageContent(candidate).trim();
+    if (text) return text;
+  }
+
+  return "";
+}
+
 async function postLocalChatCompletion(baseUrl, body, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -1018,17 +1099,22 @@ async function postLocalChatCompletion(baseUrl, body, timeoutMs) {
       };
     }
 
-    const content = payload?.choices?.[0]?.message?.content;
-    if (typeof content !== "string" || !content.trim()) {
+    const content = extractLocalCompletionContent(payload);
+    const finishReason = payload?.choices?.[0]?.finish_reason ?? null;
+    if (!content) {
       return {
         ok: false,
         status: response.status,
-        errorText: "Local inference server returned an empty completion.",
-        content: ""
+        errorText:
+          finishReason === "length"
+            ? "Local inference server stopped at the token limit. Raise max completion tokens in Settings → Agent, use fewer skills, or increase server context."
+            : "Local inference server returned an empty completion. Try fewer skills, raise max completion tokens in Settings → Agent, or retry without JSON response mode.",
+        content: "",
+        finishReason
       };
     }
 
-    return { ok: true, status: response.status, content };
+    return { ok: true, status: response.status, content, finishReason };
   } catch (error) {
     return {
       ok: false,
@@ -1250,11 +1336,11 @@ async function detectClaudeRuntime() {
 }
 
 async function detectLocalRuntime() {
-  const configuredBaseUrl = normalizeLocalBaseUrl(process.env.SKRIBE_LOCAL_BASE_URL);
+  const configuredBaseUrl = resolvedLocalInferenceBaseUrl();
   const endpoint = await resolveLocalInferenceEndpoint();
   if (!endpoint) {
     const notes = [
-      "No local inference server detected. Start Ollama, LM Studio, or llama-server, or set SKRIBE_LOCAL_BASE_URL."
+      "No local inference server detected. Start Ollama, LM Studio, or llama-server, or set a base URL in Settings > Agent."
     ];
     if (configuredBaseUrl) notes.unshift(`Configured endpoint not reachable: ${configuredBaseUrl}`);
     return {
@@ -2873,12 +2959,18 @@ function sanitizeAgentContextText(value) {
     : text;
 }
 
+function sanitizeMessageForAgentContext(message) {
+  if (!message || typeof message !== "object") return message;
+  const sanitized = { ...message };
+  delete sanitized.skills;
+  if (message.author === "agent" && typeof message.body === "string") {
+    sanitized.body = sanitizeAgentContextText(message.body);
+  }
+  return sanitized;
+}
+
 function sanitizeChatMessageForAgentContext(message) {
-  if (!message || message.author !== "agent" || typeof message.body !== "string") return message;
-  return {
-    ...message,
-    body: sanitizeAgentContextText(message.body)
-  };
+  return sanitizeMessageForAgentContext(message);
 }
 
 function sanitizeLedgerEventForAgentContext(event) {
@@ -2893,14 +2985,7 @@ function sanitizeThreadForAgentContext(thread) {
   if (!thread || !Array.isArray(thread.messages)) return thread;
   return {
     ...thread,
-    messages: thread.messages.map((message) =>
-      message?.author === "agent" && typeof message.body === "string"
-        ? {
-            ...message,
-            body: sanitizeAgentContextText(message.body)
-          }
-        : message
-    )
+    messages: thread.messages.map((message) => sanitizeMessageForAgentContext(message))
   };
 }
 
@@ -3006,23 +3091,54 @@ function clipAroundNeedle(text, needle, maxChars) {
   return `${prefix}${text.slice(start, end)}${suffix}`;
 }
 
-function markdownForAgentTurn(turn, runtimeId = null) {
+function markdownForAgentTurn(turn, runtimeId = null, options = {}) {
   const doc = getDocument();
   const policy = buildResponsePolicy(turn);
-  const defaultMax = runtimeId === "local" ? 16000 : 24000;
-  const maxChars = Number(process.env.SKRIBE_AGENT_MARKDOWN_MAX_CHARS || defaultMax);
+  const defaultMax = runtimeId === "local" ? 3500 : 24000;
+  const maxChars = Number(options.maxChars || process.env.SKRIBE_AGENT_MARKDOWN_MAX_CHARS || defaultMax);
   if (doc.markdown.length <= maxChars) return doc.markdown;
 
   if (policy.intent === "anchored_thread") {
     const review = normalizeReview(doc.review);
     const activeThread = turn.threadId ? review.threads.find((thread) => thread.id === turn.threadId) : null;
-    return clipAroundNeedle(doc.markdown, activeThread?.anchor?.exact, Math.min(maxChars, 9000));
+    const threadClipMax = runtimeId === "local" ? 2000 : 9000;
+    return clipAroundNeedle(doc.markdown, activeThread?.anchor?.exact, Math.min(maxChars, threadClipMax));
   }
 
   return `${doc.markdown.slice(0, maxChars)}\n\n[... document clipped for agent context ...]`;
 }
 
-function buildAgentContextPacket(turn) {
+function buildMinimalLocalContextPacket(turn) {
+  const review = normalizeReview(getDocument().review);
+  const settings = getSettings();
+  const activeThread = turn.threadId ? review.threads.find((thread) => thread.id === turn.threadId) : null;
+
+  return {
+    currentTurn: {
+      source: turn.source,
+      body: turn.body,
+      threadId: turn.threadId ?? null,
+      skills: Array.isArray(turn.skills) ? turn.skills.map((skill) => ({ id: skill.id, name: skill.name })) : []
+    },
+    responsePolicy: buildResponsePolicy(turn),
+    activeThread: activeThread
+      ? {
+          id: activeThread.id,
+          anchor: activeThread.anchor,
+          messages: activeThread.messages.slice(-4).map((message) => ({
+            author: message.author,
+            body: clipText(message.body, 400)
+          }))
+        }
+      : null,
+    writingPreferences: {
+      toneOfVoice: clipText(settings.toneOfVoice, 300),
+      editorLanguage: settings.editorLanguage
+    }
+  };
+}
+
+function buildAgentContextPacket(turn, { compact = false } = {}) {
   const doc = getDocument();
   const review = normalizeReview(doc.review);
   const settings = getSettings();
@@ -3043,6 +3159,7 @@ function buildAgentContextPacket(turn) {
       event.type === "thread_suggestion_decision" ||
       event.type === "thread_status"
   );
+  const toneOfVoice = compact ? clipText(settings.toneOfVoice, 700) : settings.toneOfVoice;
 
   return {
     document: {
@@ -3056,24 +3173,26 @@ function buildAgentContextPacket(turn) {
     },
     writingPreferences: {
       userName: settings.userName,
-      toneOfVoice: settings.toneOfVoice,
+      toneOfVoice,
       editorLanguage: settings.editorLanguage
     },
     currentTurn: turn,
     responsePolicy,
     requestedSkills: Array.isArray(turn.skills) ? turn.skills : [],
     activeThread: sanitizeThreadForAgentContext(activeThread),
-    openThreads: openThreads.map(sanitizeThreadForAgentContext),
+    openThreads: compact
+      ? []
+      : openThreads.map(sanitizeThreadForAgentContext),
     resolvedThreadCount: review.threads.filter((thread) => thread.status === "resolved").length,
-    recentChat: review.chat.slice(-8).map(sanitizeChatMessageForAgentContext),
+    recentChat: review.chat.slice(compact ? -3 : -8).map(sanitizeChatMessageForAgentContext),
     openProposals: review.proposals
       .filter((proposal) => proposal.status === "open" || proposal.status === "reviewed")
-      .slice(-5)
+      .slice(compact ? -2 : -5)
       .map(summarizeProposalForContext),
     contextMemory: {
-      recentLedger: contextLedger.slice(-20).map(sanitizeLedgerEventForAgentContext),
-      relevantLedger: relevantLedger.slice(-14).map(sanitizeLedgerEventForAgentContext),
-      decisionLedger: decisionLedger.slice(-20).map(sanitizeLedgerEventForAgentContext)
+      recentLedger: contextLedger.slice(compact ? -8 : -20).map(sanitizeLedgerEventForAgentContext),
+      relevantLedger: relevantLedger.slice(compact ? -6 : -14).map(sanitizeLedgerEventForAgentContext),
+      decisionLedger: decisionLedger.slice(compact ? -8 : -20).map(sanitizeLedgerEventForAgentContext)
     }
   };
 }
@@ -3098,19 +3217,24 @@ function buildProposalModeInstruction(responsePolicy) {
   ].filter(Boolean).join("\n");
 }
 
-async function loadInlinedSkillInstructions(selectedSkills) {
+async function loadInlinedSkillInstructions(selectedSkills, { perSkillMax = localSkillInlineMaxChars, totalMax = null } = {}) {
   if (!Array.isArray(selectedSkills) || selectedSkills.length === 0) return "";
 
   const registry = await discoverAgentSkills();
   const byId = new Map(registry.map((skill) => [skill.id, skill]));
   const sections = [];
+  let remaining = totalMax ?? Number.POSITIVE_INFINITY;
 
   for (const skill of selectedSkills) {
+    if (remaining <= 0) break;
     const registered = byId.get(skill.id);
     if (!registered?.path) continue;
     try {
       const markdown = await readFile(registered.path, "utf8");
-      sections.push(`### Skill: ${registered.name || skill.id}\n${clipText(markdown, localSkillInlineMaxChars)}`);
+      const budget = Math.min(perSkillMax, remaining);
+      const clipped = clipText(markdown, budget);
+      sections.push(`### Skill: ${registered.name || skill.id}\n${clipped}`);
+      remaining -= clipped.length;
     } catch {
       // Ignore unreadable skills; inlining is best-effort.
     }
@@ -3118,6 +3242,171 @@ async function loadInlinedSkillInstructions(selectedSkills) {
 
   if (sections.length === 0) return "";
   return `\nRequested skill instructions:\n${sections.join("\n\n")}\n`;
+}
+
+function localAgentMaxTokens() {
+  const fromEnv = Number(process.env.SKRIBE_LOCAL_MAX_TOKENS);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return Math.max(512, Math.round(fromEnv));
+  return normalizeLocalInferenceMaxTokens(getSettings().localInferenceMaxTokens);
+}
+
+function isLowQualityAgentText(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return true;
+  if (/^(`{3,}|#{1,6}\s*)$/.test(trimmed)) return true;
+  if (/^[\.\-–—,;:!?`'"…\s]+$/.test(trimmed)) return true;
+  if (/^(given|based|here|sure|okay|ok)[.!?,:\s]*$/i.test(trimmed)) return true;
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  if (words.length === 1 && trimmed.length < 24 && !/[?!]/.test(trimmed)) return true;
+  if (trimmed.length < 8 && !/[?!]/.test(trimmed)) return true;
+  return false;
+}
+
+function normalizeLocalAgentOutput(turn, output, rawText) {
+  const normalized = normalizeAgentOutputForTurn(turn, output, rawText);
+
+  const candidateTexts = [
+    normalized.reply,
+    normalized.chatReply,
+    ...(Array.isArray(normalized.threadReplies) ? normalized.threadReplies.map((reply) => reply?.body) : []),
+    rawText
+  ].filter((value) => typeof value === "string" && value.trim() && !looksLikeAgentJsonEnvelope(value));
+  const hasQualityText = candidateTexts.some((value) => !isLowQualityAgentText(value));
+  if (!hasQualityText) {
+    throw new Error(
+      "Local model returned an incomplete response. This is usually a context-window limit, not max completion tokens. Try fewer skills, retry after the compact fallback, or raise your inference server context (for Ollama: OLLAMA_NUM_CTX=32768)."
+    );
+  }
+
+  return normalized;
+}
+
+async function buildLocalAgentMessages(turn, runtimeSelection, { minimal = false } = {}) {
+  const contextPacket = minimal ? buildMinimalLocalContextPacket(turn) : buildAgentContextPacket(turn, { compact: true });
+  const currentMarkdown = minimal
+    ? markdownForAgentTurn(turn, "local", { maxChars: turn.source === "thread" ? 1800 : 2500 })
+    : markdownForAgentTurn(turn, "local");
+  const proposalModeInstruction = buildProposalModeInstruction(contextPacket.responsePolicy);
+  const inlinedSkills = minimal
+    ? ""
+    : await loadInlinedSkillInstructions(turn.skills, {
+        perSkillMax: localSkillInlinePerSkillMaxChars,
+        totalMax: localSkillInlineTotalMaxChars
+      });
+  const threadExample =
+    turn.source === "thread" && turn.threadId
+      ? `Example for this thread turn:\n{"threadReplies":[{"threadId":"${turn.threadId}","body":"Your helpful reply here."}]}`
+      : `Example for chat:\n{"chatReply":"Your helpful reply here."}`;
+
+  const system = [
+    "You are Skribe's local writing assistant.",
+    minimal
+      ? "Return ONLY one JSON object with a complete, helpful answer. No markdown fences."
+      : "Return ONLY one JSON object. No markdown fences, no prose before or after the JSON.",
+    proposalModeInstruction,
+    "Rules:",
+    "- Do not edit files.",
+    minimal ? "- Keep the answer focused on the current turn." : "- Follow requested skill instructions when provided.",
+    "- Respect writingPreferences.toneOfVoice and document.editorLanguage.",
+    "- If responsePolicy.allowDocumentProposals is false, do not return documentProposals.",
+    turn.source === "thread"
+      ? "- This is an anchored thread turn. Put your answer in threadReplies with the provided threadId."
+      : "- This is a chat turn. Put your answer in chatReply.",
+    threadExample
+  ].join("\n");
+
+  const user = [
+    "Output shape:",
+    '{"reply":"optional short summary","threadReplies":[{"threadId":"thread id","body":"reply text"}],"suggestions":[{"threadId":"thread id","replacement":"replacement text"}],"documentProposals":[{"title":"short title","summary":"why","replacementMarkdown":"full markdown"}],"chatReply":"optional chat response"}',
+    inlinedSkills,
+    "Agent context packet:",
+    JSON.stringify(contextPacket, null, 2),
+    "Current Markdown:",
+    currentMarkdown
+  ].join("\n\n");
+
+  return { system, user };
+}
+
+async function executeLocalAgentTurn({ turn, runtimeSelection, model, timeoutMs, minimal = false }) {
+  const endpoint = await resolveLocalInferenceEndpoint();
+  if (!endpoint) {
+    throw new Error(
+      "Local inference server is not available. Start Ollama, LM Studio, or llama-server, or set a base URL in Settings > Agent."
+    );
+  }
+
+  const resolvedModel = model || endpoint.models[0]?.id;
+  if (!resolvedModel) {
+    throw new Error(`No model available at ${endpoint.baseUrl}. Pull or load a model first.`);
+  }
+
+  const { system, user } = await buildLocalAgentMessages(turn, runtimeSelection, { minimal });
+  const requestBody = {
+    model: resolvedModel,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user }
+    ],
+    temperature: 0.3,
+    max_tokens: localAgentMaxTokens(),
+    stream: false
+  };
+
+  if (process.env.SKRIBE_LOCAL_JSON_RESPONSE === "1") {
+    requestBody.response_format = { type: "json_object" };
+  }
+
+  await appendEvent({
+    type: "agent:spawn",
+    at: nowIso(),
+    args: [
+      "local",
+      `${endpoint.baseUrl}/chat/completions`,
+      resolvedModel,
+      `max_tokens=${requestBody.max_tokens}`,
+      minimal ? "minimal=1" : "minimal=0"
+    ]
+  });
+
+  let result = await postLocalChatCompletion(endpoint.baseUrl, requestBody, timeoutMs);
+  if (
+    requestBody.response_format &&
+    (!result.ok || !String(result.content || "").trim()) &&
+    (result.status === 400 || /empty completion|token limit/i.test(result.errorText || ""))
+  ) {
+    const retryBody = { ...requestBody };
+    delete retryBody.response_format;
+    result = await postLocalChatCompletion(endpoint.baseUrl, retryBody, timeoutMs);
+  }
+
+  if (!result.ok) {
+    throw new Error(result.errorText || "Local inference request failed.");
+  }
+
+  await appendEvent({
+    type: "agent:raw-output",
+    at: nowIso(),
+    stdout: result.content.slice(-4000),
+    stderr: "",
+    finalText: result.content.slice(-4000)
+  });
+
+  return normalizeLocalAgentOutput(turn, parseAgentOutput(result.content), result.content);
+}
+
+function isRetriableLocalAgentError(message) {
+  return /incomplete response|empty completion|token limit/i.test(message);
+}
+
+async function runLocalAgent({ turn, runtimeSelection, model, timeoutMs }) {
+  try {
+    return await executeLocalAgentTurn({ turn, runtimeSelection, model, timeoutMs, minimal: false });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!isRetriableLocalAgentError(message)) throw error;
+    return await executeLocalAgentTurn({ turn, runtimeSelection, model, timeoutMs, minimal: true });
+  }
 }
 
 async function buildAgentPrompt(turn, runtimeSelection = null) {
@@ -3183,6 +3472,16 @@ ${currentMarkdown}
 }
 
 async function runAgentRuntime(turn, runtimeSelection) {
+  if (runtimeSelection.adapter.id === "local") {
+    return runtimeSelection.adapter.run({
+      turn,
+      runtimeSelection,
+      model: runtimeSelection.model,
+      effort: runtimeSelection.effort,
+      timeoutMs: agentTimeoutMs
+    });
+  }
+
   return runtimeSelection.adapter.run({
     turn,
     prompt: await buildAgentPrompt(turn, runtimeSelection),
@@ -3257,55 +3556,6 @@ async function runClaudeAgent({ prompt, model, effort, timeoutMs }) {
   });
 
   return parseAgentOutput(result.stdout);
-}
-
-async function runLocalAgent({ prompt, model, timeoutMs }) {
-  const endpoint = await resolveLocalInferenceEndpoint();
-  if (!endpoint) {
-    throw new Error(
-      "Local inference server is not available. Start Ollama, LM Studio, or llama-server, or set SKRIBE_LOCAL_BASE_URL."
-    );
-  }
-
-  const resolvedModel = model || endpoint.models[0]?.id;
-  if (!resolvedModel) {
-    throw new Error(`No model available at ${endpoint.baseUrl}. Pull or load a model first.`);
-  }
-
-  const requestBody = {
-    model: resolvedModel,
-    messages: [{ role: "user", content: prompt }],
-    temperature: 0.2,
-    stream: false,
-    response_format: { type: "json_object" }
-  };
-
-  await appendEvent({
-    type: "agent:spawn",
-    at: nowIso(),
-    args: ["local", `${endpoint.baseUrl}/chat/completions`, resolvedModel]
-  });
-
-  let result = await postLocalChatCompletion(endpoint.baseUrl, requestBody, timeoutMs);
-  if (!result.ok && result.status === 400 && requestBody.response_format) {
-    const retryBody = { ...requestBody };
-    delete retryBody.response_format;
-    result = await postLocalChatCompletion(endpoint.baseUrl, retryBody, timeoutMs);
-  }
-
-  if (!result.ok) {
-    throw new Error(result.errorText || "Local inference request failed.");
-  }
-
-  await appendEvent({
-    type: "agent:raw-output",
-    at: nowIso(),
-    stdout: result.content.slice(-4000),
-    stderr: "",
-    finalText: result.content.slice(-4000)
-  });
-
-  return parseAgentOutput(result.content);
 }
 
 async function runStubAgent(turn) {
@@ -3397,6 +3647,102 @@ function runProcess(command, args, stdin, timeoutMs, options = {}) {
     });
     child.stdin.end(stdin);
   });
+}
+
+function looksLikeAgentJsonEnvelope(text) {
+  const trimmed = String(text || "").trim();
+  return trimmed.startsWith("{") && /"(threadReplies|chatReply|documentProposals)"\s*:/.test(trimmed);
+}
+
+function mergeAgentOutputs(base, extra) {
+  if (!extra || typeof extra !== "object") return base;
+  const merged = {
+    ...base,
+    ...extra,
+    threadReplies: [
+      ...(Array.isArray(base.threadReplies) ? base.threadReplies : []),
+      ...(Array.isArray(extra.threadReplies) ? extra.threadReplies : [])
+    ],
+    suggestions: [
+      ...(Array.isArray(base.suggestions) ? base.suggestions : []),
+      ...(Array.isArray(extra.suggestions) ? extra.suggestions : [])
+    ],
+    documentProposals: [
+      ...(Array.isArray(base.documentProposals) ? base.documentProposals : []),
+      ...(Array.isArray(extra.documentProposals) ? extra.documentProposals : [])
+    ]
+  };
+
+  if (typeof extra.chatReply === "string" && extra.chatReply.trim()) {
+    merged.chatReply = extra.chatReply.trim();
+  }
+  if (typeof extra.reply === "string" && extra.reply.trim() && !looksLikeAgentJsonEnvelope(extra.reply)) {
+    merged.reply = extra.reply.trim();
+  }
+
+  return merged;
+}
+
+function normalizeAgentOutputForTurn(turn, output, rawText = "") {
+  let normalized =
+    output && typeof output === "object"
+      ? {
+          ...output,
+          threadReplies: Array.isArray(output.threadReplies) ? [...output.threadReplies] : [],
+          suggestions: Array.isArray(output.suggestions) ? [...output.suggestions] : [],
+          documentProposals: Array.isArray(output.documentProposals) ? [...output.documentProposals] : []
+        }
+      : parseAgentOutput(String(rawText || ""));
+
+  for (const key of ["reply", "chatReply"]) {
+    const value = normalized[key];
+    if (typeof value === "string" && looksLikeAgentJsonEnvelope(value)) {
+      normalized = mergeAgentOutputs(normalized, parseAgentOutput(value));
+      delete normalized[key];
+    }
+  }
+
+  if ((!normalized.threadReplies || normalized.threadReplies.length === 0) && looksLikeAgentJsonEnvelope(rawText)) {
+    normalized = mergeAgentOutputs(normalized, parseAgentOutput(rawText));
+  }
+
+  normalized.threadReplies = (Array.isArray(normalized.threadReplies) ? normalized.threadReplies : [])
+    .map((reply) => ({
+      ...reply,
+      threadId: reply?.threadId || turn.threadId || null,
+      body: String(reply?.body || "").trim()
+    }))
+    .filter((reply) => reply.body && !looksLikeAgentJsonEnvelope(reply.body));
+
+  if (turn.source === "thread" && turn.threadId) {
+    const repliesForTurn = normalized.threadReplies.filter((reply) => reply.threadId === turn.threadId || !reply.threadId);
+    if (repliesForTurn.length > 0) {
+      normalized.threadReplies = repliesForTurn.map((reply) => ({ ...reply, threadId: turn.threadId }));
+    } else {
+      const candidate = [normalized.chatReply, normalized.reply].find(
+        (value) => typeof value === "string" && value.trim() && !looksLikeAgentJsonEnvelope(value)
+      );
+      if (candidate) {
+        normalized.threadReplies = [{ threadId: turn.threadId, body: candidate.trim() }];
+      }
+    }
+  }
+
+  if (turn.source === "chat") {
+    if (typeof normalized.chatReply === "string" && normalized.chatReply.trim()) {
+      normalized.chatReply = normalized.chatReply.trim();
+    } else if (typeof normalized.reply === "string" && normalized.reply.trim() && !looksLikeAgentJsonEnvelope(normalized.reply)) {
+      normalized.chatReply = normalized.reply.trim();
+    } else if (normalized.threadReplies[0]?.body) {
+      normalized.chatReply = normalized.threadReplies[0].body;
+    }
+  }
+
+  if (looksLikeAgentJsonEnvelope(normalized.reply)) {
+    normalized.reply = "";
+  }
+
+  return normalized;
 }
 
 function parseAgentOutput(text) {
@@ -3517,20 +3863,21 @@ function buildFallbackProposalFromReplaceWithEdits(turn, output, markdown) {
 }
 
 function applyAgentOutput(turn, output) {
+  const normalizedOutput = normalizeAgentOutputForTurn(turn, output);
   const createdAt = nowIso();
   updateDocument((doc) => {
-    const threadReplies = Array.isArray(output.threadReplies) ? output.threadReplies : [];
-    const suggestions = Array.isArray(output.suggestions) ? output.suggestions : [];
-    const rawDocumentProposals = Array.isArray(output.documentProposals)
-      ? output.documentProposals
-      : output.documentProposal
-        ? [output.documentProposal]
+    const threadReplies = Array.isArray(normalizedOutput.threadReplies) ? normalizedOutput.threadReplies : [];
+    const suggestions = Array.isArray(normalizedOutput.suggestions) ? normalizedOutput.suggestions : [];
+    const rawDocumentProposals = Array.isArray(normalizedOutput.documentProposals)
+      ? normalizedOutput.documentProposals
+      : normalizedOutput.documentProposal
+        ? [normalizedOutput.documentProposal]
         : [];
     const fallbackDocumentProposal =
-      rawDocumentProposals.length === 0 ? buildFallbackProposalFromReplaceWithEdits(turn, output, doc.markdown) : null;
+      rawDocumentProposals.length === 0 ? buildFallbackProposalFromReplaceWithEdits(turn, normalizedOutput, doc.markdown) : null;
     const documentProposals = fallbackDocumentProposal ? [fallbackDocumentProposal] : rawDocumentProposals;
-    const chatReply = typeof output.chatReply === "string" ? output.chatReply.trim() : "";
-    const explicitReply = typeof output.reply === "string" ? output.reply.trim() : "";
+    const chatReply = typeof normalizedOutput.chatReply === "string" ? normalizedOutput.chatReply.trim() : "";
+    const explicitReply = typeof normalizedOutput.reply === "string" ? normalizedOutput.reply.trim() : "";
     const fallbackReply = explicitReply || (turn.source === "thread" ? chatReply : "");
     const ledgerEvents = [];
 
@@ -3538,7 +3885,7 @@ function applyAgentOutput(turn, output) {
       const repliesForThread = threadReplies.filter(
         (reply) =>
           reply.body &&
-          (reply.threadId === thread.id || (turn.source === "thread" && turn.threadId === thread.id && !reply.threadId))
+          (reply.threadId === thread.id || (turn.source === "thread" && turn.threadId === thread.id))
       );
       const fallbackForThread =
         turn.source === "thread" && turn.threadId === thread.id && repliesForThread.length === 0 && fallbackReply ? [fallbackReply] : [];

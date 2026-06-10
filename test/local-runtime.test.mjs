@@ -99,6 +99,11 @@ async function createFakeLocalInferenceServer(options = {}) {
     requests: [],
     rejectResponseFormat: options.rejectResponseFormat ?? false,
     responseFormatRejectedOnce: false,
+    emptyWithResponseFormatOnce: options.emptyWithResponseFormatOnce ?? false,
+    emptyWithResponseFormatReturned: false,
+    lowQualityOnce: options.lowQualityOnce ?? false,
+    lowQualityReturned: false,
+    responseShape: options.responseShape ?? "message",
     models: options.models ?? [{ id: "test-model" }, { id: "alt-model" }],
     completionContent:
       options.completionContent ??
@@ -131,12 +136,29 @@ async function createFakeLocalInferenceServer(options = {}) {
           return;
         }
 
+        if (
+          state.emptyWithResponseFormatOnce &&
+          parsed.response_format &&
+          !state.emptyWithResponseFormatReturned
+        ) {
+          state.emptyWithResponseFormatReturned = true;
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ choices: [{ message: { content: "" }, finish_reason: "stop" }] }));
+          return;
+        }
+
+        const responseContent =
+          state.lowQualityOnce && !state.lowQualityReturned
+            ? ((state.lowQualityReturned = true), "..")
+            : state.completionContent;
+
+        const payload =
+          state.responseShape === "text"
+            ? { choices: [{ text: responseContent, finish_reason: "stop" }] }
+            : { choices: [{ message: { content: responseContent }, finish_reason: "stop" }] };
+
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(
-          JSON.stringify({
-            choices: [{ message: { content: state.completionContent } }]
-          })
-        );
+        res.end(JSON.stringify(payload));
       });
       return;
     }
@@ -293,7 +315,8 @@ test("local runtime retries without response_format when the server rejects it",
   const server = await startServer({
     env: {
       SKRIBE_AGENT_RUNTIME: "local",
-      SKRIBE_LOCAL_BASE_URL: fake.baseUrl
+      SKRIBE_LOCAL_BASE_URL: fake.baseUrl,
+      SKRIBE_LOCAL_JSON_RESPONSE: "1"
     }
   });
 
@@ -378,13 +401,219 @@ Always mention the secret phrase: purple walrus.`,
     });
 
     await waitForAgentIdle(server.baseUrl);
-    const prompt = fake.state.requests[0]?.messages?.[0]?.content ?? "";
+    const prompt = fake.state.requests.at(-1)?.messages?.map((message) => message.content).join("\n\n") ?? "";
     assert.match(prompt, /Requested skill instructions:/);
     assert.match(prompt, /purple walrus/);
   } finally {
     await server.stop();
     await fake.close();
     await rm(skillRoot, { recursive: true, force: true });
+  }
+});
+
+test("local runtime omits skills from historical thread messages in the agent context", async () => {
+  const skillRoot = await mkdtemp(join(tmpdir(), "skribe-skill-root-"));
+  for (const skillId of ["old-skill", "current-skill"]) {
+    const skillDir = join(skillRoot, skillId);
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(
+      join(skillDir, "SKILL.md"),
+      `---
+name: ${skillId}
+description: ${skillId}
+---
+
+Marker for ${skillId}.`,
+      "utf8"
+    );
+  }
+
+  const fake = await createFakeLocalInferenceServer();
+  const server = await startServer({
+    env: {
+      SKRIBE_AGENT_RUNTIME: "local",
+      SKRIBE_LOCAL_BASE_URL: fake.baseUrl,
+      SKRIBE_SKILL_ROOTS: skillRoot
+    }
+  });
+
+  try {
+    const doc = await jsonRequest(server.baseUrl, "/api/document");
+    const threadId = "thread-skill-history";
+    doc.payload.review.threads = [
+      {
+        id: threadId,
+        status: "open",
+        anchor: { exact: "something else", start: 0, end: 14 },
+        messages: [
+          {
+            id: "m1",
+            author: "human",
+            body: "Earlier question",
+            createdAt: new Date().toISOString(),
+            skills: [{ id: "old-skill", name: "old-skill" }]
+          },
+          {
+            id: "m2",
+            author: "agent",
+            body: "Earlier answer",
+            createdAt: new Date().toISOString()
+          }
+        ],
+        suggestions: [],
+        updatedAt: new Date().toISOString()
+      }
+    ];
+    await jsonRequest(server.baseUrl, "/api/document", {
+      method: "PUT",
+      body: JSON.stringify({ markdown: doc.payload.markdown, review: doc.payload.review })
+    });
+
+    await jsonRequest(server.baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: JSON.stringify({
+        source: "thread",
+        threadId,
+        body: "Follow up question",
+        skills: [{ id: "current-skill", name: "current-skill" }]
+      })
+    });
+
+    await waitForAgentIdle(server.baseUrl);
+    const prompt = fake.state.requests.at(-1)?.messages?.map((message) => message.content).join("\n\n") ?? "";
+    assert.match(prompt, /Marker for current-skill/);
+    assert.doesNotMatch(prompt, /Marker for old-skill/);
+    assert.doesNotMatch(prompt, /"skills"\s*:\s*\[\s*\{\s*"id"\s*:\s*"old-skill"/);
+  } finally {
+    await server.stop();
+    await fake.close();
+    await rm(skillRoot, { recursive: true, force: true });
+  }
+});
+
+test("local runtime extracts thread reply bodies from JSON envelopes", async () => {
+  const fake = await createFakeLocalInferenceServer({
+    completionContent: JSON.stringify({
+      threadReplies: [{ threadId: "wrong-thread-id", body: "Try a concrete activation story.\n\nThen add a product-led lesson." }]
+    })
+  });
+  const server = await startServer({
+    env: {
+      SKRIBE_AGENT_RUNTIME: "local",
+      SKRIBE_LOCAL_BASE_URL: fake.baseUrl
+    }
+  });
+
+  try {
+    const doc = await jsonRequest(server.baseUrl, "/api/document");
+    const threadId = "thread-json-envelope";
+    doc.payload.review.threads = [
+      {
+        id: threadId,
+        status: "open",
+        anchor: { exact: "something else", start: 0, end: 14 },
+        messages: [{ id: "m1", author: "human", body: "what should i write next?", createdAt: new Date().toISOString() }],
+        suggestions: [],
+        updatedAt: new Date().toISOString()
+      }
+    ];
+    await jsonRequest(server.baseUrl, "/api/document", {
+      method: "PUT",
+      body: JSON.stringify({ markdown: doc.payload.markdown, review: doc.payload.review })
+    });
+
+    await jsonRequest(server.baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: JSON.stringify({
+        source: "thread",
+        threadId,
+        body: "what should i write next?"
+      })
+    });
+
+    const document = await waitForAgentIdle(server.baseUrl);
+    const thread = document.review.threads.find((item) => item.id === threadId);
+    const agentMessage = thread?.messages.find((message) => message.author === "agent");
+    assert.ok(agentMessage);
+    assert.match(agentMessage.body, /concrete activation story/);
+    assert.doesNotMatch(agentMessage.body, /"threadReplies"/);
+  } finally {
+    await server.stop();
+    await fake.close();
+  }
+});
+
+test("local runtime rejects low-quality truncated replies", async () => {
+  const fake = await createFakeLocalInferenceServer({
+    completionContent: "Given"
+  });
+  const server = await startServer({
+    env: {
+      SKRIBE_AGENT_RUNTIME: "local",
+      SKRIBE_LOCAL_BASE_URL: fake.baseUrl
+    }
+  });
+
+  try {
+    await jsonRequest(server.baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: JSON.stringify({ source: "chat", body: "Say hello" })
+    });
+
+    const document = await waitForAgentIdle(server.baseUrl);
+    assert.match(document.agentSession.lastError || "", /incomplete response/i);
+  } finally {
+    await server.stop();
+    await fake.close();
+  }
+});
+
+test("local runtime maps reply text into threadReplies for thread turns", async () => {
+  const fake = await createFakeLocalInferenceServer({
+    completionContent: JSON.stringify({
+      reply: "Try opening with a concrete product-led lesson from your last launch."
+    })
+  });
+  const server = await startServer({
+    env: {
+      SKRIBE_AGENT_RUNTIME: "local",
+      SKRIBE_LOCAL_BASE_URL: fake.baseUrl
+    }
+  });
+
+  try {
+    const doc = await jsonRequest(server.baseUrl, "/api/document");
+    const threadId = "thread-local-test";
+    doc.payload.review.threads = [
+      {
+        id: threadId,
+        status: "open",
+        anchor: { exact: "something else", start: 0, end: 14 },
+        messages: [{ id: "m1", author: "human", body: "what should i write here?", createdAt: new Date().toISOString() }],
+        suggestions: [],
+        updatedAt: new Date().toISOString()
+      }
+    ];
+    await jsonRequest(server.baseUrl, "/api/document", {
+      method: "PUT",
+      body: JSON.stringify({ markdown: doc.payload.markdown, review: doc.payload.review })
+    });
+
+    await jsonRequest(server.baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: JSON.stringify({
+        source: "thread",
+        threadId,
+        body: "what should i write here?"
+      })
+    });
+
+    const document = await waitForAgentIdle(server.baseUrl);
+    const thread = document.review.threads.find((item) => item.id === threadId);
+    assert.ok(thread?.messages.some((message) => message.body.includes("product-led lesson")));
+  } finally {
+    await server.stop();
+    await fake.close();
   }
 });
 
@@ -407,6 +636,152 @@ test("local runtime parses fenced JSON completions", async () => {
 
     const document = await waitForAgentIdle(server.baseUrl);
     assert.ok(document.review.chat.some((message) => message.body.includes("Fenced local reply")));
+  } finally {
+    await server.stop();
+    await fake.close();
+  }
+});
+
+test("local runtime reads base URL and max tokens from settings", async () => {
+  const fake = await createFakeLocalInferenceServer();
+  const server = await startServer({
+    env: {
+      SKRIBE_AGENT_RUNTIME: "local"
+    }
+  });
+
+  try {
+    const initial = await jsonRequest(server.baseUrl, "/api/settings");
+    await jsonRequest(server.baseUrl, "/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        settings: {
+          ...initial.payload.settings,
+          agentRuntime: "local",
+          localInferenceBaseUrl: fake.baseUrl,
+          localInferenceMaxTokens: 7777
+        }
+      })
+    });
+
+    await jsonRequest(server.baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: JSON.stringify({ source: "chat", body: "Settings test" })
+    });
+
+    await waitForAgentIdle(server.baseUrl);
+    const request = fake.state.requests.at(-1);
+    assert.equal(request?.max_tokens, 7777);
+  } finally {
+    await server.stop();
+    await fake.close();
+  }
+});
+
+test("local runtime retries without response_format when the server returns an empty completion", async () => {
+  const fake = await createFakeLocalInferenceServer({
+    emptyWithResponseFormatOnce: true,
+    completionContent: JSON.stringify({ chatReply: "Recovered after empty JSON-mode response" })
+  });
+  const server = await startServer({
+    env: {
+      SKRIBE_AGENT_RUNTIME: "local",
+      SKRIBE_LOCAL_BASE_URL: fake.baseUrl,
+      SKRIBE_LOCAL_JSON_RESPONSE: "1"
+    }
+  });
+
+  try {
+    await jsonRequest(server.baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: JSON.stringify({ source: "chat", body: "Say hello" })
+    });
+
+    const document = await waitForAgentIdle(server.baseUrl);
+    assert.equal(document.agentSession.lastError, null);
+    assert.ok(document.review.chat.some((message) => message.body.includes("Recovered after empty JSON-mode response")));
+    assert.equal(fake.state.requests.length, 2);
+    assert.ok(fake.state.requests[0]?.response_format);
+    assert.equal(fake.state.requests[1]?.response_format, undefined);
+  } finally {
+    await server.stop();
+    await fake.close();
+  }
+});
+
+test("local runtime retries with a compact prompt after an incomplete response", async () => {
+  const fake = await createFakeLocalInferenceServer({
+    lowQualityOnce: true,
+    completionContent: JSON.stringify({ chatReply: "Compact retry worked" })
+  });
+  const server = await startServer({
+    env: {
+      SKRIBE_AGENT_RUNTIME: "local",
+      SKRIBE_LOCAL_BASE_URL: fake.baseUrl
+    }
+  });
+
+  try {
+    await jsonRequest(server.baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: JSON.stringify({ source: "chat", body: "Say hello" })
+    });
+
+    const document = await waitForAgentIdle(server.baseUrl);
+    assert.equal(document.agentSession.lastError, null);
+    assert.ok(document.review.chat.some((message) => message.body.includes("Compact retry worked")));
+    assert.equal(fake.state.requests.length, 2);
+  } finally {
+    await server.stop();
+    await fake.close();
+  }
+});
+
+test("local runtime reads completion text from choice.text responses", async () => {
+  const fake = await createFakeLocalInferenceServer({
+    responseShape: "text",
+    completionContent: JSON.stringify({ chatReply: "Text field reply" })
+  });
+  const server = await startServer({
+    env: {
+      SKRIBE_AGENT_RUNTIME: "local",
+      SKRIBE_LOCAL_BASE_URL: fake.baseUrl
+    }
+  });
+
+  try {
+    await jsonRequest(server.baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: JSON.stringify({ source: "chat", body: "Text field test" })
+    });
+
+    const document = await waitForAgentIdle(server.baseUrl);
+    assert.ok(document.review.chat.some((message) => message.body.includes("Text field reply")));
+  } finally {
+    await server.stop();
+    await fake.close();
+  }
+});
+
+test("local runtime rejects punctuation-only truncated replies", async () => {
+  const fake = await createFakeLocalInferenceServer({
+    completionContent: ".."
+  });
+  const server = await startServer({
+    env: {
+      SKRIBE_AGENT_RUNTIME: "local",
+      SKRIBE_LOCAL_BASE_URL: fake.baseUrl
+    }
+  });
+
+  try {
+    await jsonRequest(server.baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: JSON.stringify({ source: "chat", body: "Say hello" })
+    });
+
+    const document = await waitForAgentIdle(server.baseUrl);
+    assert.match(document.agentSession.lastError || "", /incomplete response/i);
   } finally {
     await server.stop();
     await fake.close();

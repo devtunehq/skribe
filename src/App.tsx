@@ -53,6 +53,7 @@ import {
   uploadImageAsset
 } from "./api";
 import {
+  displayAgentMessageBody,
   findSkillByCommand,
   getActiveSlashCommand,
   prepareAgentTurnDraft,
@@ -333,6 +334,9 @@ const defaultAppSettings: AppSettings = {
   agentRuntime: "auto",
   agentModel: "auto",
   agentEffort: "auto",
+  localInferenceBaseUrl: "",
+  localInferenceApiKey: "",
+  localInferenceMaxTokens: 4096,
   defaultSkills: [],
   autoReplyToComments: true,
   showResolvedThreads: false,
@@ -5564,7 +5568,7 @@ function ThreadPanel(props: ThreadPanelProps) {
                   <strong>{authorLabel(message.author, humanLabel)}</strong>
                   <time>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
                 </div>
-                {message.body ? <p>{message.body}</p> : null}
+                {message.body ? <p>{displayAgentMessageBody(message.body)}</p> : null}
                 <MessageSkillChips skills={message.skills} />
               </article>
             ))}
@@ -5977,7 +5981,7 @@ function ChatPanel({
                 <strong>{authorLabel(message.author, humanLabel)}</strong>
                 <time>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
               </div>
-              {message.body ? <p>{message.body}</p> : null}
+              {message.body ? <p>{displayAgentMessageBody(message.body)}</p> : null}
               <MessageSkillChips skills={message.skills} />
             </article>
           ))

@@ -30,6 +30,7 @@
     Code: S(["m16 18 6-6-6-6", "m8 6-6 6 6 6"]),
     Check: S(["M20 6 9 17l-5-5"], { strokeWidth: 2.4 }),
     Cross: S(["M18 6 6 18M6 6l12 12"], { strokeWidth: 2.4 }),
-    Refresh: S(["M3 2v6h6", "M3 13a9 9 0 1 0 3-7.7L3 8"])
+    Refresh: S(["M3 2v6h6", "M3 13a9 9 0 1 0 3-7.7L3 8"]),
+    Server: S(["M4 4h16v6H4z", "M4 14h16v6H4z", "M8 7h.01", "M8 17h.01"])
   };
 })();

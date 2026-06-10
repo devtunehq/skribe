@@ -399,6 +399,45 @@ body {
 .duo-foot strong { color: var(--text-strong); font-weight: 600; }
 @media (max-width: 760px) { .duo { grid-template-columns: 1fr; } }
 
+/* local inference */
+.local-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+.local-card {
+  border: 1px solid var(--line-ink);
+  background: var(--paper-white);
+  padding: 28px 30px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  transition: transform 160ms ease, box-shadow 160ms ease;
+}
+.local-card:hover { transform: var(--lift); box-shadow: var(--hard-shadow); }
+.local-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 18px;
+  color: var(--text-strong);
+}
+.local-card h3 svg { width: 22px; height: 22px; color: var(--accent); }
+.local-card p { margin: 0; font-size: 15px; line-height: 1.6; color: var(--muted); text-wrap: pretty; }
+.local-card .codeblock { margin-top: 4px; }
+.local-foot {
+  margin: 28px 0 0;
+  font-size: 14.5px;
+  line-height: 1.6;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+.local-foot a { color: var(--text-strong); }
+@media (max-width: 760px) { .local-grid { grid-template-columns: 1fr; } }
+
 /* skills band */
 .skills {
   margin-top: 40px;

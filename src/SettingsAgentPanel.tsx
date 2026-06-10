@@ -155,6 +155,59 @@ export function SettingsAgentPanel({
         </select>
         <small>{selectedDiffViewMode.description}</small>
       </label>
+
+      <div className="settings-subsection">
+        <h3 className="settings-subsection-title">Local inference</h3>
+        <p className="settings-subsection-copy">
+          These apply when Agent provider is Local (or Auto resolves to Local). Environment variables still override them
+          if set.
+        </p>
+
+        <label className="settings-field">
+          <SettingsLabel tooltip="OpenAI-compatible base URL, e.g. http://127.0.0.1:11434/v1 for Ollama. Leave blank to auto-detect Ollama, LM Studio, and llama.cpp.">
+            Base URL
+          </SettingsLabel>
+          <input
+            type="url"
+            value={settings.localInferenceBaseUrl}
+            placeholder="http://127.0.0.1:11434/v1"
+            onChange={(event) => onChange({ localInferenceBaseUrl: event.target.value })}
+          />
+        </label>
+
+        <div className="settings-grid">
+          <label className="settings-field">
+            <SettingsLabel tooltip="Optional bearer token for local servers that require auth.">
+              API key
+            </SettingsLabel>
+            <input
+              type="password"
+              value={settings.localInferenceApiKey}
+              autoComplete="off"
+              placeholder="Optional"
+              onChange={(event) => onChange({ localInferenceApiKey: event.target.value })}
+            />
+          </label>
+
+          <label className="settings-field">
+            <SettingsLabel tooltip="Maximum output tokens per agent turn. This is not the model context window. If replies fail or truncate, also raise your inference server context (for Ollama: OLLAMA_NUM_CTX=32768) and use fewer skills.">
+              Max completion tokens
+            </SettingsLabel>
+            <input
+              type="number"
+              min={512}
+              max={32768}
+              step={256}
+              value={settings.localInferenceMaxTokens}
+              onChange={(event) =>
+                onChange({
+                  localInferenceMaxTokens: Number(event.target.value) || 4096
+                })
+              }
+            />
+          </label>
+        </div>
+      </div>
     </>
   );
 }

@@ -97,3 +97,30 @@ export function prepareAgentTurnDraft(value: string, selectedSkillIds: string[],
     skills: selectedSkills
   };
 }
+
+export function displayAgentMessageBody(body: string) {
+  const trimmed = body.trim();
+  if (!trimmed.startsWith("{") || !/"threadReplies"|"chatReply"/.test(trimmed)) {
+    return body;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      threadReplies?: Array<{ body?: string }>;
+      chatReply?: string;
+      reply?: string;
+    };
+    const threadBodies = (parsed.threadReplies ?? [])
+      .map((reply) => String(reply?.body || "").trim())
+      .filter(Boolean);
+    if (threadBodies.length > 0) return threadBodies.join("\n\n");
+    if (typeof parsed.chatReply === "string" && parsed.chatReply.trim()) return parsed.chatReply.trim();
+    if (typeof parsed.reply === "string" && parsed.reply.trim() && !parsed.reply.trim().startsWith("{")) {
+      return parsed.reply.trim();
+    }
+  } catch {
+    // Fall back to the stored body.
+  }
+
+  return body;
+}
