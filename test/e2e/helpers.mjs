@@ -174,7 +174,7 @@ async function startBrowser() {
   );
 
   const targetsUrl = `http://127.0.0.1:${debugPort}/json/list`;
-  const targets = await waitForHttpJson(targetsUrl);
+  const targets = await waitForHttpJson(targetsUrl, 20000);
   const target = targets.find((item) => item.type === "page");
   if (!target) throw new Error("No browser page target available");
 
