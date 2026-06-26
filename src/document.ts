@@ -351,23 +351,25 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       continue;
     }
 
-    const ordered = trimmed.match(/^(\d+)\.\s+(.+)$/);
+    // Allow empty list items (`1.`, `-`) so a freshly-created item survives a
+    // round-trip while the writer is about to type into it.
+    const ordered = trimmed.match(/^(\d+)\.(?:\s+(.*))?$/);
     if (ordered) {
       flushParagraph();
       pushBlock({
         type: "ordered-list",
         marker: ordered[1],
-        text: ordered[2]
+        text: ordered[2] ?? ""
       });
       continue;
     }
 
-    const unordered = trimmed.match(/^[-*]\s+(.+)$/);
+    const unordered = trimmed.match(/^[-*](?:\s+(.*))?$/);
     if (unordered) {
       flushParagraph();
       pushBlock({
         type: "unordered-list",
-        text: unordered[1]
+        text: unordered[1] ?? ""
       });
       continue;
     }
@@ -394,31 +396,39 @@ function listItemLines(text: string) {
   return lines.length > 0 ? lines : [""];
 }
 
+function isListBlockType(type: MarkdownBlockType) {
+  return type === "ordered-list" || type === "unordered-list";
+}
+
+function serializeMarkdownBlock(block: MarkdownBlock) {
+  const text = block.text.trimEnd();
+  if (block.type === "heading") return `${"#".repeat(block.level ?? 2)} ${text}`;
+  // A list block can hold several lines once the user presses Enter inside it
+  // (each line break becomes a new sibling item). Emit one marker per line so it
+  // re-parses as a list, not a list followed by a paragraph.
+  if (block.type === "ordered-list") {
+    return listItemLines(text).map((line) => `${block.marker ?? "1"}. ${line}`).join("\n");
+  }
+  if (block.type === "unordered-list") {
+    return listItemLines(text).map((line) => `- ${line}`).join("\n");
+  }
+  if (block.type === "quote") return text.split("\n").map((line) => `> ${line}`).join("\n");
+  if (block.type === "code") return `\`\`\`${block.language ?? ""}\n${block.text}\n\`\`\``;
+  return text;
+}
+
 export function serializeMarkdownBlocks(blocks: MarkdownBlock[]) {
-  return blocks
-    .map((block) => {
-      const text = block.text.trimEnd();
-      if (block.type === "heading") return `${"#".repeat(block.level ?? 2)} ${text}`;
-      // A list block can hold several lines once the user presses Enter inside it
-      // (each line break becomes a new sibling item). Emit one marker per line so
-      // it re-parses as a list, not a list followed by a paragraph.
-      if (block.type === "ordered-list") {
-        const items = listItemLines(text);
-        return items.map((line) => `${block.marker ?? "1"}. ${line}`).join("\n");
-      }
-      if (block.type === "unordered-list") {
-        const items = listItemLines(text);
-        return items.map((line) => `- ${line}`).join("\n");
-      }
-      if (block.type === "quote") return text.split("\n").map((line) => `> ${line}`).join("\n");
-      if (block.type === "code") return `\`\`\`${block.language ?? ""}\n${block.text}\n\`\`\``;
-      if (block.type === "table") return text;
-      if (block.type === "image") return text;
-      return text;
-    })
-    .join("\n\n")
-    .trimEnd()
-    .concat("\n");
+  let output = "";
+  blocks.forEach((block, index) => {
+    if (index > 0) {
+      // Keep consecutive list items tight (single newline) so the list reads as
+      // one list; everything else is separated by a blank line.
+      const previous = blocks[index - 1];
+      output += isListBlockType(block.type) && isListBlockType(previous.type) ? "\n" : "\n\n";
+    }
+    output += serializeMarkdownBlock(block);
+  });
+  return output.trimEnd().concat("\n");
 }
 
 function clampMarkdownIndex(index: number, min: number, max: number) {

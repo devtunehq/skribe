@@ -688,6 +688,34 @@ function plainOffsetInEditableBlock(blockNode: HTMLElement, container: Node, off
   return range.toString().length;
 }
 
+function placeCaretInEditableBlock(node: HTMLElement, plainOffset: number) {
+  node.focus();
+  const selection = window.getSelection();
+  if (!selection) return;
+  const range = document.createRange();
+  range.selectNodeContents(node);
+  range.collapse(true);
+
+  if (plainOffset > 0) {
+    let remaining = plainOffset;
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+    let textNode = walker.nextNode();
+    while (textNode) {
+      const length = textNode.textContent?.length ?? 0;
+      if (remaining <= length) {
+        range.setStart(textNode, remaining);
+        range.collapse(true);
+        break;
+      }
+      remaining -= length;
+      textNode = walker.nextNode();
+    }
+  }
+
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
 function buildSelectionFromCanvasRange(markdown: string, range: Range): SelectionDraft | null {
   const startBlockNode = closestEditableBlock(range.startContainer);
   const endBlockNode = closestEditableBlock(range.endContainer);
@@ -945,6 +973,7 @@ function useSkribeController() {
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const linkInputRef = useRef<HTMLInputElement | null>(null);
   const blockRefs = useRef<Record<string, HTMLElement | null>>({});
+  const pendingCaretRef = useRef<{ blockId: string; offset: number } | null>(null);
   const selectionRangeRef = useRef<Range | null>(null);
   const selectionDragRef = useRef<SelectionDragState | null>(null);
   const customSelectionActiveRef = useRef(false);
@@ -1138,6 +1167,21 @@ function useSkribeController() {
   );
 
   useEffect(() => subscribeToDocumentEvents(handleRemoteDocument), [handleRemoteDocument]);
+
+  // After a structural edit remounts blocks (e.g. splitting a list item with
+  // Enter), move the caret into the freshly rendered target block. We keep the
+  // request pending and re-apply it on later re-renders (the post-commit save
+  // can otherwise blur the empty new item) until the writer actually types —
+  // `scheduleLiveCanvasCommit` clears it. We never reset the caret while the
+  // block already holds focus, so this can't fight active typing.
+  useLayoutEffect(() => {
+    const pending = pendingCaretRef.current;
+    if (!pending) return;
+    const node = blockRefs.current[pending.blockId];
+    if (!node) return;
+    if (node === document.activeElement || node.contains(document.activeElement)) return;
+    placeCaretInEditableBlock(node, pending.offset);
+  }, [documentState, blockResetKeys]);
 
   useEffect(() => {
     return clearPendingEditTimers;
@@ -1463,7 +1507,14 @@ function useSkribeController() {
       if (!node) return [sourceBlock];
 
       const text = blockNodeToMarkdown(node, sourceBlock.type);
-      return text.trim() ? [{ ...sourceBlock, text }] : [];
+      if (text.trim()) return [{ ...sourceBlock, text }];
+      // Keep an empty block while the caret is inside it — e.g. a list item just
+      // created with Enter that the writer is about to fill in. Empty blocks are
+      // dropped once focus leaves them.
+      if (node === document.activeElement || node.contains(document.activeElement)) {
+        return [{ ...sourceBlock, text: "" }];
+      }
+      return [];
     });
 
     return serializeMarkdownBlocks(blocks);
@@ -1518,6 +1569,12 @@ function useSkribeController() {
   }
 
   function commitCanvasDom() {
+    // A structural edit that remounts blocks (e.g. a list split) blurs the old
+    // focused node, which fires this on-blur handler. Re-serializing the DOM mid
+    // transition would drop the freshly-created empty item before the caret has
+    // moved into it, so skip until the pending caret has been placed.
+    if (pendingCaretRef.current) return;
+
     if (liveEditTimerRef.current) {
       window.clearTimeout(liveEditTimerRef.current);
       liveEditTimerRef.current = null;
@@ -1540,6 +1597,9 @@ function useSkribeController() {
   }
 
   function scheduleLiveCanvasCommit() {
+    // The writer is typing, so stop re-applying any pending caret placement
+    // (e.g. from a just-split list item) — they now own the caret.
+    pendingCaretRef.current = null;
     beginLiveEditHistory();
     if (liveEditTimerRef.current) window.clearTimeout(liveEditTimerRef.current);
     liveEditTimerRef.current = window.setTimeout(() => {
@@ -2930,6 +2990,65 @@ function useSkribeController() {
     return true;
   }
 
+  // Pressing Enter in a list item splits it into a new sibling item immediately
+  // (rather than inserting a soft line break that only reflows on blur): the
+  // text before the caret stays, the text after becomes a new item, and the
+  // caret lands at the start of that new item.
+  function splitListBlockAtCaret(blockId: string) {
+    const node = blockRefs.current[blockId];
+    const selection = window.getSelection();
+    const current = stateRef.current;
+    if (!node || !selection || selection.rangeCount === 0 || !current) return false;
+
+    const range = selection.getRangeAt(0);
+    if (!range.collapsed || !node.contains(range.startContainer)) return false;
+
+    const liveState = stateWithLiveCanvasEdit(current);
+    const blocks = parseMarkdownBlocks(liveState.markdown);
+    const index = blocks.findIndex((block) => block.id === blockId);
+    if (index < 0) return false;
+    const block = blocks[index];
+
+    const plainOffset = plainOffsetInEditableBlock(node, range.startContainer, range.startOffset);
+    const markdownOffset = markdownOffsetFromPlainOffset(block.text, plainOffset, "start");
+    const before = block.text.slice(0, markdownOffset);
+    const after = block.text.slice(markdownOffset);
+
+    const nextBlocks = [
+      ...blocks.slice(0, index),
+      { ...block, text: before },
+      { ...block, text: after },
+      ...blocks.slice(index + 1)
+    ];
+    const markdown = serializeMarkdownBlocks(nextBlocks);
+
+    // Only the blocks at/after the split change identity. The block being split
+    // keeps its key, so when its text is unchanged (the common "Enter at end of
+    // item" case) React leaves its focused contentEditable untouched — no remount,
+    // no blur. Only force a DOM resync when the split block's own text changed
+    // (a mid-item split), where its DOM must be truncated.
+    const splitBlockChanged = before !== block.text;
+    commit(
+      () => ({
+        ...liveState,
+        markdown,
+        review: { ...liveState.review, updatedAt: nowIso() }
+      }),
+      { resyncDom: splitBlockChanged }
+    );
+
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+
+    const newBlockId = markdownBlockIdFromIndex(index + 1);
+    pendingCaretRef.current = { blockId: newBlockId, offset: 0 };
+    setActiveBlockId(newBlockId);
+    return true;
+  }
+
   function openLinkPopover() {
     restoreCanvasSelection();
     const selection = window.getSelection();
@@ -3083,14 +3202,15 @@ function useSkribeController() {
       const currentBlock = stateRef.current ? parseMarkdownBlocks(stateRef.current.markdown).find((block) => block.id === blockId) : null;
       event.preventDefault();
       setActiveBlockId(blockId);
-      // Paragraph/heading Enter inserts a paragraph break (blank line) to start a
-      // new block. In code, lists, and quotes a single line break is correct: the
-      // serializer turns each list/quote line into a sibling item, and code keeps
-      // its line breaks — so a double break here would split a list item into a
-      // detached paragraph.
       const type = currentBlock?.type;
-      const singleBreakType =
-        type === "code" || type === "ordered-list" || type === "unordered-list" || type === "quote";
+      // In a list, Enter splits the item into a new sibling item right away.
+      if (!event.shiftKey && (type === "ordered-list" || type === "unordered-list") && splitListBlockAtCaret(blockId)) {
+        return;
+      }
+      // Paragraph/heading Enter inserts a paragraph break (blank line) to start a
+      // new block. In code and quotes a single line break is correct, so a double
+      // break would otherwise split the content into a detached paragraph.
+      const singleBreakType = type === "code" || type === "quote";
       insertEditorBreak(!singleBreakType && !event.shiftKey);
       rememberCanvasSelection();
       return;

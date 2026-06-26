@@ -23,6 +23,54 @@ test("an empty document can become editable Markdown through the virtual first b
   assert.equal(updateMarkdownBlock("\n", emptyBlockId, "First line"), "First line\n");
 });
 
+test("empty list items round-trip so a freshly split item survives", () => {
+  const unordered = parseMarkdownBlocks("- First\n- \n- Third");
+  assert.deepEqual(
+    unordered.map((block) => [block.type, block.text]),
+    [
+      ["unordered-list", "First"],
+      ["unordered-list", ""],
+      ["unordered-list", "Third"]
+    ]
+  );
+
+  const ordered = parseMarkdownBlocks("1. First\n2.\n3. Third");
+  assert.deepEqual(
+    ordered.map((block) => [block.type, block.text]),
+    [
+      ["ordered-list", "First"],
+      ["ordered-list", ""],
+      ["ordered-list", "Third"]
+    ]
+  );
+
+  // A line that is just a marker stays a list item, but text without the space
+  // separator is still a paragraph.
+  assert.equal(parseMarkdownBlocks("-")[0].type, "unordered-list");
+  assert.equal(parseMarkdownBlocks("-nope")[0].type, "paragraph");
+  assert.equal(parseMarkdownBlocks("*emphasis*")[0].type, "paragraph");
+});
+
+test("splitting a list item serializes into two sibling items", () => {
+  // Mirrors splitListBlockAtCaret: one list block becomes two at the caret.
+  const [item] = parseMarkdownBlocks("- Groceries: milk and eggs");
+  const cut = "Groceries: milk".length;
+  const next = serializeMarkdownBlocks([
+    { ...item, text: item.text.slice(0, cut) },
+    { ...item, text: item.text.slice(cut) }
+  ]);
+  // Each item is trimmed and re-parses as its own list item; consecutive list
+  // items stay tight (single newline).
+  assert.equal(next, "- Groceries: milk\n- and eggs\n");
+  assert.deepEqual(
+    parseMarkdownBlocks(next).map((block) => [block.type, block.text]),
+    [
+      ["unordered-list", "Groceries: milk"],
+      ["unordered-list", "and eggs"]
+    ]
+  );
+});
+
 test("markdown paste helpers detect and normalize Markdown blocks", () => {
   const markdown = "# Heading\r\n\r\n| A | B |\r\n| --- | --- |\r\n| one | two |";
 
@@ -90,7 +138,7 @@ test("markdown paste helpers splice block Markdown into the document", () => {
   assert.equal(spliceMarkdownPaste("", 0, 0, "# Heading\n\nBody", true), "# Heading\n\nBody\n");
   assert.equal(
     spliceMarkdownPaste("Before\n\nAfter\n", 7, 7, "- One\n- Two", true),
-    "Before\n\n- One\n\n- Two\n\nAfter\n"
+    "Before\n\n- One\n- Two\n\nAfter\n"
   );
   assert.equal(spliceMarkdownPaste("Before after\n", 7, 7, "**middle** ", false), "Before **middle** after\n");
 });
