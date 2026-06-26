@@ -1353,6 +1353,9 @@ function useSkribeController() {
         updatedAt: nowIso()
       }
     };
+    // Undo/redo restores markdown out-of-band; force the contentEditable blocks
+    // to remount so the live DOM reflects the restored document.
+    resetRenderedEditableBlocks(next.markdown);
     setDocumentState(next);
     queueDocumentSave(next, { renderSavedState: true });
     historyRestoreRef.current = false;
@@ -1514,13 +1517,17 @@ function useSkribeController() {
     queueDocumentSave(next, { renderSavedState: false });
   }
 
-  function commit(updater: (state: DocumentState) => DocumentState) {
+  function commit(
+    updater: (state: DocumentState) => DocumentState,
+    options?: { resyncDom?: boolean }
+  ) {
     if (!stateRef.current) return null;
 
     const current = stateRef.current;
     let next: DocumentState;
+    let base: DocumentState;
     try {
-      const base = stateWithPendingLiveCanvasEdit(current);
+      base = stateWithPendingLiveCanvasEdit(current);
       next = updater(base);
       if (!historyRestoreRef.current && next.markdown !== base.markdown) {
         pushUndoSnapshot(base);
@@ -1537,6 +1544,15 @@ function useSkribeController() {
       return null;
     }
 
+    // Structural edits (paste, delete, move, proposal apply, …) change block
+    // content/order programmatically while the live contentEditable DOM was
+    // mutated out-of-band by the browser. React cannot reliably reconcile new
+    // text into such a diverged contentEditable, so callers that restructure the
+    // document opt into a forced remount to repaint the affected blocks instead
+    // of leaving stale DOM until the next blur/click.
+    if (options?.resyncDom && next.markdown !== base.markdown) {
+      resetRenderedEditableBlocks(next.markdown);
+    }
     setDocumentState(next);
     queueDocumentSave(next, { renderSavedState: true });
     liveEditHistoryActiveRef.current = false;
@@ -1982,19 +1998,22 @@ function useSkribeController() {
     if (!draft) return false;
 
     let didDelete = false;
-    commit((state) => {
-      const markdown = deleteSelectionDraftFromMarkdown(state.markdown, draft);
-      if (!markdown) return state;
-      didDelete = true;
-      return {
-        ...state,
-        markdown,
-        review: {
-          ...state.review,
-          updatedAt: nowIso()
-        }
-      };
-    });
+    commit(
+      (state) => {
+        const markdown = deleteSelectionDraftFromMarkdown(state.markdown, draft);
+        if (!markdown) return state;
+        didDelete = true;
+        return {
+          ...state,
+          markdown,
+          review: {
+            ...state.review,
+            updatedAt: nowIso()
+          }
+        };
+      },
+      { resyncDom: true }
+    );
 
     if (!didDelete) return false;
 
@@ -2123,14 +2142,17 @@ function useSkribeController() {
     const markdown = spliceMarkdownPaste(liveState.markdown, range.start, range.end, insertion, blockMode);
     if (markdown === liveState.markdown) return false;
 
-    commit(() => ({
-      ...liveState,
-      markdown,
-      review: {
-        ...liveState.review,
-        updatedAt: nowIso()
-      }
-    }));
+    commit(
+      () => ({
+        ...liveState,
+        markdown,
+        review: {
+          ...liveState.review,
+          updatedAt: nowIso()
+        }
+      }),
+      { resyncDom: true }
+    );
     clearCanvasSelectionState();
     showTransientToast(options.asMarkdown ? "Markdown pasted" : "Text pasted");
     return true;
@@ -2148,14 +2170,17 @@ function useSkribeController() {
     const markdown = spliceMarkdownPaste(liveState.markdown, range.start, range.end, insertion, true);
     if (markdown === liveState.markdown) return false;
 
-    commit(() => ({
-      ...liveState,
-      markdown,
-      review: {
-        ...liveState.review,
-        updatedAt: nowIso()
-      }
-    }));
+    commit(
+      () => ({
+        ...liveState,
+        markdown,
+        review: {
+          ...liveState.review,
+          updatedAt: nowIso()
+        }
+      }),
+      { resyncDom: true }
+    );
     clearCanvasSelectionState();
     showTransientToast(label);
     return true;
@@ -2503,7 +2528,7 @@ function useSkribeController() {
           updatedAt
         }
       };
-    });
+    }, { resyncDom: true });
   }
 
   function updateProposalStatus(proposalId: string, status: "accepted" | "rejected") {
@@ -2543,7 +2568,7 @@ function useSkribeController() {
           updatedAt
         }
       };
-    });
+    }, { resyncDom: true });
   }
 
   function updateProposalChangeDecision(
@@ -2591,7 +2616,7 @@ function useSkribeController() {
           updatedAt
         }
       };
-    });
+    }, { resyncDom: true });
   }
 
   function requestProposalRevision(proposalId: string, change: ProposalChangeBlock, instruction: string) {
@@ -2739,26 +2764,32 @@ function useSkribeController() {
 
   function moveCanvasBlock(blockId: string, targetBlockId: string, placement: BlockDropPlacement) {
     if (blockId === targetBlockId) return;
-    commit((state) => ({
-      ...state,
-      markdown: moveMarkdownBlock(state.markdown, blockId, targetBlockId, placement),
-      review: {
-        ...state.review,
-        updatedAt: nowIso()
-      }
-    }));
+    commit(
+      (state) => ({
+        ...state,
+        markdown: moveMarkdownBlock(state.markdown, blockId, targetBlockId, placement),
+        review: {
+          ...state.review,
+          updatedAt: nowIso()
+        }
+      }),
+      { resyncDom: true }
+    );
   }
 
   function deleteCanvasBlock(blockId: string) {
     if (!stateRef.current || !parseMarkdownBlocks(stateRef.current.markdown).some((item) => item.id === blockId)) return;
-    commit((state) => ({
-      ...state,
-      markdown: deleteMarkdownBlock(state.markdown, blockId),
-      review: {
-        ...state.review,
-        updatedAt: nowIso()
-      }
-    }));
+    commit(
+      (state) => ({
+        ...state,
+        markdown: deleteMarkdownBlock(state.markdown, blockId),
+        review: {
+          ...state.review,
+          updatedAt: nowIso()
+        }
+      }),
+      { resyncDom: true }
+    );
     if (activeBlockId === blockId) setActiveBlockId(null);
   }
 
@@ -2771,6 +2802,9 @@ function useSkribeController() {
     const currentBlock = stateRef.current ? parseMarkdownBlocks(stateRef.current.markdown).find((block) => block.id === blockId) : null;
     const currentText = node ? blockNodeToMarkdown(node, currentBlock?.type) : null;
 
+    // The commit below serializes the live DOM (capturing this and any other
+    // block's in-progress edits) while the debounce timer is still armed, then
+    // remounts the block under its new shape via resyncDom.
     commit((state) => {
       const markdownWithLatestText = currentText
         ? updateMarkdownBlock(state.markdown, blockId, currentText)
@@ -2783,7 +2817,16 @@ function useSkribeController() {
           updatedAt: nowIso()
         }
       };
-    });
+    }, { resyncDom: true });
+
+    // Cancel the pending live-edit debounce: its closure captured the
+    // pre-conversion render (e.g. a heading) and, if left to fire, would
+    // re-serialize the stale DOM type and silently revert the shape change.
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
   }
 
   function updateActiveBlockShape(patch: Parameters<typeof updateMarkdownBlockShape>[2]) {
@@ -2887,14 +2930,17 @@ function useSkribeController() {
       const block = parseMarkdownBlocks(currentState.markdown).find((item) => item.id === target.blockId);
       const linkedText = block ? applyMarkdownLinkToSelection(block.text, target, href) : null;
       if (block && linkedText && linkedText !== block.text) {
-        commit((state) => ({
-          ...state,
-          markdown: updateMarkdownBlock(state.markdown, target.blockId, linkedText),
-          review: {
-            ...state.review,
-            updatedAt: nowIso()
-          }
-        }));
+        commit(
+          (state) => ({
+            ...state,
+            markdown: updateMarkdownBlock(state.markdown, target.blockId, linkedText),
+            review: {
+              ...state.review,
+              updatedAt: nowIso()
+            }
+          }),
+          { resyncDom: true }
+        );
 
         window.getSelection()?.removeAllRanges();
         selectionRangeRef.current = null;
