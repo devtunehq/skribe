@@ -230,7 +230,39 @@ function popDistinctSnapshot(stack: HistorySnapshot[], current: HistorySnapshot)
   return { target, stack: nextStack };
 }
 
+// Serialize an edited code block's DOM to plain text, preserving every newline,
+// blank line, and leading indentation. The generic htmlToInlineMarkdown path
+// collapses runs of newlines, trims, and treats backticks/underscores as
+// Markdown \u2014 all wrong for code. contentEditable represents line breaks as <br>
+// or wrapping <div>/<p> elements, so reconstruct newlines from those.
+function editableCodeNodeToText(node: HTMLElement) {
+  let text = "";
+  const walk = (current: Node) => {
+    for (const child of Array.from(current.childNodes)) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        text += child.textContent ?? "";
+        continue;
+      }
+      if (!(child instanceof HTMLElement)) continue;
+      const tag = child.tagName.toLowerCase();
+      if (tag === "br") {
+        text += "\n";
+        continue;
+      }
+      if (tag === "div" || tag === "p") {
+        if (text && !text.endsWith("\n")) text += "\n";
+        walk(child);
+        continue;
+      }
+      walk(child);
+    }
+  };
+  walk(node);
+  return text.replace(/\u00a0/g, " ").replace(/\u200b/g, "");
+}
+
 function blockNodeToMarkdown(node: HTMLElement, blockType?: string) {
+  if (blockType === "code") return editableCodeNodeToText(node);
   const html = blockType === "table" ? node.outerHTML : node.innerHTML;
   return htmlToInlineMarkdown(html.replace(/\u00a0/g, " ").trimEnd());
 }

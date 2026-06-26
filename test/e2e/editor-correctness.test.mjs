@@ -71,6 +71,35 @@ test("deleting an ordered list item renumbers the remaining items", async (t) =>
   });
 });
 
+test("editing a code block preserves blank lines and trailing whitespace", async (t) => {
+  await withApp(t, "# Draft\n\n```js\noriginal\n```\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "Boolean(document.querySelector('.editable-code [data-block-id=\"block-1\"]'))");
+
+    // Rewrite the code block the way contentEditable structures multi-line edits
+    // (<br> line breaks), with two blank lines in the middle and a trailing blank
+    // line, then notify React so the live-edit serializer runs.
+    await evaluate(
+      browser.cdp,
+      `(() => {
+        const code = document.querySelector('.editable-code [data-block-id="block-1"]');
+        code.focus();
+        code.innerHTML = '';
+        const append = (value) => code.appendChild(document.createTextNode(value));
+        const br = () => code.appendChild(document.createElement('br'));
+        append('line1'); br(); br(); br(); append('line2'); br(); br();
+        code.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: 'line2' }));
+        return true;
+      })()`
+    );
+
+    // The fenced code must keep all three newlines between the lines and the
+    // trailing blank line; the generic serializer collapsed runs of \n and
+    // trimmed the end.
+    const saved = await waitForFileText(markdownPath, /line1\n\n\nline2/);
+    assert.match(saved, /```js\nline1\n\n\nline2\n\n\n```/);
+  });
+});
+
 test("text under a comment anchor can receive a caret and be edited", async (t) => {
   const createdAt = "2026-06-03T12:00:00.000Z";
   await withApp(
