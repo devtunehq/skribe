@@ -1101,8 +1101,18 @@ function useSkribeController() {
         setBlockResetKeys({});
         refreshRevisions();
       }
+      const previousMarkdown = current?.markdown;
       stateRef.current = remote;
-      if (!shouldSkipRender) setDocumentState(remote);
+      if (!shouldSkipRender) {
+        // A same-document remote/agent edit changes block content under reused
+        // contentEditable nodes; remount them so the live DOM reflects the new
+        // markdown instead of staying stale until the next click. (Switched
+        // documents already cleared every block reset key above.)
+        if (!switchedDocument && previousMarkdown !== undefined && remote.markdown !== previousMarkdown) {
+          resetRenderedEditableBlocks(remote.markdown);
+        }
+        setDocumentState(remote);
+      }
       if (remote.agentSession) {
         setAgentRuntimeConfig((current) => mergeRuntimeConfigFromSession(current, remote.agentSession));
       }
@@ -1900,7 +1910,13 @@ function useSkribeController() {
     if (!nextState) return;
     sendAgentMessage({ source, body, threadId, document: nextState, skills })
       .then((remote) => {
+        const previous = stateRef.current;
         stateRef.current = remote;
+        // An agent reply can rewrite the document; remount the edited blocks so
+        // the live editor shows the change rather than stale content.
+        if (previous && remote.markdown !== previous.markdown) {
+          resetRenderedEditableBlocks(remote.markdown);
+        }
         setDocumentState(remote);
         setSaveState("saved");
       })
@@ -3177,7 +3193,7 @@ function useSkribeController() {
         ],
         updatedAt: createdAt
       }
-    }));
+    }), { resyncDom: true });
   }
 
   async function restoreRevision(revisionId: string) {
@@ -3195,6 +3211,9 @@ function useSkribeController() {
       const restored = await restoreDocumentRevision(revisionId);
       if (restoreEpoch === stateEpochRef.current) {
         stateRef.current = restored.document;
+        // Restoring a revision swaps the whole document out-of-band; remount the
+        // editable blocks so the canvas shows the restored content immediately.
+        resetRenderedEditableBlocks(restored.document.markdown);
         setDocumentState(restored.document);
         setRevisionState(restored.revisions);
         setActiveThreadId(null);

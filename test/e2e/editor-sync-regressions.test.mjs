@@ -6,6 +6,7 @@ import {
   browserTest,
   disableToneSetup,
   evaluate,
+  jsonRequest,
   makeMarkdownDoc,
   navigate,
   press,
@@ -213,4 +214,41 @@ test("a heading converted to a paragraph stays a paragraph after the live-edit d
       assert.doesNotMatch(saved, /^##\s/m, `heading prefix reappeared in saved markdown: ${JSON.stringify(saved)}`);
     }
   );
+});
+
+test("a remote document edit repaints the live editor without a click", async (t) => {
+  await withApp(t, "# Draft\n\nOriginal body.\n", async ({ browser, server }) => {
+    await waitFor(
+      browser.cdp,
+      "(document.querySelector('.editable-document')?.innerText || '').includes('Original body.')"
+    );
+
+    // Let the app's EventSource subscription connect before broadcasting, so the
+    // remote edit below isn't missed by a not-yet-open stream.
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    // Focus the block and detach its text node (as real editing does), so a
+    // remote edit lands on a reused node whose React fiber is stale.
+    await placeCaretAtEnd(browser.cdp, "block-1");
+    assert.equal(await divergeBlockTextNode(browser.cdp, "block-1"), true);
+
+    // Another client (the API) replaces the document; the open editor receives it
+    // over SSE and must repaint, not keep showing the old body until a click.
+    const current = await jsonRequest(server.baseUrl, "/api/document");
+    const put = await jsonRequest(server.baseUrl, "/api/document", {
+      method: "PUT",
+      body: JSON.stringify({
+        markdown: "# Draft\n\nRemote replaced body.\n",
+        review: { ...current.payload.review, updatedAt: new Date().toISOString() }
+      })
+    });
+    assert.equal(put.response.ok, true);
+
+    await waitFor(
+      browser.cdp,
+      "(document.querySelector('.editable-document')?.innerText || '').includes('Remote replaced body.')"
+    );
+    const text = await editableDocumentText(browser.cdp);
+    assert.equal(countOccurrences(text, "Original body."), 0, `stale body still rendered: ${JSON.stringify(text)}`);
+  });
 });
