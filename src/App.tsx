@@ -4822,10 +4822,23 @@ function EditableMarkdownCanvas({
   const [draggingBlockId, setDraggingBlockId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<{ blockId: string; placement: BlockDropPlacement } | null>(null);
   const blocks = useMemo(() => parseMarkdownBlocks(markdown), [markdown]);
-  const visibleBlocks = useMemo(
-    () => (blocks.length > 0 ? blocks : [{ id: markdownBlockIdFromIndex(0), type: "paragraph" as const, text: "" }]),
-    [blocks]
-  );
+  const visibleBlocks = useMemo(() => {
+    const base = blocks.length > 0 ? blocks : [{ id: markdownBlockIdFromIndex(0), type: "paragraph" as const, text: "" }];
+    // Renumber ordered-list markers per contiguous run so the displayed numbers
+    // stay sequential (1, 2, 3…) after items are deleted, reordered, or all typed
+    // as "1.". Display only — the stored markdown markers are left untouched, so
+    // block text offsets (and comment anchors) are unaffected.
+    let ordinal = 0;
+    return base.map((block) => {
+      if (block.type !== "ordered-list") {
+        ordinal = 0;
+        return block;
+      }
+      ordinal += 1;
+      const marker = String(ordinal);
+      return block.marker === marker ? block : { ...block, marker };
+    });
+  }, [blocks]);
   const blockSpans = useMemo(() => getMarkdownBlockLineSpans(markdown), [markdown]);
   const selectionPreviewThread = useMemo<ReviewThread | null>(
     () =>
@@ -5406,28 +5419,26 @@ function renderHighlightedText(
       );
     }
     const isActive = activeThreadId === range.thread.id;
+    // Render the comment highlight as an inline <span>, not a <button>. A button
+    // inside a contentEditable is an atomic, non-editable element: the caret
+    // can't land inside it and arrow keys skip over it, so commented text became
+    // effectively read-only. A span keeps the text editable; clicking it (a
+    // collapsed selection) still activates the thread, and the thread remains
+    // reachable from the side panel for keyboard users.
     nodes.push(
-      <button
-        type="button"
+      <span
         key={range.thread.id}
         data-thread-id={range.thread.id}
         className={`anchor-highlight ${isActive ? "is-active" : ""}`}
-        onMouseDown={(event) => event.preventDefault()}
         onClick={() => {
           if (range.thread.id === "selection-preview") return;
           const selection = window.getSelection();
           if (selection && !selection.isCollapsed) return;
           onActivateThread(range.thread.id);
         }}
-        onKeyDown={(event) => {
-          if (range.thread.id === "selection-preview") return;
-          if (event.key !== "Enter" && event.key !== " ") return;
-          event.preventDefault();
-          onActivateThread(range.thread.id);
-        }}
       >
         <InlineMarkdown markdown={text.slice(range.start, range.end)} keyPrefix={`range-${range.thread.id}`} />
-      </button>
+      </span>
     );
     cursor = range.end;
   });
