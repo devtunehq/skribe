@@ -3067,7 +3067,15 @@ function useSkribeController() {
       const currentBlock = stateRef.current ? parseMarkdownBlocks(stateRef.current.markdown).find((block) => block.id === blockId) : null;
       event.preventDefault();
       setActiveBlockId(blockId);
-      insertEditorBreak(currentBlock?.type !== "code" && !event.shiftKey);
+      // Paragraph/heading Enter inserts a paragraph break (blank line) to start a
+      // new block. In code, lists, and quotes a single line break is correct: the
+      // serializer turns each list/quote line into a sibling item, and code keeps
+      // its line breaks — so a double break here would split a list item into a
+      // detached paragraph.
+      const type = currentBlock?.type;
+      const singleBreakType =
+        type === "code" || type === "ordered-list" || type === "unordered-list" || type === "quote";
+      insertEditorBreak(!singleBreakType && !event.shiftKey);
       rememberCanvasSelection();
       return;
     }

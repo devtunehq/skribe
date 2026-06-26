@@ -8,6 +8,7 @@ import {
   insertText,
   makeMarkdownDoc,
   navigate,
+  press,
   removeTempDir,
   seedReview,
   startSkribeServer,
@@ -68,6 +69,48 @@ test("deleting an ordered list item renumbers the remaining items", async (t) =>
 
     await waitFor(browser.cdp, "document.querySelectorAll('.editable-list-marker').length === 2");
     assert.deepEqual(await listMarkers(browser.cdp), ["1.", "2."]);
+  });
+});
+
+test("pressing Enter in a list item creates a sibling item, not a paragraph", async (t) => {
+  await withApp(t, "- First item\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-list-row').length === 1");
+
+    // Place the caret at the end of the list item and press Enter, then type.
+    await evaluate(
+      browser.cdp,
+      `(() => {
+        const block = document.querySelector('[data-block-id="block-0"]');
+        block.focus();
+        const range = document.createRange();
+        range.selectNodeContents(block);
+        range.collapse(false);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return true;
+      })()`
+    );
+    await press(browser.cdp, "Enter", { code: "Enter", keyCode: 13 });
+    await insertText(browser.cdp, "Second item");
+
+    // Both lines must round-trip as list items — the bug turned the second line
+    // into a detached paragraph (blank line, no marker).
+    const saved = await waitForFileText(markdownPath, /Second item/);
+    assert.match(saved, /- First item\n- Second item/);
+    assert.doesNotMatch(saved, /- First item\n\nSecond item/);
+
+    // After blurring (which reparses and re-renders the canvas) the user must see
+    // two list rows and no paragraph carrying the second line.
+    await evaluate(browser.cdp, "document.querySelector('[data-block-id=\"block-0\"]')?.blur()");
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-list-row').length === 2");
+    assert.equal(
+      await evaluate(
+        browser.cdp,
+        "Array.from(document.querySelectorAll('.editable-document p')).some((p) => p.textContent.includes('Second item'))"
+      ),
+      false
+    );
   });
 });
 

@@ -389,13 +389,27 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
   return blocks;
 }
 
+function listItemLines(text: string) {
+  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+  return lines.length > 0 ? lines : [""];
+}
+
 export function serializeMarkdownBlocks(blocks: MarkdownBlock[]) {
   return blocks
     .map((block) => {
       const text = block.text.trimEnd();
       if (block.type === "heading") return `${"#".repeat(block.level ?? 2)} ${text}`;
-      if (block.type === "ordered-list") return `${block.marker ?? "1"}. ${text}`;
-      if (block.type === "unordered-list") return `- ${text}`;
+      // A list block can hold several lines once the user presses Enter inside it
+      // (each line break becomes a new sibling item). Emit one marker per line so
+      // it re-parses as a list, not a list followed by a paragraph.
+      if (block.type === "ordered-list") {
+        const items = listItemLines(text);
+        return items.map((line) => `${block.marker ?? "1"}. ${line}`).join("\n");
+      }
+      if (block.type === "unordered-list") {
+        const items = listItemLines(text);
+        return items.map((line) => `- ${line}`).join("\n");
+      }
       if (block.type === "quote") return text.split("\n").map((line) => `> ${line}`).join("\n");
       if (block.type === "code") return `\`\`\`${block.language ?? ""}\n${block.text}\n\`\`\``;
       if (block.type === "table") return text;
