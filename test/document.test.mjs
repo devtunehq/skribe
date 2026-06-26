@@ -9,6 +9,7 @@ import {
   parseMarkdownImage,
   parseMarkdownBlocks,
   parseMarkdownTable,
+  reconcileBlockIds,
   serializeMarkdownBlocks,
   shouldPasteAsMarkdownBlocks,
   spliceMarkdownPaste,
@@ -69,6 +70,56 @@ test("splitting a list item serializes into two sibling items", () => {
       ["unordered-list", "and eggs"]
     ]
   );
+});
+
+test("reconcileBlockIds carries stable ids through edits, inserts, deletes, and moves", () => {
+  let counter = 0;
+  const mint = () => `mint-${(counter += 1)}`;
+  const withIds = (entries) => entries.map(([id, type, text]) => ({ id, type, text }));
+  const reconcile = (previous, parsed) => reconcileBlockIds(previous, parsed, mint);
+
+  // First load keeps positional ids.
+  const first = parseMarkdownBlocks("# Title\n\nAlpha\n\nBeta");
+  assert.deepEqual(reconcile([], first), first);
+
+  const base = withIds([
+    ["id-h", "heading", "Title"],
+    ["id-a", "paragraph", "Alpha"],
+    ["id-b", "paragraph", "Beta"]
+  ]);
+
+  // Editing a block's text keeps its id (matched by type + position).
+  const edited = reconcile(base, withIds([
+    ["block-0", "heading", "Title"],
+    ["block-1", "paragraph", "Alpha edited"],
+    ["block-2", "paragraph", "Beta"]
+  ]));
+  assert.deepEqual(edited.map((b) => b.id), ["id-h", "id-a", "id-b"]);
+
+  // Inserting a block shifts the others but they keep their ids; the new one is minted.
+  const inserted = reconcile(base, withIds([
+    ["block-0", "heading", "Title"],
+    ["block-1", "paragraph", "Inserted"],
+    ["block-2", "paragraph", "Alpha"],
+    ["block-3", "paragraph", "Beta"]
+  ]));
+  assert.deepEqual(inserted.map((b) => b.text), ["Title", "Inserted", "Alpha", "Beta"]);
+  assert.deepEqual(inserted.map((b) => b.id), ["id-h", "mint-1", "id-a", "id-b"]);
+
+  // Deleting the middle block leaves the survivors' ids intact.
+  const deleted = reconcile(base, withIds([
+    ["block-0", "heading", "Title"],
+    ["block-1", "paragraph", "Beta"]
+  ]));
+  assert.deepEqual(deleted.map((b) => b.id), ["id-h", "id-b"]);
+
+  // Moving a block (reorder) preserves ids by signature match.
+  const moved = reconcile(base, withIds([
+    ["block-0", "heading", "Title"],
+    ["block-1", "paragraph", "Beta"],
+    ["block-2", "paragraph", "Alpha"]
+  ]));
+  assert.deepEqual(moved.map((b) => b.id), ["id-h", "id-b", "id-a"]);
 });
 
 test("markdown paste helpers detect and normalize Markdown blocks", () => {
