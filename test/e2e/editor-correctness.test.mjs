@@ -222,3 +222,68 @@ test("text under a comment anchor can receive a caret and be edited", async (t) 
     }
   );
 });
+
+test("a comment highlight follows its text when content above it is edited", async (t) => {
+  const createdAt = "2026-06-03T12:00:00.000Z";
+  const markdown = "# Draft\n\nIntro paragraph.\n\nThe special phrase lives here.\n";
+  const start = markdown.indexOf("special phrase");
+  await withApp(
+    t,
+    markdown,
+    async ({ browser, markdownPath }) => {
+      await waitFor(browser.cdp, "Boolean(document.querySelector('.anchor-highlight[data-thread-id]'))");
+      assert.equal(
+        await evaluate(browser.cdp, "document.querySelector('.anchor-highlight')?.textContent"),
+        "special phrase"
+      );
+
+      // Edit the paragraph ABOVE the comment, which lengthens the document and
+      // makes the comment's stored absolute offset stale, then blur to commit.
+      await evaluate(
+        browser.cdp,
+        `(() => {
+          const block = document.querySelector('[data-block-id="block-1"]');
+          block.focus();
+          block.textContent = 'Intro paragraph that is now considerably longer than it used to be.';
+          block.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: '.' }));
+          block.blur();
+          return true;
+        })()`
+      );
+      await waitForFileText(markdownPath, /considerably longer/);
+
+      // The highlight must still cover "special phrase" — not drift to whatever
+      // now sits at the old absolute offset.
+      await waitFor(
+        browser.cdp,
+        "document.querySelector('.anchor-highlight')?.textContent === 'special phrase'"
+      );
+      assert.equal(
+        await evaluate(browser.cdp, "document.querySelector('.anchor-highlight')?.textContent"),
+        "special phrase"
+      );
+    },
+    {
+      review: {
+        threads: [
+          {
+            id: "thread-drift",
+            status: "open",
+            anchor: {
+              kind: "markdown-range",
+              exact: "special phrase",
+              prefix: "The ",
+              suffix: " lives",
+              start,
+              end: start + "special phrase".length
+            },
+            messages: [{ id: "msg-drift", author: "human", body: "Reword?", createdAt }],
+            suggestions: [],
+            createdAt,
+            updatedAt: createdAt
+          }
+        ]
+      }
+    }
+  );
+});

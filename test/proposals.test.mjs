@@ -3,11 +3,14 @@ import test from "node:test";
 
 import {
   applyProposalDecisionTransitions,
+  buildInlineProposalReview,
   buildMarkdownFromProposalDecisions,
   buildProposalDiff,
   getProposalChangeBlocks,
   resolveProposalStatus
 } from "../src/proposals.ts";
+import { parseMarkdownBlocks } from "../src/document.ts";
+import { getMarkdownBlockLineSpans } from "../src/markdownRanges.ts";
 
 function makeProposal(overrides = {}) {
   return {
@@ -70,6 +73,26 @@ function changedBlocks(proposal) {
     second: changes.find((change) => change.additions.join("").includes("Second improved"))
   };
 }
+
+test("inline proposal changes anchor by content when the document is edited above", () => {
+  const proposal = makeProposal({ originalMarkdown, replacementMarkdown });
+  // A new paragraph is inserted at the top of the live document, shifting every
+  // block's position down by one.
+  const currentMarkdown = originalMarkdown.replace("# Draft\n", "# Draft\n\nNewly added intro.\n");
+
+  const review = buildInlineProposalReview(proposal, currentMarkdown);
+  const firstChange = review.changes.find((change) => change.deletions.join("").includes("First original"));
+  assert.ok(firstChange, "expected a change targeting 'First original.'");
+
+  // The anchored block in the current document must actually contain the source
+  // text — not whatever now sits at the original positional index.
+  const currentBlocks = parseMarkdownBlocks(currentMarkdown);
+  const anchorIndex = getMarkdownBlockLineSpans(currentMarkdown).findIndex(
+    (span) => span.id === firstChange.anchorBlockId
+  );
+  assert.ok(anchorIndex >= 0, "anchor block id should exist in the current document");
+  assert.equal(currentBlocks[anchorIndex].text.trim(), "First original.");
+});
 
 test("proposal change decisions apply individual blocks without reordering untouched content", () => {
   const proposal = makeProposal({ originalMarkdown, replacementMarkdown });

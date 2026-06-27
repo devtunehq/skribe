@@ -5111,25 +5111,33 @@ function EditableMarkdownCanvas({
     // Block ids are stable (reconciled), but line spans come from a positional
     // re-parse, so align them by document order rather than by id.
     const spansByBlock = new Map(visibleBlocks.map((block, index) => [block.id, blockSpans[index] ?? null]));
+
+    // Resolve each anchor's CURRENT position by re-finding its text rather than
+    // trusting the absolute offset captured when the comment was made — otherwise
+    // editing text above a comment shifts the document and the highlight drifts.
+    const resolvedRanges = new Map<string, { start: number; end: number }>();
+    for (const thread of canvasThreads) {
+      if (thread.anchor.kind !== "markdown-range") continue;
+      if (thread.status !== "open" && thread.id !== canvasActiveThreadId) continue;
+      const resolved = resolveSelectionDraftRange(markdown, thread.anchor);
+      if (resolved && resolved.end > resolved.start) resolvedRanges.set(thread.id, resolved);
+    }
+
     for (const block of visibleBlocks) {
       const blockSpan = spansByBlock.get(block.id) ?? null;
       if (blockSpan === null) continue;
 
       const blockAnchorRanges: BlockAnchorRange[] = [];
       for (const thread of canvasThreads) {
-        if (
-          (thread.status !== "open" && thread.id !== canvasActiveThreadId) ||
-          thread.anchor.kind !== "markdown-range" ||
-          thread.anchor.end <= blockSpan.textStart ||
-          thread.anchor.start >= blockSpan.textEnd
-        ) {
+        const resolved = resolvedRanges.get(thread.id);
+        if (!resolved || resolved.end <= blockSpan.textStart || resolved.start >= blockSpan.textEnd) {
           continue;
         }
 
         const range = {
           thread,
-          start: clamp(thread.anchor.start - blockSpan.textStart, 0, block.text.length),
-          end: clamp(thread.anchor.end - blockSpan.textStart, 0, block.text.length)
+          start: clamp(resolved.start - blockSpan.textStart, 0, block.text.length),
+          end: clamp(resolved.end - blockSpan.textStart, 0, block.text.length)
         };
         if (range.end > range.start) blockAnchorRanges.push(range);
       }
@@ -5137,7 +5145,7 @@ function EditableMarkdownCanvas({
       if (blockAnchorRanges.length > 0) byBlock.set(block.id, blockAnchorRanges);
     }
     return byBlock;
-  }, [blockSpans, canvasActiveThreadId, canvasThreads, visibleBlocks]);
+  }, [blockSpans, canvasActiveThreadId, canvasThreads, markdown, visibleBlocks]);
   const inlineChangesByBlock = useMemo(() => {
     const byBlock = new Map<string, InlineProposalChange[]>();
     inlineProposal?.changes.forEach((change) => {
