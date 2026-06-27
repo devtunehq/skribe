@@ -3011,28 +3011,49 @@ function useSkribeController() {
     const range = liveRange ?? selectionRangeRef.current;
     if (!range || !canvas.contains(range.commonAncestorContainer)) return [];
     const all = Array.from(canvas.querySelectorAll<HTMLElement>("[data-block-id]"));
+    if (all.length === 0) return [];
 
-    // Primary: every block the selection geometrically touches. This is robust to
-    // selection endpoints that land on container/boundary nodes (common when a
-    // drag ends past the last item) or on a list row's non-editable marker span,
-    // where resolving startContainer/endContainer to a block would yield null and
-    // silently collapse a multi-block selection to one block.
-    const touched = all
-      .filter((node) => range.intersectsNode(node))
-      .map((node) => node.dataset.blockId)
-      .filter((id): id is string => Boolean(id));
-    if (touched.length > 0) return touched;
+    // Map an arbitrary selection node to the index of the block it belongs to —
+    // directly when it's inside the editable, or via its block wrapper when an
+    // endpoint lands on a non-editable part (a list-row marker span, a quote/code
+    // wrapper). Returns -1 for container/boundary nodes.
+    const indexOfNode = (node: Node | null): number => {
+      if (!node) return -1;
+      const element = node.nodeType === Node.ELEMENT_NODE ? (node as Element) : node.parentElement;
+      if (!element) return -1;
+      const direct = element.closest("[data-block-id]");
+      if (direct) return all.indexOf(direct as HTMLElement);
+      const wrapper = element.closest(".editable-list-row, blockquote, pre, figure");
+      const inside = wrapper?.querySelector("[data-block-id]");
+      return inside ? all.indexOf(inside as HTMLElement) : -1;
+    };
 
-    // Fallback: resolve the endpoints directly (e.g. a collapsed caret).
-    const startNode = closestEditableBlock(range.startContainer);
-    const endNode = closestEditableBlock(range.endContainer);
-    if (!startNode || !endNode) return [];
-    let startIdx = all.indexOf(startNode);
-    let endIdx = all.indexOf(endNode);
-    if (startIdx < 0 || endIdx < 0) return [];
-    if (startIdx > endIdx) [startIdx, endIdx] = [endIdx, startIdx];
+    // Gather every signal of the selection's extent and take the widest span.
+    // A drag across separate contentEditable blocks is reported inconsistently:
+    // getRangeAt() may stay confined to one block while the selection's logical
+    // anchor/focus span several, and either endpoint can land on a non-editable
+    // boundary node. Combining range endpoints, anchor/focus, and geometric
+    // intersection keeps a multi-block selection from collapsing to one block.
+    const indices: number[] = [];
+    const pushIndex = (node: Node | null) => {
+      const index = indexOfNode(node);
+      if (index >= 0) indices.push(index);
+    };
+    pushIndex(range.startContainer);
+    pushIndex(range.endContainer);
+    if (liveRange && selection) {
+      pushIndex(selection.anchorNode);
+      pushIndex(selection.focusNode);
+    }
+    all.forEach((node, index) => {
+      if (range.intersectsNode(node)) indices.push(index);
+    });
+    if (indices.length === 0) return [];
+
+    const lo = Math.min(...indices);
+    const hi = Math.max(...indices);
     return all
-      .slice(startIdx, endIdx + 1)
+      .slice(lo, hi + 1)
       .map((node) => node.dataset.blockId)
       .filter((id): id is string => Boolean(id));
   }
