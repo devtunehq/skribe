@@ -111,3 +111,31 @@ test("single-block list conversion still works", async (t) => {
     assert.equal(saved, "Alpha\n\n- Beta\n");
   });
 });
+
+test("conversion still hits every block when the selection ends on a boundary node", async (t) => {
+  // A real drag across list items can leave the selection's end on a container /
+  // marker node rather than inside the last item's editable; the formatter must
+  // still convert all selected blocks, not collapse to one.
+  await withApp(t, "- a\n- b\n- c\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-list-row').length === 3");
+    await evaluate(
+      browser.cdp,
+      `(() => {
+        const blocks = document.querySelectorAll('.editable-document [data-block-id]');
+        blocks[0].focus();
+        const doc = document.querySelector('.editable-document');
+        const startNode = blocks[0].firstChild || blocks[0];
+        // End on the document container itself — endContainer is not inside any
+        // [data-block-id], so endpoint resolution would yield null.
+        getSelection().setBaseAndExtent(startNode, 0, doc, doc.childNodes.length);
+        return true;
+      })()`
+    );
+    await press(browser.cdp, "7", { code: "Digit7", keyCode: 55, ctrlKey: true, shiftKey: true });
+    await waitForFileText(markdownPath, /\d\. c/);
+    const saved = await readFile(markdownPath, "utf8");
+    const lines = saved.trimEnd().split("\n");
+    assert.equal(lines.length, 3);
+    for (const line of lines) assert.match(line, /^\d+\. /);
+  });
+});

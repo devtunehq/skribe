@@ -3010,10 +3010,23 @@ function useSkribeController() {
         : null;
     const range = liveRange ?? selectionRangeRef.current;
     if (!range || !canvas.contains(range.commonAncestorContainer)) return [];
+    const all = Array.from(canvas.querySelectorAll<HTMLElement>("[data-block-id]"));
+
+    // Primary: every block the selection geometrically touches. This is robust to
+    // selection endpoints that land on container/boundary nodes (common when a
+    // drag ends past the last item) or on a list row's non-editable marker span,
+    // where resolving startContainer/endContainer to a block would yield null and
+    // silently collapse a multi-block selection to one block.
+    const touched = all
+      .filter((node) => range.intersectsNode(node))
+      .map((node) => node.dataset.blockId)
+      .filter((id): id is string => Boolean(id));
+    if (touched.length > 0) return touched;
+
+    // Fallback: resolve the endpoints directly (e.g. a collapsed caret).
     const startNode = closestEditableBlock(range.startContainer);
     const endNode = closestEditableBlock(range.endContainer);
     if (!startNode || !endNode) return [];
-    const all = Array.from(canvas.querySelectorAll<HTMLElement>("[data-block-id]"));
     let startIdx = all.indexOf(startNode);
     let endIdx = all.indexOf(endNode);
     if (startIdx < 0 || endIdx < 0) return [];
