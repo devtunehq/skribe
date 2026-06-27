@@ -95,7 +95,19 @@ export function reconcileBlockIds(
     }
   });
 
-  // Pass 3: genuinely new blocks get a fresh stable id.
+  // Pass 3: nearest remaining by position regardless of type — keeps a block's
+  // id when it is reformatted in place (e.g. heading -> paragraph), as long as the
+  // block count is unchanged at that point.
+  parsed.forEach((_block, index) => {
+    if (assigned[index] !== null) return;
+    const match = nearestUnused(index, () => true);
+    if (match >= 0) {
+      used.add(match);
+      assigned[index] = previous[match].id;
+    }
+  });
+
+  // Pass 4: genuinely new blocks get a fresh stable id.
   return parsed.map((block, index) => ({ ...block, id: assigned[index] ?? mintId() }));
 }
 

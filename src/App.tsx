@@ -88,6 +88,7 @@ import {
   parseMarkdownTable,
   parseMarkdownImage,
   parseMarkdownBlocks,
+  reconcileBlockIds,
   moveMarkdownBlock,
   serializeMarkdownBlocks,
   shouldPasteAsMarkdownBlocks,
@@ -716,7 +717,11 @@ function placeCaretInEditableBlock(node: HTMLElement, plainOffset: number) {
   selection.addRange(range);
 }
 
-function buildSelectionFromCanvasRange(markdown: string, range: Range): SelectionDraft | null {
+function buildSelectionFromCanvasRange(
+  markdown: string,
+  range: Range,
+  blocks: ReturnType<typeof parseMarkdownBlocks>
+): SelectionDraft | null {
   const startBlockNode = closestEditableBlock(range.startContainer);
   const endBlockNode = closestEditableBlock(range.endContainer);
   const startBlockId = startBlockNode?.dataset.blockId;
@@ -724,11 +729,14 @@ function buildSelectionFromCanvasRange(markdown: string, range: Range): Selectio
   if (!startBlockNode || !endBlockNode || !startBlockId || !endBlockId) return null;
 
   const spans = getMarkdownBlockLineSpans(markdown);
-  const startSpan = spans.find((span) => span.id === startBlockId);
-  const endSpan = spans.find((span) => span.id === endBlockId);
-  const blocks = parseMarkdownBlocks(markdown);
-  const startBlock = blocks.find((block) => block.id === startBlockId);
-  const endBlock = blocks.find((block) => block.id === endBlockId);
+  // Block ids are stable (reconciled); spans come from a positional re-parse, so
+  // resolve via the block's index in document order.
+  const startIndex = blocks.findIndex((block) => block.id === startBlockId);
+  const endIndex = blocks.findIndex((block) => block.id === endBlockId);
+  const startSpan = startIndex >= 0 ? spans[startIndex] : undefined;
+  const endSpan = endIndex >= 0 ? spans[endIndex] : undefined;
+  const startBlock = startIndex >= 0 ? blocks[startIndex] : undefined;
+  const endBlock = endIndex >= 0 ? blocks[endIndex] : undefined;
   if (!startSpan || !endSpan || !startBlock || !endBlock) return null;
 
   const startPlainOffset = plainOffsetInEditableBlock(startBlockNode, range.startContainer, range.startOffset);
@@ -973,7 +981,9 @@ function useSkribeController() {
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const linkInputRef = useRef<HTMLInputElement | null>(null);
   const blockRefs = useRef<Record<string, HTMLElement | null>>({});
-  const pendingCaretRef = useRef<{ blockId: string; offset: number } | null>(null);
+  const pendingCaretRef = useRef<{ index: number; offset: number } | null>(null);
+  const blockIdCounterRef = useRef(0);
+  const reconciledBlocksRef = useRef<ReturnType<typeof parseMarkdownBlocks>>([]);
   const selectionRangeRef = useRef<Range | null>(null);
   const selectionDragRef = useRef<SelectionDragState | null>(null);
   const customSelectionActiveRef = useRef(false);
@@ -992,6 +1002,52 @@ function useSkribeController() {
   const agentRuntimeRefreshInFlightRef = useRef(false);
   const agentRuntimeRefreshAtRef = useRef(0);
   const agentSession = documentState?.agentSession;
+
+  const mintBlockId = useCallback(() => `b${(blockIdCounterRef.current += 1)}`, []);
+
+  // Reconcile a markdown string into blocks whose ids are carried forward from the
+  // last render, so a block's id tracks its content across edits/reflow instead of
+  // its array position. Used for rendering and by handlers that resolve a block
+  // from a DOM data-block-id. (Pure document.ts mutators still match positional
+  // ids; translate with positionalBlockId at those boundaries.)
+  const blocksForMarkdown = useCallback(
+    (markdown: string) => reconcileBlockIds(reconciledBlocksRef.current, parseMarkdownBlocks(markdown), mintBlockId),
+    [mintBlockId]
+  );
+
+  const reconciledBlocks = useMemo(
+    () => blocksForMarkdown(documentState?.markdown ?? ""),
+    [blocksForMarkdown, documentState?.markdown]
+  );
+
+  useLayoutEffect(() => {
+    reconciledBlocksRef.current = reconciledBlocks;
+  }, [reconciledBlocks]);
+
+  const positionalBlockId = useCallback(
+    (markdown: string, stableId: string) => {
+      const index = blocksForMarkdown(markdown).findIndex((block) => block.id === stableId);
+      return index >= 0 ? markdownBlockIdFromIndex(index) : stableId;
+    },
+    [blocksForMarkdown]
+  );
+
+  // Resolve a stable block id to its block plus its positional line span (spans
+  // are derived from a positional re-parse, so align by document order).
+  const blockWithSpanById = useCallback(
+    (markdown: string, stableId: string) => {
+      const list = blocksForMarkdown(markdown);
+      const index = list.findIndex((block) => block.id === stableId);
+      if (index < 0) return { block: null, span: null };
+      return { block: list[index], span: getMarkdownBlockLineSpans(markdown)[index] ?? null };
+    },
+    [blocksForMarkdown]
+  );
+
+  const findBlockById = useCallback(
+    (markdown: string, stableId: string) => blocksForMarkdown(markdown).find((block) => block.id === stableId) ?? null,
+    [blocksForMarkdown]
+  );
 
   const clearPendingEditTimers = useCallback(() => {
     if (liveEditTimerRef.current) window.clearTimeout(liveEditTimerRef.current);
@@ -1177,11 +1233,14 @@ function useSkribeController() {
   useLayoutEffect(() => {
     const pending = pendingCaretRef.current;
     if (!pending) return;
-    const node = blockRefs.current[pending.blockId];
+    const target = reconciledBlocksRef.current[pending.index];
+    if (!target) return;
+    const node = blockRefs.current[target.id];
     if (!node) return;
+    setActiveBlockId(target.id);
     if (node === document.activeElement || node.contains(document.activeElement)) return;
     placeCaretInEditableBlock(node, pending.offset);
-  }, [documentState, blockResetKeys]);
+  }, [documentState, blockResetKeys, setActiveBlockId]);
 
   useEffect(() => {
     return clearPendingEditTimers;
@@ -1484,10 +1543,10 @@ function useSkribeController() {
     const shells = visibleEditableShells();
     if (shells.length === 0) return null;
 
-    const sourceBlocks = parseMarkdownBlocks(markdown);
+    const sourceBlocks = blocksForMarkdown(markdown);
     const renderedState = documentState;
     const renderedMarkdown = renderedState && renderedState.id === stateRef.current?.id ? renderedState.markdown : null;
-    const renderedBlocks = renderedMarkdown ? parseMarkdownBlocks(renderedMarkdown) : [];
+    const renderedBlocks = renderedMarkdown ? blocksForMarkdown(renderedMarkdown) : [];
     const blocksById = new Map<string, ReturnType<typeof parseMarkdownBlocks>[number]>();
     [...sourceBlocks, ...renderedBlocks].forEach((block) => blocksById.set(block.id, block));
 
@@ -1524,7 +1583,7 @@ function useSkribeController() {
     const visibleMarkdown = serializeVisibleCanvasMarkdown(markdown);
     if (visibleMarkdown !== null) return visibleMarkdown;
 
-    const blocks = parseMarkdownBlocks(markdown);
+    const blocks = blocksForMarkdown(markdown);
     if (blocks.length === 0) {
       const emptyBlockId = markdownBlockIdFromIndex(0);
       const node = blockRefs.current[emptyBlockId];
@@ -1544,7 +1603,7 @@ function useSkribeController() {
   }
 
   function resetRenderedEditableBlocks(markdown: string) {
-    const ids = new Set(parseMarkdownBlocks(markdown).map((block) => block.id));
+    const ids = new Set(blocksForMarkdown(markdown).map((block) => block.id));
     visibleEditableShells().forEach((shell) => {
       if (shell.dataset.blockShell) ids.add(shell.dataset.blockShell);
     });
@@ -1797,8 +1856,7 @@ function useSkribeController() {
     const blockId = blockNode.dataset.blockId;
     if (!blockId || !markdown) return null;
 
-    const block = parseMarkdownBlocks(markdown).find((item) => item.id === blockId);
-    const span = getMarkdownBlockLineSpans(markdown).find((item) => item.id === blockId);
+    const { block, span } = blockWithSpanById(markdown, blockId);
     if (!block || !span) return null;
 
     const rect = blockNode.getBoundingClientRect();
@@ -1843,8 +1901,7 @@ function useSkribeController() {
       return fallbackBlock ? selectionEndpointFromBlockEdge(fallbackBlock, clientX, clientY) : null;
     }
 
-    const block = parseMarkdownBlocks(markdown).find((item) => item.id === blockId);
-    const span = getMarkdownBlockLineSpans(markdown).find((item) => item.id === blockId);
+    const { block, span } = blockWithSpanById(markdown, blockId);
     if (!block || !span) return null;
 
     const plainOffset = plainOffsetInEditableBlock(blockNode, range.startContainer, range.startOffset);
@@ -2052,7 +2109,7 @@ function useSkribeController() {
     if (!current || !thread) return;
 
     const candidates = getThreadAnchorCandidates(thread);
-    const targetBlock = parseMarkdownBlocks(current.markdown).find((block) =>
+    const targetBlock = blocksForMarkdown(current.markdown).find((block) =>
       candidates.some((candidate) => block.text.includes(candidate))
     );
     const blockNode = targetBlock ? blockRefs.current[targetBlock.id] : null;
@@ -2095,7 +2152,7 @@ function useSkribeController() {
     if (selectedText.length < 3) return;
 
     const markdown = markdownForSelection();
-    const nextSelection = buildSelectionFromCanvasRange(markdown, range) ?? buildSelection(markdown, selectedText);
+    const nextSelection = buildSelectionFromCanvasRange(markdown, range, blocksForMarkdown(markdown)) ?? buildSelection(markdown, selectedText);
     setSelectionDraft(nextSelection);
     setPanelMode("threads");
     setFloatingToolbar(null);
@@ -2178,7 +2235,7 @@ function useSkribeController() {
     if (!canvasRef.current.contains(range.startContainer) || !canvasRef.current.contains(range.endContainer)) return null;
 
     if (!range.collapsed) {
-      const selectedRange = buildSelectionFromCanvasRange(markdown, range);
+      const selectedRange = buildSelectionFromCanvasRange(markdown, range, blocksForMarkdown(markdown));
       if (selectedRange) return resolveSelectionDraftRange(markdown, selectedRange);
     }
 
@@ -2186,11 +2243,10 @@ function useSkribeController() {
     const blockId = blockNode?.dataset.blockId;
     if (!blockNode || !blockId) return null;
 
-    const blocks = parseMarkdownBlocks(markdown);
+    const blocks = blocksForMarkdown(markdown);
     if (blocks.length === 0 && blockId === markdownBlockIdFromIndex(0)) return { start: 0, end: 0 };
 
-    const block = blocks.find((item) => item.id === blockId);
-    const span = getMarkdownBlockLineSpans(markdown).find((item) => item.id === blockId);
+    const { block, span } = blockWithSpanById(markdown, blockId);
     if (!block || !span) return null;
 
     const plainOffset = plainOffsetInEditableBlock(blockNode, range.startContainer, range.startOffset);
@@ -2846,7 +2902,7 @@ function useSkribeController() {
   }
 
   function updateCanvasBlock(blockId: string, html: string) {
-    const currentBlock = stateRef.current ? parseMarkdownBlocks(stateRef.current.markdown).find((block) => block.id === blockId) : null;
+    const currentBlock = stateRef.current ? findBlockById(stateRef.current.markdown, blockId) : null;
     const registeredNode = blockRefs.current[blockId] ?? null;
     const text = registeredNode ? blockNodeToMarkdown(registeredNode, currentBlock?.type) : htmlToInlineMarkdown(html);
     const textBlocks: string[] = [];
@@ -2862,7 +2918,7 @@ function useSkribeController() {
     }
     commit((state) => ({
       ...state,
-      markdown: updateMarkdownBlock(state.markdown, blockId, text),
+      markdown: updateMarkdownBlock(state.markdown, positionalBlockId(state.markdown, blockId), text),
       review: {
         ...state.review,
         updatedAt: nowIso()
@@ -2875,7 +2931,12 @@ function useSkribeController() {
     commit(
       (state) => ({
         ...state,
-        markdown: moveMarkdownBlock(state.markdown, blockId, targetBlockId, placement),
+        markdown: moveMarkdownBlock(
+          state.markdown,
+          positionalBlockId(state.markdown, blockId),
+          positionalBlockId(state.markdown, targetBlockId),
+          placement
+        ),
         review: {
           ...state.review,
           updatedAt: nowIso()
@@ -2886,11 +2947,11 @@ function useSkribeController() {
   }
 
   function deleteCanvasBlock(blockId: string) {
-    if (!stateRef.current || !parseMarkdownBlocks(stateRef.current.markdown).some((item) => item.id === blockId)) return;
+    if (!stateRef.current || !findBlockById(stateRef.current.markdown, blockId)) return;
     commit(
       (state) => ({
         ...state,
-        markdown: deleteMarkdownBlock(state.markdown, blockId),
+        markdown: deleteMarkdownBlock(state.markdown, positionalBlockId(state.markdown, blockId)),
         review: {
           ...state.review,
           updatedAt: nowIso()
@@ -2907,19 +2968,20 @@ function useSkribeController() {
 
   function updateBlockShape(blockId: string, patch: Parameters<typeof updateMarkdownBlockShape>[2]) {
     const node = blockRefs.current[blockId];
-    const currentBlock = stateRef.current ? parseMarkdownBlocks(stateRef.current.markdown).find((block) => block.id === blockId) : null;
+    const currentBlock = stateRef.current ? findBlockById(stateRef.current.markdown, blockId) : null;
     const currentText = node ? blockNodeToMarkdown(node, currentBlock?.type) : null;
 
     // The commit below serializes the live DOM (capturing this and any other
     // block's in-progress edits) while the debounce timer is still armed, then
     // remounts the block under its new shape via resyncDom.
     commit((state) => {
+      const positional = positionalBlockId(state.markdown, blockId);
       const markdownWithLatestText = currentText
-        ? updateMarkdownBlock(state.markdown, blockId, currentText)
+        ? updateMarkdownBlock(state.markdown, positional, currentText)
         : state.markdown;
       return {
         ...state,
-        markdown: updateMarkdownBlockShape(markdownWithLatestText, blockId, patch),
+        markdown: updateMarkdownBlockShape(markdownWithLatestText, positional, patch),
         review: {
           ...state.review,
           updatedAt: nowIso()
@@ -3004,7 +3066,7 @@ function useSkribeController() {
     if (!range.collapsed || !node.contains(range.startContainer)) return false;
 
     const liveState = stateWithLiveCanvasEdit(current);
-    const blocks = parseMarkdownBlocks(liveState.markdown);
+    const blocks = blocksForMarkdown(liveState.markdown);
     const index = blocks.findIndex((block) => block.id === blockId);
     if (index < 0) return false;
     const block = blocks[index];
@@ -3043,9 +3105,10 @@ function useSkribeController() {
     }
     liveEditHistoryActiveRef.current = false;
 
-    const newBlockId = markdownBlockIdFromIndex(index + 1);
-    pendingCaretRef.current = { blockId: newBlockId, offset: 0 };
-    setActiveBlockId(newBlockId);
+    // The new item is the block at index + 1. Its stable id is only known once
+    // the commit re-reconciles, so target it by position; the layout effect
+    // resolves the id and places the caret.
+    pendingCaretRef.current = { index: index + 1, offset: 0 };
     return true;
   }
 
@@ -3081,7 +3144,7 @@ function useSkribeController() {
       plainEnd: plainStart + selectedText.length,
       markdownAtOpen: blockNodeToMarkdown(
         editableBlock,
-        stateRef.current ? parseMarkdownBlocks(stateRef.current.markdown).find((block) => block.id === blockId)?.type : undefined
+        stateRef.current ? findBlockById(stateRef.current.markdown, blockId)?.type : undefined
       )
     };
     setLinkDraft(existingHref || "https://");
@@ -3094,13 +3157,13 @@ function useSkribeController() {
     const target = linkTargetRef.current;
     const currentState = stateRef.current;
     if (href && target && currentState) {
-      const block = parseMarkdownBlocks(currentState.markdown).find((item) => item.id === target.blockId);
+      const block = findBlockById(currentState.markdown, target.blockId);
       const linkedText = block ? applyMarkdownLinkToSelection(block.text, target, href) : null;
       if (block && linkedText && linkedText !== block.text) {
         commit(
           (state) => ({
             ...state,
-            markdown: updateMarkdownBlock(state.markdown, target.blockId, linkedText),
+            markdown: updateMarkdownBlock(state.markdown, positionalBlockId(state.markdown, target.blockId), linkedText),
             review: {
               ...state.review,
               updatedAt: nowIso()
@@ -3199,7 +3262,7 @@ function useSkribeController() {
     }
 
     if (event.key === "Enter" && !event.metaKey && !event.ctrlKey && !event.altKey && !event.nativeEvent.isComposing) {
-      const currentBlock = stateRef.current ? parseMarkdownBlocks(stateRef.current.markdown).find((block) => block.id === blockId) : null;
+      const currentBlock = stateRef.current ? findBlockById(stateRef.current.markdown, blockId) : null;
       event.preventDefault();
       setActiveBlockId(blockId);
       const type = currentBlock?.type;
@@ -3431,6 +3494,7 @@ function useSkribeController() {
     linkDraft,
     lastCopied,
     blockResetKeys,
+    blocks: reconciledBlocks,
     agentSession,
     agentRuntimeUnavailable,
     isFlowMode,
@@ -4022,6 +4086,7 @@ function CenterPane() {
     activeThread,
     appSettings,
     blockResetKeys,
+    blocks,
     canvasRef,
     documentState,
     editorLanguage,
@@ -4097,6 +4162,7 @@ function CenterPane() {
         )}
         <EditableMarkdownCanvas
           markdown={documentState.markdown}
+          blocks={blocks}
           editorLanguage={editorLanguage}
           threads={isFlowMode ? [] : threads}
           inlineProposal={isFlowMode ? null : activeInlineProposal}
@@ -4818,6 +4884,7 @@ function SkillComposer({
 
 interface MarkdownCanvasProps {
   markdown: string;
+  blocks: ReturnType<typeof parseMarkdownBlocks>;
   editorLanguage: SupportedEditorLanguage;
   threads: ReviewThread[];
   inlineProposal: InlineProposalReview | null;
@@ -4976,6 +5043,7 @@ function LinkPopover({
 
 function EditableMarkdownCanvas({
   markdown,
+  blocks,
   editorLanguage,
   threads,
   inlineProposal,
@@ -5000,7 +5068,6 @@ function EditableMarkdownCanvas({
 }: MarkdownCanvasProps) {
   const [draggingBlockId, setDraggingBlockId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<{ blockId: string; placement: BlockDropPlacement } | null>(null);
-  const blocks = useMemo(() => parseMarkdownBlocks(markdown), [markdown]);
   const visibleBlocks = useMemo(() => {
     const base = blocks.length > 0 ? blocks : [{ id: markdownBlockIdFromIndex(0), type: "paragraph" as const, text: "" }];
     // Renumber ordered-list markers per contiguous run so the displayed numbers
@@ -5041,7 +5108,9 @@ function EditableMarkdownCanvas({
   const canvasActiveThreadId = selectionPreviewThread?.id ?? activeThreadId;
   const anchorRangesByBlock = useMemo(() => {
     const byBlock = new Map<string, BlockAnchorRange[]>();
-    const spansByBlock = new Map(blockSpans.map((span) => [span.id, span]));
+    // Block ids are stable (reconciled), but line spans come from a positional
+    // re-parse, so align them by document order rather than by id.
+    const spansByBlock = new Map(visibleBlocks.map((block, index) => [block.id, blockSpans[index] ?? null]));
     for (const block of visibleBlocks) {
       const blockSpan = spansByBlock.get(block.id) ?? null;
       if (blockSpan === null) continue;
@@ -5133,8 +5202,11 @@ function EditableMarkdownCanvas({
         className="editable-document"
         lang={editorLanguage}
       >
-        {visibleBlocks.map((block) => {
+        {visibleBlocks.map((block, blockIndex) => {
           const blockAnchorRanges = anchorRangesByBlock.get(block.id) ?? emptyBlockAnchorRanges;
+          // Inline-proposal changes are anchored to positional block ids; map this
+          // block's position to that key (block ids themselves are stable).
+          const inlineChanges = inlineChangesByBlock.get(markdownBlockIdFromIndex(blockIndex)) ?? [];
 
           return (
             <React.Fragment key={block.id}>
@@ -5177,7 +5249,7 @@ function EditableMarkdownCanvas({
                   onTableImageExported={onTableImageExported}
                 />
               </EditableBlockShell>
-              {(inlineChangesByBlock.get(block.id) ?? []).map((change) => (
+              {inlineChanges.map((change) => (
                 <InlineProposalChangeCard
                   key={`${change.proposalId}:${change.key}`}
                   change={change}

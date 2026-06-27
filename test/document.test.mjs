@@ -120,6 +120,15 @@ test("reconcileBlockIds carries stable ids through edits, inserts, deletes, and 
     ["block-2", "paragraph", "Alpha"]
   ]));
   assert.deepEqual(moved.map((b) => b.id), ["id-h", "id-b", "id-a"]);
+
+  // Reformatting a block in place (paragraph -> heading) keeps its id via the
+  // position-match pass, even though type and text both changed.
+  const reformatted = reconcile(base, withIds([
+    ["block-0", "heading", "Title"],
+    ["block-1", "heading", "Alpha"],
+    ["block-2", "paragraph", "Beta"]
+  ]));
+  assert.deepEqual(reformatted.map((b) => b.id), ["id-h", "id-a", "id-b"]);
 });
 
 test("markdown paste helpers detect and normalize Markdown blocks", () => {
