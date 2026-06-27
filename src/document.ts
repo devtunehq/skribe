@@ -338,9 +338,11 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
 
   const flushParagraph = () => {
     if (paragraph.length === 0) return;
+    // A lone zero-width space marks a deliberately empty paragraph block (created
+    // by pressing Enter at the end of a block); strip it so the block reads empty.
     pushBlock({
       type: "paragraph",
-      text: paragraph.join("\n").trim()
+      text: paragraph.join("\n").replace(/\u200b/g, "").trim()
     });
     paragraph = [];
   };

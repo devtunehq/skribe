@@ -287,3 +287,91 @@ test("a comment highlight follows its text when content above it is edited", asy
     }
   );
 });
+
+function blockCount(cdp) {
+  return evaluate(cdp, "document.querySelectorAll('.editable-document [data-block-id]').length");
+}
+
+async function caretAtEnd(cdp, blockId) {
+  return evaluate(
+    cdp,
+    `(() => {
+      const block = document.querySelector('[data-block-id="${blockId}"]');
+      if (!block) return false;
+      block.focus();
+      const range = document.createRange();
+      range.selectNodeContents(block);
+      range.collapse(false);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return true;
+    })()`
+  );
+}
+
+test("Enter in a paragraph creates a new block with the caret in it", async (t) => {
+  await withApp(t, "Alpha paragraph.\n", async ({ browser }) => {
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 1");
+    await caretAtEnd(browser.cdp, "block-0");
+    await press(browser.cdp, "Enter", { code: "Enter", keyCode: 13 });
+
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 2");
+    const state = await evaluate(
+      browser.cdp,
+      `(() => {
+        const blocks = Array.from(document.querySelectorAll('.editable-document [data-block-id]'));
+        const second = blocks[1];
+        return {
+          firstText: blocks[0].textContent,
+          secondEmpty: (second.textContent || '').replace(/\\u200b/g, '') === '',
+          caretInSecond: second.contains(document.activeElement) || second === document.activeElement
+        };
+      })()`
+    );
+    assert.equal(state.firstText, "Alpha paragraph.");
+    assert.equal(state.secondEmpty, true, "new block should be empty");
+    assert.equal(state.caretInSecond, true, "caret should move to the new block");
+  });
+});
+
+test("Enter mid-paragraph splits it into two blocks", async (t) => {
+  await withApp(t, "Hello world.\n", async ({ browser }) => {
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 1");
+    // Caret after "Hello".
+    await evaluate(
+      browser.cdp,
+      `(() => {
+        const block = document.querySelector('[data-block-id="block-0"]');
+        block.focus();
+        const node = block.firstChild;
+        const range = document.createRange();
+        range.setStart(node, 5);
+        range.collapse(true);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return true;
+      })()`
+    );
+    await press(browser.cdp, "Enter", { code: "Enter", keyCode: 13 });
+
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 2");
+    const texts = await evaluate(
+      browser.cdp,
+      "Array.from(document.querySelectorAll('.editable-document [data-block-id]')).map((b) => b.textContent.trim())"
+    );
+    assert.deepEqual(texts, ["Hello", "world."]);
+  });
+});
+
+test("Shift+Enter inserts a line break without creating a new block", async (t) => {
+  await withApp(t, "Line one.\n", async ({ browser }) => {
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 1");
+    await caretAtEnd(browser.cdp, "block-0");
+    await press(browser.cdp, "Enter", { code: "Enter", keyCode: 13, shiftKey: true });
+    // Still a single block — a soft break, not a split.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(await blockCount(browser.cdp), 1);
+  });
+});

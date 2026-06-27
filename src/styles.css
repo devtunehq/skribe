@@ -1492,6 +1492,27 @@ button {
   margin-top: 32px;
 }
 
+.editable-heading.level-4 {
+  font-size: 17px;
+  font-weight: 700;
+  margin-top: 28px;
+}
+
+.editable-heading.level-5 {
+  font-size: 15px;
+  font-weight: 700;
+  margin-top: 24px;
+}
+
+.editable-heading.level-6 {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-soft, #6b7280);
+  margin-top: 22px;
+}
+
 .markdown-canvas p,
 .markdown-canvas li,
 .editable-list-row .editable-text {

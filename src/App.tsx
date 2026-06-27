@@ -1567,11 +1567,13 @@ function useSkribeController() {
 
       const text = blockNodeToMarkdown(node, sourceBlock.type);
       if (text.trim()) return [{ ...sourceBlock, text }];
-      // Keep an empty block while the caret is inside it — e.g. a list item just
-      // created with Enter that the writer is about to fill in. Empty blocks are
-      // dropped once focus leaves them.
+      // Keep an empty block while the caret is inside it — e.g. a block just
+      // created with Enter that the writer is about to fill in. Lists round-trip
+      // empty as "- "; other empty blocks need a zero-width-space sentinel so the
+      // block survives re-parsing. Empty blocks are dropped once focus leaves them.
       if (node === document.activeElement || node.contains(document.activeElement)) {
-        return [{ ...sourceBlock, text: "" }];
+        const isList = sourceBlock.type === "ordered-list" || sourceBlock.type === "unordered-list";
+        return [{ ...sourceBlock, text: isList ? "" : "\u200b" }];
       }
       return [];
     });
@@ -3006,8 +3008,12 @@ function useSkribeController() {
 
   function applyInlineCommand(command: "bold" | "italic" | "strikeThrough") {
     restoreCanvasSelection();
+    // Emit semantic tags (<strong>/<em>/<s>) rather than inline styles so the
+    // formatting survives serialization back to Markdown.
+    document.execCommand("styleWithCSS", false, "false");
     document.execCommand(command);
     rememberCanvasSelection();
+    scheduleLiveCanvasCommit();
   }
 
   function applyInlineCode() {
@@ -3026,6 +3032,7 @@ function useSkribeController() {
     nextRange.selectNodeContents(code);
     selection.addRange(nextRange);
     rememberCanvasSelection();
+    scheduleLiveCanvasCommit();
   }
 
   function insertEditorBreak(paragraphBreak: boolean) {
@@ -3052,11 +3059,13 @@ function useSkribeController() {
     return true;
   }
 
-  // Pressing Enter in a list item splits it into a new sibling item immediately
-  // (rather than inserting a soft line break that only reflows on blur): the
-  // text before the caret stays, the text after becomes a new item, and the
-  // caret lands at the start of that new item.
-  function splitListBlockAtCaret(blockId: string) {
+  // Pressing Enter splits the block at the caret into a new block immediately
+  // (rather than inserting a soft line break that only reflows on blur): the text
+  // before the caret stays, the text after becomes a new block, and the caret
+  // lands at the start of it. A heading or quote's continuation becomes a
+  // paragraph; lists stay lists. An empty side uses a sentinel so the block
+  // survives the round-trip (lists via "- ", others via a zero-width space).
+  function splitBlockAtCaret(blockId: string) {
     const node = blockRefs.current[blockId];
     const selection = window.getSelection();
     const current = stateRef.current;
@@ -3076,20 +3085,24 @@ function useSkribeController() {
     const before = block.text.slice(0, markdownOffset);
     const after = block.text.slice(markdownOffset);
 
-    const nextBlocks = [
-      ...blocks.slice(0, index),
-      { ...block, text: before },
-      { ...block, text: after },
-      ...blocks.slice(index + 1)
-    ];
+    const isListType = block.type === "ordered-list" || block.type === "unordered-list";
+    const emptyText = isListType ? "" : "\u200b";
+    const afterType = block.type === "heading" || block.type === "quote" ? "paragraph" : block.type;
+    const beforeBlock = { ...block, text: before || emptyText };
+    const afterBlock =
+      afterType === block.type
+        ? { ...block, text: after || emptyText }
+        : { ...block, type: afterType, level: undefined, marker: undefined, text: after || "\u200b" };
+
+    const nextBlocks = [...blocks.slice(0, index), beforeBlock, afterBlock, ...blocks.slice(index + 1)];
     const markdown = serializeMarkdownBlocks(nextBlocks);
 
     // Only the blocks at/after the split change identity. The block being split
-    // keeps its key, so when its text is unchanged (the common "Enter at end of
-    // item" case) React leaves its focused contentEditable untouched — no remount,
-    // no blur. Only force a DOM resync when the split block's own text changed
-    // (a mid-item split), where its DOM must be truncated.
-    const splitBlockChanged = before !== block.text;
+    // keeps its key, so when its text is unchanged (the common "Enter at end"
+    // case) React leaves its focused contentEditable untouched — no remount, no
+    // blur. Only force a DOM resync when the split block's own text changed (a
+    // mid-block split), where its DOM must be truncated.
+    const splitBlockChanged = beforeBlock.text !== block.text;
     commit(
       () => ({
         ...liveState,
@@ -3266,15 +3279,32 @@ function useSkribeController() {
       event.preventDefault();
       setActiveBlockId(blockId);
       const type = currentBlock?.type;
-      // In a list, Enter splits the item into a new sibling item right away.
-      if (!event.shiftKey && (type === "ordered-list" || type === "unordered-list") && splitListBlockAtCaret(blockId)) {
+
+      // Shift+Enter is a soft line break within the current block.
+      if (event.shiftKey) {
+        insertEditorBreak(false);
+        rememberCanvasSelection();
         return;
       }
-      // Paragraph/heading Enter inserts a paragraph break (blank line) to start a
-      // new block. In code and quotes a single line break is correct, so a double
-      // break would otherwise split the content into a detached paragraph.
-      const singleBreakType = type === "code" || type === "quote";
-      insertEditorBreak(!singleBreakType && !event.shiftKey);
+
+      // A table cell can't hold a line break (it collapses to a space on
+      // serialize), so swallow Enter rather than insert a break that vanishes.
+      if (type === "table") {
+        rememberCanvasSelection();
+        return;
+      }
+
+      // Code keeps Enter as a literal newline so multi-line code stays editable.
+      if (type === "code") {
+        insertEditorBreak(false);
+        rememberCanvasSelection();
+        return;
+      }
+
+      // Every other block: Enter creates a new block by splitting at the caret.
+      if (splitBlockAtCaret(blockId)) return;
+      // Fallback (e.g. block not resolvable): start a new paragraph.
+      insertEditorBreak(true);
       rememberCanvasSelection();
       return;
     }
@@ -5409,13 +5439,17 @@ const EditableBlock = React.memo(function EditableBlock({
   const children = renderHighlightedText(block.text, threads, activeThreadId, onActivateThread, anchorRanges);
 
   if (block.type === "heading") {
-    const tag = `h${Math.min(block.level ?? 2, 3)}` as "h1" | "h2" | "h3";
+    // Render the actual level (up to h6) so the displayed heading matches the
+    // Markdown source (#### shows as an h4), instead of clamping every deep
+    // heading to h3 while the source kept its level.
+    const level = Math.min(Math.max(block.level ?? 2, 1), 6);
+    const tag = `h${level}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
     return React.createElement(
       tag,
       {
         ...editableProps,
         id: block.id,
-        className: `editable-text editable-heading level-${block.level ?? 2}`
+        className: `editable-text editable-heading level-${level}`
       },
       children
     );
