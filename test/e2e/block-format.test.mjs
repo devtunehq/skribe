@@ -1,0 +1,113 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+
+import {
+  browserTest,
+  disableToneSetup,
+  evaluate,
+  makeMarkdownDoc,
+  navigate,
+  press,
+  removeTempDir,
+  startSkribeServer,
+  waitFor,
+  waitForFileText
+} from "./helpers.mjs";
+
+async function withApp(t, markdown, callback) {
+  const browser = await browserTest(t);
+  if (!browser) return;
+  const { rootDir, markdownPath } = await makeMarkdownDoc("draft.md", markdown);
+  const server = await startSkribeServer(markdownPath);
+  try {
+    await disableToneSetup(server.baseUrl);
+    await navigate(browser.cdp, server.baseUrl);
+    await callback({ browser, markdownPath });
+  } finally {
+    await browser.stop();
+    await server.stop();
+    await removeTempDir(rootDir);
+  }
+}
+
+// Select from the first block through the last. A native cross-block drag yields
+// a selection whose range starts in the first block and ends in the last (even
+// though toString() is visually clamped to one block); setBaseAndExtent
+// reproduces exactly that range structure, which is what the formatter reads.
+async function selectAllBlocks(cdp) {
+  return evaluate(
+    cdp,
+    `(() => {
+      const blocks = document.querySelectorAll('.editable-document [data-block-id]');
+      const last = blocks[blocks.length - 1];
+      last.focus();
+      const startNode = blocks[0].firstChild || blocks[0];
+      const endNode = last.firstChild || last;
+      getSelection().setBaseAndExtent(startNode, 0, endNode, (endNode.textContent || '').length);
+      const range = getSelection().getRangeAt(0);
+      const bid = (n) => n && n.parentElement?.closest?.('[data-block-id]')?.getAttribute('data-block-id');
+      return { start: bid(range.startContainer), end: bid(range.endContainer) };
+    })()`
+  );
+}
+
+test("Ctrl+Shift+8 on a multi-block selection turns every block into a bullet", async (t) => {
+  await withApp(t, "Alpha\n\nBeta\n\nGamma\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 3");
+    const range = await selectAllBlocks(browser.cdp);
+    assert.equal(range.start, "block-0");
+    assert.equal(range.end, "block-2");
+
+    await press(browser.cdp, "8", { code: "Digit8", keyCode: 56, ctrlKey: true, shiftKey: true });
+
+    await waitForFileText(browser.cdp ? markdownPath : markdownPath, /- Gamma/);
+    const saved = await readFile(markdownPath, "utf8");
+    assert.equal(saved, "- Alpha\n- Beta\n- Gamma\n");
+  });
+});
+
+test("Ctrl+Shift+7 on a multi-block selection turns every block into a numbered item", async (t) => {
+  await withApp(t, "Alpha\n\nBeta\n\nGamma\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 3");
+    const range = await selectAllBlocks(browser.cdp);
+    assert.equal(range.start, "block-0");
+    assert.equal(range.end, "block-2");
+
+    await press(browser.cdp, "7", { code: "Digit7", keyCode: 55, ctrlKey: true, shiftKey: true });
+
+    await waitForFileText(markdownPath, /\d\. Gamma/);
+    const saved = await readFile(markdownPath, "utf8");
+    // Every selected block becomes an ordered-list item.
+    const lines = saved.trimEnd().split("\n");
+    assert.equal(lines.length, 3);
+    for (const line of lines) assert.match(line, /^\d+\. /);
+    assert.match(saved, /Alpha/);
+    assert.match(saved, /Beta/);
+    assert.match(saved, /Gamma/);
+  });
+});
+
+test("single-block list conversion still works", async (t) => {
+  await withApp(t, "Alpha\n\nBeta\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 2");
+    await evaluate(
+      browser.cdp,
+      `(() => {
+        const b = document.querySelector('[data-block-id="block-1"]');
+        b.focus();
+        const r = document.createRange();
+        r.selectNodeContents(b);
+        r.collapse(false);
+        const s = getSelection();
+        s.removeAllRanges();
+        s.addRange(r);
+        return true;
+      })()`
+    );
+    await press(browser.cdp, "8", { code: "Digit8", keyCode: 56, ctrlKey: true, shiftKey: true });
+    await waitForFileText(markdownPath, /- Beta/);
+    const saved = await readFile(markdownPath, "utf8");
+    assert.equal(saved, "Alpha\n\n- Beta\n");
+  });
+});

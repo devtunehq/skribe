@@ -2997,9 +2997,85 @@ function useSkribeController() {
     liveEditHistoryActiveRef.current = false;
   }
 
+  // The stable ids of every block the current selection touches, top to bottom.
+  // A collapsed caret yields the single block it sits in; a drag across blocks
+  // yields all of them — so formatting can apply to a whole multi-block range.
+  function selectedCanvasBlockIds(): string[] {
+    const canvas = canvasRef.current;
+    if (!canvas) return [];
+    const selection = window.getSelection();
+    const liveRange =
+      selection && selection.rangeCount > 0 && canvas.contains(selection.getRangeAt(0).commonAncestorContainer)
+        ? selection.getRangeAt(0)
+        : null;
+    const range = liveRange ?? selectionRangeRef.current;
+    if (!range || !canvas.contains(range.commonAncestorContainer)) return [];
+    const startNode = closestEditableBlock(range.startContainer);
+    const endNode = closestEditableBlock(range.endContainer);
+    if (!startNode || !endNode) return [];
+    const all = Array.from(canvas.querySelectorAll<HTMLElement>("[data-block-id]"));
+    let startIdx = all.indexOf(startNode);
+    let endIdx = all.indexOf(endNode);
+    if (startIdx < 0 || endIdx < 0) return [];
+    if (startIdx > endIdx) [startIdx, endIdx] = [endIdx, startIdx];
+    return all
+      .slice(startIdx, endIdx + 1)
+      .map((node) => node.dataset.blockId)
+      .filter((id): id is string => Boolean(id));
+  }
+
+  function isShapeConvertibleType(type: string) {
+    return (
+      type === "paragraph" ||
+      type === "heading" ||
+      type === "quote" ||
+      type === "ordered-list" ||
+      type === "unordered-list"
+    );
+  }
+
+  // Apply a block-shape change (heading / list / quote / paragraph) to every
+  // selected text block at once. Serializes the live DOM first so in-progress
+  // edits are captured, then remounts so the new shapes paint immediately.
+  function updateSelectedBlocksShape(blockIds: string[], patch: Parameters<typeof updateMarkdownBlockShape>[2]) {
+    const current = stateRef.current;
+    if (!current || blockIds.length === 0) return;
+    const selected = new Set(blockIds);
+    const nextBlocks = blocksForMarkdown(serializeCanvasMarkdown(current.markdown)).map((block) =>
+      selected.has(block.id) && isShapeConvertibleType(block.type) ? { ...block, ...patch } : block
+    );
+    const markdown = serializeMarkdownBlocks(nextBlocks);
+    commit(
+      () => ({ ...current, markdown, review: { ...current.review, updatedAt: nowIso() } }),
+      { resyncDom: true }
+    );
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+    const focusId = activeBlockId && selected.has(activeBlockId) ? activeBlockId : blockIds[0];
+    const focusIndex = nextBlocks.findIndex((block) => block.id === focusId);
+    if (focusIndex >= 0) {
+      pendingCaretRef.current = { index: focusIndex, offset: 0 };
+      schedulePendingCaretFlush();
+    }
+  }
+
+  // Route a shape change to the whole selection when it spans several blocks,
+  // otherwise to the single block (the caret's block, or the given fallback).
+  function changeBlockShape(patch: Parameters<typeof updateMarkdownBlockShape>[2], fallbackId?: string | null) {
+    const ids = selectedCanvasBlockIds();
+    if (ids.length > 1) {
+      updateSelectedBlocksShape(ids, patch);
+      return;
+    }
+    const single = ids[0] ?? fallbackId ?? activeBlockId;
+    if (single) updateBlockShape(single, patch);
+  }
+
   function updateActiveBlockShape(patch: Parameters<typeof updateMarkdownBlockShape>[2]) {
-    if (!activeBlockId) return;
-    updateBlockShape(activeBlockId, patch);
+    changeBlockShape(patch, activeBlockId);
   }
 
   function applyInlineCommand(command: "bold" | "italic" | "strikeThrough") {
@@ -3484,22 +3560,22 @@ function useSkribeController() {
     if (event.altKey && ["0", "1", "2", "3"].includes(key)) {
       event.preventDefault();
       setActiveBlockId(blockId);
-      if (key === "0") updateBlockShape(blockId, { type: "paragraph", level: undefined });
-      if (key === "1") updateBlockShape(blockId, { type: "heading", level: 1 });
-      if (key === "2") updateBlockShape(blockId, { type: "heading", level: 2 });
-      if (key === "3") updateBlockShape(blockId, { type: "heading", level: 3 });
+      if (key === "0") changeBlockShape({ type: "paragraph", level: undefined }, blockId);
+      if (key === "1") changeBlockShape({ type: "heading", level: 1 }, blockId);
+      if (key === "2") changeBlockShape({ type: "heading", level: 2 }, blockId);
+      if (key === "3") changeBlockShape({ type: "heading", level: 3 }, blockId);
       return;
     }
     if (event.shiftKey && key === "7") {
       event.preventDefault();
       setActiveBlockId(blockId);
-      updateBlockShape(blockId, { type: "ordered-list", marker: "1" });
+      changeBlockShape({ type: "ordered-list", marker: "1" }, blockId);
       return;
     }
     if (event.shiftKey && key === "8") {
       event.preventDefault();
       setActiveBlockId(blockId);
-      updateBlockShape(blockId, { type: "unordered-list" });
+      changeBlockShape({ type: "unordered-list" }, blockId);
     }
   }
 
