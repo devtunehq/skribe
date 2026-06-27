@@ -3144,6 +3144,69 @@ function useSkribeController() {
     return true;
   }
 
+  // Backspace at the very start of a block merges it into the previous block and
+  // puts the caret at the join (the end of the previous block's text) — so an
+  // empty block is removed and a non-empty one's text is appended. The caret is
+  // located by the same whole-canvas sentinel as splitBlockAtCaret, so "start of
+  // block" is correct even when one DOM shell holds several logical blocks.
+  // Returns false (letting the default Backspace delete a character) unless the
+  // caret is at the start of a block that has a text-holding block before it.
+  function mergeBlockBackward() {
+    const current = stateRef.current;
+    const selection = window.getSelection();
+    if (!current || !selection || selection.rangeCount === 0 || !canvasRef.current) return false;
+
+    const range = selection.getRangeAt(0);
+    if (!range.collapsed || !canvasRef.current.contains(range.startContainer)) return false;
+
+    const sentinel = "\ue000";
+    const marker = document.createTextNode(sentinel);
+    range.insertNode(marker);
+    let raw: string;
+    try {
+      raw = serializeCanvasMarkdown(current.markdown);
+    } finally {
+      marker.remove();
+    }
+    if (!raw.includes(sentinel)) return false;
+
+    const parsed = parseMarkdownBlocks(raw);
+    const index = parsed.findIndex((block) => block.text.includes(sentinel));
+    if (index <= 0) return false;
+    const target = parsed[index];
+    // Only act when nothing but the caret precedes the block's content.
+    if (target.text.slice(0, target.text.indexOf(sentinel)).replace(/\u200b/g, "").length > 0) return false;
+
+    const cleaned = parsed.map((block) => ({ ...block, text: block.text.split(sentinel).join("") }));
+    const previous = cleaned[index - 1];
+    const previousHoldsText =
+      previous.type === "paragraph" ||
+      previous.type === "heading" ||
+      previous.type === "quote" ||
+      previous.type === "ordered-list" ||
+      previous.type === "unordered-list";
+    if (!previousHoldsText) return false;
+
+    const previousText = previous.text.replace(/\u200b/g, "");
+    const currentText = cleaned[index].text.replace(/\u200b/g, "");
+    const mergedPrevious = { ...previous, text: previousText + currentText };
+    const nextBlocks = [...cleaned.slice(0, index - 1), mergedPrevious, ...cleaned.slice(index + 1)];
+    const markdown = serializeMarkdownBlocks(nextBlocks);
+
+    commit(
+      () => ({ ...current, markdown, review: { ...current.review, updatedAt: nowIso() } }),
+      { resyncDom: true }
+    );
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+    pendingCaretRef.current = { index: index - 1, offset: visibleMarkdownCharacters(previousText).length };
+    schedulePendingCaretFlush();
+    return true;
+  }
+
   // Insert an empty paragraph immediately after a block and move the caret into
   // it — used so image blocks (which can't hold a caret) aren't a dead end.
   function insertParagraphAfterBlock(blockId: string) {
@@ -3341,6 +3404,24 @@ function useSkribeController() {
       event.preventDefault();
       deletePendingMarkdownSelection();
       return;
+    }
+
+    // Backspace at the very start of a block merges it into the previous block
+    // (removing an empty block; appending a non-empty one's text). When the caret
+    // isn't at a block start, mergeBlockBackward returns false and the default
+    // Backspace deletes a character as usual.
+    if (
+      event.key === "Backspace" &&
+      !event.shiftKey &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      !event.nativeEvent.isComposing
+    ) {
+      if (mergeBlockBackward()) {
+        event.preventDefault();
+        return;
+      }
     }
 
     if (event.key === "Enter" && !event.metaKey && !event.ctrlKey && !event.altKey && !event.nativeEvent.isComposing) {

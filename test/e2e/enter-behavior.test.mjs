@@ -135,6 +135,68 @@ test("Enter in a list creates a sibling item instantly", async (t) => {
   });
 });
 
+async function caretAtStart(cdp, blockId) {
+  await evaluate(
+    cdp,
+    `(() => {
+      const b = document.querySelector('[data-block-id="${blockId}"]');
+      b.focus();
+      const r = document.createRange();
+      r.selectNodeContents(b);
+      r.collapse(true);
+      const s = getSelection();
+      s.removeAllRanges();
+      s.addRange(r);
+      return true;
+    })()`
+  );
+}
+
+test("Backspace at the start of an empty block removes it and moves the caret to the previous block", async (t) => {
+  // "Alpha" then an empty block (trailing blank paragraph kept via Enter).
+  await withApp(t, "Alpha\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 1");
+    await caretAtEnd(browser.cdp, "block-0");
+    await press(browser.cdp, "Enter", { code: "Enter", keyCode: 13 });
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 2");
+    await waitCaretInBlock(browser.cdp, 1);
+
+    // Backspace in the empty second block removes it, caret returns to "Alpha".
+    await press(browser.cdp, "Backspace", { code: "Backspace", keyCode: 8 });
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 1");
+    await waitCaretInBlock(browser.cdp, 0);
+
+    // Typing continues at the end of the previous block.
+    await insertText(browser.cdp, "!");
+    await waitForFileText(markdownPath, /Alpha!/);
+    const saved = await readFile(markdownPath, "utf8");
+    assert.equal(saved, "Alpha!\n");
+  });
+});
+
+test("Backspace at the start of a non-empty block joins it onto the previous block", async (t) => {
+  await withApp(t, "Alpha\n\nBeta\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 2");
+    await caretAtStart(browser.cdp, "block-1");
+    await press(browser.cdp, "Backspace", { code: "Backspace", keyCode: 8 });
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 1");
+    await waitForFileText(markdownPath, /AlphaBeta/);
+    const saved = await readFile(markdownPath, "utf8");
+    assert.equal(saved, "AlphaBeta\n");
+    assert.deepEqual(await blockTexts(browser.cdp), ["AlphaBeta"]);
+  });
+});
+
+test("Backspace mid-text deletes a character (does not merge)", async (t) => {
+  await withApp(t, "Alpha\n\nBeta\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 2");
+    await caretAtEnd(browser.cdp, "block-1");
+    await press(browser.cdp, "Backspace", { code: "Backspace", keyCode: 8 });
+    await waitForFileText(markdownPath, /Bet\n/);
+    assert.deepEqual(await blockTexts(browser.cdp), ["Alpha", "Bet"]);
+  });
+});
+
 test("Shift+Enter is a soft break that stays in one block", async (t) => {
   await withApp(t, "one\n", async ({ browser }) => {
     await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 1");
