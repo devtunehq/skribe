@@ -356,13 +356,20 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       continue;
     }
 
-    const codeFence = trimmed.match(/^```(\w+)?/);
+    const codeFence = trimmed.match(/^(`{3,})(\w+)?/);
     if (codeFence) {
       flushParagraph();
-      const language = codeFence[1] ?? "";
+      const fenceLength = codeFence[1].length;
+      const language = codeFence[2] ?? "";
       const codeLines: string[] = [];
       index += 1;
-      while (index < lines.length && !lines[index].trim().startsWith("```")) {
+      // Close only on a line of at least as many backticks as the opener, so code
+      // that itself contains a ``` line (fenced with 4+ backticks) round-trips.
+      const isClosingFence = (line: string) => {
+        const fence = line.trim();
+        return /^`+$/.test(fence) && fence.length >= fenceLength;
+      };
+      while (index < lines.length && !isClosingFence(lines[index])) {
         codeLines.push(lines[index]);
         index += 1;
       }
@@ -472,7 +479,13 @@ function serializeMarkdownBlock(block: MarkdownBlock) {
     return listItemLines(text).map((line) => `- ${line}`).join("\n");
   }
   if (block.type === "quote") return text.split("\n").map((line) => `> ${line}`).join("\n");
-  if (block.type === "code") return `\`\`\`${block.language ?? ""}\n${block.text}\n\`\`\``;
+  if (block.type === "code") {
+    // Use a fence longer than any backtick run in the code so content containing
+    // ``` doesn't terminate the block early.
+    const longestRun = (block.text.match(/`+/g) ?? []).reduce((max, run) => Math.max(max, run.length), 0);
+    const fence = "`".repeat(Math.max(3, longestRun + 1));
+    return `${fence}${block.language ?? ""}\n${block.text}\n${fence}`;
+  }
   return text;
 }
 

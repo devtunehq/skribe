@@ -131,6 +131,17 @@ test("reconcileBlockIds carries stable ids through edits, inserts, deletes, and 
   assert.deepEqual(reformatted.map((b) => b.id), ["id-h", "id-a", "id-b"]);
 });
 
+test("code blocks containing a fence round-trip with a longer outer fence", () => {
+  const block = { id: "block-0", type: "code", text: "```\nnested fence\n```", language: "md" };
+  const markdown = serializeMarkdownBlocks([block]);
+  assert.match(markdown, /^````md\n/, "should open with a 4-backtick fence");
+
+  const parsed = parseMarkdownBlocks(markdown);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].type, "code");
+  assert.equal(parsed[0].text, "```\nnested fence\n```");
+});
+
 test("markdown paste helpers detect and normalize Markdown blocks", () => {
   const markdown = "# Heading\r\n\r\n| A | B |\r\n| --- | --- |\r\n| one | two |";
 

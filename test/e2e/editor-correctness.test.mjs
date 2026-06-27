@@ -375,3 +375,27 @@ test("Shift+Enter inserts a line break without creating a new block", async (t) 
     assert.equal(await blockCount(browser.cdp), 1);
   });
 });
+
+test("an image block is not a dead end: Enter adds a paragraph, Backspace deletes it", async (t) => {
+  await withApp(t, "# Draft\n\n![Diagram](diagram.png)\n", async ({ browser }) => {
+    await waitFor(browser.cdp, "Boolean(document.querySelector('.editable-image-block'))");
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 2");
+
+    // Focus the image and press Enter -> a new paragraph appears after it.
+    await evaluate(browser.cdp, "document.querySelector('.editable-image-block')?.focus()");
+    await press(browser.cdp, "Enter", { code: "Enter", keyCode: 13 });
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 3");
+    assert.equal(
+      await evaluate(
+        browser.cdp,
+        "document.querySelectorAll('.editable-document [data-block-id]')[2]?.tagName"
+      ),
+      "P"
+    );
+
+    // Focus the image again and press Backspace -> the image is removed.
+    await evaluate(browser.cdp, "document.querySelector('.editable-image-block')?.focus()");
+    await press(browser.cdp, "Backspace", { code: "Backspace", keyCode: 8 });
+    await waitFor(browser.cdp, "!document.querySelector('.editable-image-block')");
+  });
+});

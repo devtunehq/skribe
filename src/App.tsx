@@ -3125,6 +3125,38 @@ function useSkribeController() {
     return true;
   }
 
+  // Insert an empty paragraph immediately after a block and move the caret into
+  // it — used so image blocks (which can't hold a caret) aren't a dead end.
+  function insertParagraphAfterBlock(blockId: string) {
+    const current = stateRef.current;
+    if (!current) return false;
+    const liveState = stateWithLiveCanvasEdit(current);
+    const blocks = blocksForMarkdown(liveState.markdown);
+    const index = blocks.findIndex((block) => block.id === blockId);
+    if (index < 0) return false;
+
+    const nextBlocks = [
+      ...blocks.slice(0, index + 1),
+      { id: `${blockId}-after`, type: "paragraph" as const, text: "\u200b" },
+      ...blocks.slice(index + 1)
+    ];
+    commit(
+      () => ({
+        ...liveState,
+        markdown: serializeMarkdownBlocks(nextBlocks),
+        review: { ...liveState.review, updatedAt: nowIso() }
+      }),
+      { resyncDom: true }
+    );
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+    pendingCaretRef.current = { index: index + 1, offset: 0 };
+    return true;
+  }
+
   function openLinkPopover() {
     restoreCanvasSelection();
     const selection = window.getSelection();
@@ -3243,6 +3275,23 @@ function useSkribeController() {
   function handleEditorShortcut(event: React.KeyboardEvent<HTMLElement>, blockId: string) {
     const isCommand = event.metaKey || event.ctrlKey;
     const key = event.key.toLowerCase();
+
+    // Image blocks can't hold a caret, so give them keyboard escapes: Enter adds
+    // a paragraph after the image, Backspace/Delete removes it. Other keys fall
+    // through (so Cmd+Z etc. still work).
+    if (!isCommand && (stateRef.current ? findBlockById(stateRef.current.markdown, blockId)?.type : null) === "image") {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        insertParagraphAfterBlock(blockId);
+        return;
+      }
+      if (event.key === "Backspace" || event.key === "Delete") {
+        event.preventDefault();
+        deleteCanvasBlock(blockId);
+        return;
+      }
+    }
+
     if (isCommand && !event.shiftKey && key === "a") {
       if (selectEntireDocument()) event.preventDefault();
       return;
@@ -5481,7 +5530,14 @@ const EditableBlock = React.memo(function EditableBlock({
   }
 
   if (block.type === "image") {
-    return <EditableImageBlock block={block} onRegisterBlock={onRegisterBlock} onFocusBlock={onFocusBlock} />;
+    return (
+      <EditableImageBlock
+        block={block}
+        onRegisterBlock={onRegisterBlock}
+        onFocusBlock={onFocusBlock}
+        onShortcut={onShortcut}
+      />
+    );
   }
 
   if (block.type === "table") {
@@ -5498,11 +5554,13 @@ const EditableBlock = React.memo(function EditableBlock({
 function EditableImageBlock({
   block,
   onRegisterBlock,
-  onFocusBlock
+  onFocusBlock,
+  onShortcut
 }: {
   block: ReturnType<typeof parseMarkdownBlocks>[number];
   onRegisterBlock: (blockId: string, node: HTMLElement | null) => void;
   onFocusBlock: (blockId: string) => void;
+  onShortcut: (event: React.KeyboardEvent<HTMLElement>, blockId: string) => void;
 }) {
   const image = parseMarkdownImage(block.text);
   if (!image) {
@@ -5530,6 +5588,7 @@ function EditableImageBlock({
       ref={(node) => onRegisterBlock(block.id, node)}
       onClick={() => onFocusBlock(block.id)}
       onFocus={() => onFocusBlock(block.id)}
+      onKeyDown={(event) => onShortcut(event, block.id)}
     >
       <div className="editable-image-frame">
         <img src={imagePreviewSrc(image.src)} alt={image.alt} title={image.title} loading="lazy" />
