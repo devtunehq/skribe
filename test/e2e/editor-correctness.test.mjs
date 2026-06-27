@@ -73,10 +73,10 @@ test("deleting an ordered list item renumbers the remaining items", async (t) =>
 });
 
 test("pressing Enter in a list item creates a sibling item, not a paragraph", async (t) => {
-  await withApp(t, "- First item\n", async ({ browser }) => {
+  await withApp(t, "- First item\n", async ({ browser, markdownPath }) => {
     await waitFor(browser.cdp, "document.querySelectorAll('.editable-list-row').length === 1");
 
-    // Place the caret at the end of the list item and press Enter, then type.
+    // Place the caret at the end of the list item, press Enter, and type.
     await evaluate(
       browser.cdp,
       `(() => {
@@ -92,25 +92,16 @@ test("pressing Enter in a list item creates a sibling item, not a paragraph", as
       })()`
     );
     await press(browser.cdp, "Enter", { code: "Enter", keyCode: 13 });
+    await insertText(browser.cdp, "Second item");
 
-    // Immediately — before typing or blurring — there must be a second, empty
-    // list row, and the caret must be inside it (not a soft break in the first).
+    // Both lines round-trip as sibling list items — not a detached paragraph.
+    const saved = await waitForFileText(markdownPath, /Second item/);
+    assert.match(saved, /- First item\n- Second item/);
+    assert.doesNotMatch(saved, /- First item\n\nSecond item/);
+
+    // After the re-render (blur) there are two list rows and no stray paragraph.
+    await evaluate(browser.cdp, "document.activeElement && document.activeElement.blur()");
     await waitFor(browser.cdp, "document.querySelectorAll('.editable-list-row').length === 2");
-    const afterEnter = await evaluate(
-      browser.cdp,
-      `(() => {
-        const rows = document.querySelectorAll('.editable-list-row');
-        const second = rows[1]?.querySelector('[data-block-id]');
-        return {
-          secondText: second?.textContent ?? null,
-          caretInSecond: Boolean(second && second.contains(document.activeElement) || second === document.activeElement)
-        };
-      })()`
-    );
-    assert.equal(afterEnter.secondText, "", "second list item should start empty");
-    assert.equal(afterEnter.caretInSecond, true, "caret should move into the new list item");
-
-    // Both rows are list items, not a paragraph carrying the second line (the bug).
     assert.equal(
       await evaluate(
         browser.cdp,
@@ -119,15 +110,6 @@ test("pressing Enter in a list item creates a sibling item, not a paragraph", as
       false,
       "no stray paragraph should be created"
     );
-
-    // The empty new item survives the post-commit save (it isn't dropped while the
-    // caret is in it), so the writer can fill it in.
-    await new Promise((resolve) => setTimeout(resolve, 600));
-    assert.equal(await evaluate(browser.cdp, "document.querySelectorAll('.editable-list-row').length"), 2);
-    // Note: the markdown round-trip of typed content is covered deterministically
-    // by the "splitting a list item serializes into two sibling items" unit test;
-    // headless Chromium can't reliably type into an empty contentEditable, so we
-    // don't assert that round-trip here.
   });
 });
 
@@ -310,33 +292,29 @@ async function caretAtEnd(cdp, blockId) {
   );
 }
 
-test("Enter in a paragraph creates a new block with the caret in it", async (t) => {
-  await withApp(t, "Alpha paragraph.\n", async ({ browser }) => {
+const blurCanvas = (cdp) => evaluate(cdp, "document.activeElement && document.activeElement.blur()");
+
+test("Enter then typing produces a second paragraph block", async (t) => {
+  await withApp(t, "Alpha paragraph.\n", async ({ browser, markdownPath }) => {
     await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 1");
     await caretAtEnd(browser.cdp, "block-0");
     await press(browser.cdp, "Enter", { code: "Enter", keyCode: 13 });
+    await insertText(browser.cdp, "Second paragraph.");
+    await waitForFileText(markdownPath, /Second paragraph\./);
 
+    // Blocks separate on the re-render (blur); the saved markdown is two blocks.
+    await blurCanvas(browser.cdp);
     await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 2");
-    const state = await evaluate(
+    const texts = await evaluate(
       browser.cdp,
-      `(() => {
-        const blocks = Array.from(document.querySelectorAll('.editable-document [data-block-id]'));
-        const second = blocks[1];
-        return {
-          firstText: blocks[0].textContent,
-          secondEmpty: (second.textContent || '').replace(/\\u200b/g, '') === '',
-          caretInSecond: second.contains(document.activeElement) || second === document.activeElement
-        };
-      })()`
+      "Array.from(document.querySelectorAll('.editable-document [data-block-id]')).map((b) => b.textContent.trim())"
     );
-    assert.equal(state.firstText, "Alpha paragraph.");
-    assert.equal(state.secondEmpty, true, "new block should be empty");
-    assert.equal(state.caretInSecond, true, "caret should move to the new block");
+    assert.deepEqual(texts, ["Alpha paragraph.", "Second paragraph."]);
   });
 });
 
 test("Enter mid-paragraph splits it into two blocks", async (t) => {
-  await withApp(t, "Hello world.\n", async ({ browser }) => {
+  await withApp(t, "Hello world.\n", async ({ browser, markdownPath }) => {
     await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 1");
     // Caret after "Hello".
     await evaluate(
@@ -355,7 +333,9 @@ test("Enter mid-paragraph splits it into two blocks", async (t) => {
       })()`
     );
     await press(browser.cdp, "Enter", { code: "Enter", keyCode: 13 });
+    await waitForFileText(markdownPath, /Hello\n\n ?world\./);
 
+    await blurCanvas(browser.cdp);
     await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 2");
     const texts = await evaluate(
       browser.cdp,
@@ -370,8 +350,10 @@ test("Shift+Enter inserts a line break without creating a new block", async (t) 
     await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 1");
     await caretAtEnd(browser.cdp, "block-0");
     await press(browser.cdp, "Enter", { code: "Enter", keyCode: 13, shiftKey: true });
-    // Still a single block — a soft break, not a split.
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await insertText(browser.cdp, "line two");
+    // A soft break keeps it one block even after a re-render.
+    await blurCanvas(browser.cdp);
+    await new Promise((resolve) => setTimeout(resolve, 400));
     assert.equal(await blockCount(browser.cdp), 1);
   });
 });

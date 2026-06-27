@@ -3059,72 +3059,6 @@ function useSkribeController() {
     return true;
   }
 
-  // Pressing Enter splits the block at the caret into a new block immediately
-  // (rather than inserting a soft line break that only reflows on blur): the text
-  // before the caret stays, the text after becomes a new block, and the caret
-  // lands at the start of it. A heading or quote's continuation becomes a
-  // paragraph; lists stay lists. An empty side uses a sentinel so the block
-  // survives the round-trip (lists via "- ", others via a zero-width space).
-  function splitBlockAtCaret(blockId: string) {
-    const node = blockRefs.current[blockId];
-    const selection = window.getSelection();
-    const current = stateRef.current;
-    if (!node || !selection || selection.rangeCount === 0 || !current) return false;
-
-    const range = selection.getRangeAt(0);
-    if (!range.collapsed || !node.contains(range.startContainer)) return false;
-
-    const liveState = stateWithLiveCanvasEdit(current);
-    const blocks = blocksForMarkdown(liveState.markdown);
-    const index = blocks.findIndex((block) => block.id === blockId);
-    if (index < 0) return false;
-    const block = blocks[index];
-
-    const plainOffset = plainOffsetInEditableBlock(node, range.startContainer, range.startOffset);
-    const markdownOffset = markdownOffsetFromPlainOffset(block.text, plainOffset, "start");
-    const before = block.text.slice(0, markdownOffset);
-    const after = block.text.slice(markdownOffset);
-
-    const isListType = block.type === "ordered-list" || block.type === "unordered-list";
-    const emptyText = isListType ? "" : "\u200b";
-    const afterType = block.type === "heading" || block.type === "quote" ? "paragraph" : block.type;
-    const beforeBlock = { ...block, text: before || emptyText };
-    const afterBlock =
-      afterType === block.type
-        ? { ...block, text: after || emptyText }
-        : { ...block, type: afterType, level: undefined, marker: undefined, text: after || "\u200b" };
-
-    const nextBlocks = [...blocks.slice(0, index), beforeBlock, afterBlock, ...blocks.slice(index + 1)];
-    const markdown = serializeMarkdownBlocks(nextBlocks);
-
-    // Only the blocks at/after the split change identity. The block being split
-    // keeps its key, so when its text is unchanged (the common "Enter at end"
-    // case) React leaves its focused contentEditable untouched — no remount, no
-    // blur. Only force a DOM resync when the split block's own text changed (a
-    // mid-block split), where its DOM must be truncated.
-    const splitBlockChanged = beforeBlock.text !== block.text;
-    commit(
-      () => ({
-        ...liveState,
-        markdown,
-        review: { ...liveState.review, updatedAt: nowIso() }
-      }),
-      { resyncDom: splitBlockChanged }
-    );
-
-    if (liveEditTimerRef.current) {
-      window.clearTimeout(liveEditTimerRef.current);
-      liveEditTimerRef.current = null;
-    }
-    liveEditHistoryActiveRef.current = false;
-
-    // The new item is the block at index + 1. Its stable id is only known once
-    // the commit re-reconciles, so target it by position; the layout effect
-    // resolves the id and places the caret.
-    pendingCaretRef.current = { index: index + 1, offset: 0 };
-    return true;
-  }
-
   // Insert an empty paragraph immediately after a block and move the caret into
   // it — used so image blocks (which can't hold a caret) aren't a dead end.
   function insertParagraphAfterBlock(blockId: string) {
@@ -3343,17 +3277,15 @@ function useSkribeController() {
         return;
       }
 
-      // Code keeps Enter as a literal newline so multi-line code stays editable.
-      if (type === "code") {
-        insertEditorBreak(false);
-        rememberCanvasSelection();
-        return;
-      }
-
-      // Every other block: Enter creates a new block by splitting at the caret.
-      if (splitBlockAtCaret(blockId)) return;
-      // Fallback (e.g. block not resolvable): start a new paragraph.
-      insertEditorBreak(true);
+      // Enter inserts a line break that the serializer turns into a new block: a
+      // paragraph break (blank line) for paragraphs/headings, a single break for
+      // code/lists/quotes (where the serializer splits each line into its own
+      // item / keeps code newlines). The caret stays in the live contentEditable
+      // — committing an immediate split here loses focus into the new block and
+      // corrupts content, so the new block lands on the next serialize.
+      const singleBreakType =
+        type === "code" || type === "ordered-list" || type === "unordered-list" || type === "quote";
+      insertEditorBreak(!singleBreakType);
       rememberCanvasSelection();
       return;
     }
