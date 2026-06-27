@@ -1116,8 +1116,13 @@ function useSkribeController() {
         setIsRightPanelCollapsed(loadedSettings.panelState.rightCollapsed);
         setNewThreadSkillIds(loadedSettings.defaultSkills);
         setChatSkillIds(loadedSettings.defaultSkills);
-        stateRef.current = loaded;
-        setDocumentState(loaded);
+        // The initial fetch can resolve after the writer has already started
+        // editing (e.g. pressed Enter to split a block); don't let the on-disk
+        // document clobber a newer in-progress edit. Mirrors handleRemoteDocument.
+        if (!isOlderDocument(loaded, stateRef.current)) {
+          stateRef.current = loaded;
+          setDocumentState(loaded);
+        }
         setRevisionState(revisions);
         setAgentSkills(skills);
         setAgentRuntimeConfig(runtimeConfig);
@@ -1231,16 +1236,8 @@ function useSkribeController() {
   // `scheduleLiveCanvasCommit` clears it. We never reset the caret while the
   // block already holds focus, so this can't fight active typing.
   useLayoutEffect(() => {
-    const pending = pendingCaretRef.current;
-    if (!pending) return;
-    const target = reconciledBlocksRef.current[pending.index];
-    if (!target) return;
-    const node = blockRefs.current[target.id];
-    if (!node) return;
-    setActiveBlockId(target.id);
-    if (node === document.activeElement || node.contains(document.activeElement)) return;
-    placeCaretInEditableBlock(node, pending.offset);
-  }, [documentState, blockResetKeys, setActiveBlockId]);
+    applyPendingCaret();
+  }, [documentState, blockResetKeys]);
 
   useEffect(() => {
     return clearPendingEditTimers;
@@ -1572,8 +1569,7 @@ function useSkribeController() {
       // empty as "- "; other empty blocks need a zero-width-space sentinel so the
       // block survives re-parsing. Empty blocks are dropped once focus leaves them.
       if (node === document.activeElement || node.contains(document.activeElement)) {
-        const isList = sourceBlock.type === "ordered-list" || sourceBlock.type === "unordered-list";
-        return [{ ...sourceBlock, text: isList ? "" : "\u200b" }];
+        return [{ ...sourceBlock, text: "\u200b" }];
       }
       return [];
     });
@@ -3059,6 +3055,95 @@ function useSkribeController() {
     return true;
   }
 
+  // Place the caret into the block targeted by pendingCaretRef. Returns true once
+  // that block holds focus (or there is nothing pending); a no-op while it already
+  // holds focus, so it never fights active typing.
+  function applyPendingCaret() {
+    const pending = pendingCaretRef.current;
+    if (!pending) return true;
+    const target = reconciledBlocksRef.current[pending.index];
+    if (!target) return false;
+    const node = blockRefs.current[target.id];
+    if (!node) return false;
+    if (node === document.activeElement || node.contains(document.activeElement)) return true;
+    setActiveBlockId(target.id);
+    placeCaretInEditableBlock(node, pending.offset);
+    return node === document.activeElement || node.contains(document.activeElement);
+  }
+
+  // A structural commit remounts blocks and blurs the old focus; placing the caret
+  // into a freshly-rendered (often empty) block can take a frame or two to stick,
+  // so re-apply it across several animation frames until it holds or the writer
+  // types (scheduleLiveCanvasCommit clears the pending request).
+  function schedulePendingCaretFlush(attempts = 24) {
+    if (attempts <= 0 || !pendingCaretRef.current) return;
+    applyPendingCaret();
+    window.requestAnimationFrame(() => schedulePendingCaretFlush(attempts - 1));
+  }
+
+  // Pressing Enter splits the current block at the caret into a new block right
+  // away. The caret is located by inserting a private-use sentinel and serializing
+  // the WHOLE canvas, so the split point is found by its exact position in the
+  // resulting markdown — correct even when one DOM block holds several logical
+  // blocks (the bug that an id-based split hit). A heading/quote continuation
+  // becomes a paragraph; an empty side is kept (lists via "- ", others via a
+  // zero-width space) so the new block survives the round-trip.
+  function splitBlockAtCaret() {
+    const current = stateRef.current;
+    const selection = window.getSelection();
+    if (!current || !selection || selection.rangeCount === 0 || !canvasRef.current) return false;
+
+    const range = selection.getRangeAt(0);
+    if (!range.collapsed || !canvasRef.current.contains(range.startContainer)) return false;
+
+    const sentinel = "\ue000";
+    const marker = document.createTextNode(sentinel);
+    range.insertNode(marker);
+    let raw: string;
+    try {
+      raw = serializeCanvasMarkdown(current.markdown);
+    } finally {
+      marker.remove();
+    }
+    if (!raw.includes(sentinel)) return false;
+
+    const parsed = parseMarkdownBlocks(raw);
+    const splitIndex = parsed.findIndex((block) => block.text.includes(sentinel));
+    if (splitIndex < 0) return false;
+    const target = parsed[splitIndex];
+    const at = target.text.indexOf(sentinel);
+    const before = target.text.slice(0, at);
+    const after = target.text.slice(at + sentinel.length);
+
+    const cleaned = parsed.map((block) => ({ ...block, text: block.text.split(sentinel).join("") }));
+    // A heading/quote continues as a paragraph; other types continue as themselves.
+    const afterType = target.type === "heading" || target.type === "quote" ? "paragraph" : target.type;
+    // An empty side is kept via a zero-width space so the new block survives
+    // re-parsing and renders a focusable <br> line.
+    const emptyMarker = "\u200b";
+    const beforeBlock = { ...cleaned[splitIndex], text: before || emptyMarker };
+    const afterBlock =
+      afterType === target.type
+        ? { ...cleaned[splitIndex], text: after || emptyMarker }
+        : { ...cleaned[splitIndex], type: afterType, level: undefined, marker: undefined, text: after || "\u200b" };
+
+    const nextBlocks = [...cleaned.slice(0, splitIndex), beforeBlock, afterBlock, ...cleaned.slice(splitIndex + 1)];
+    const markdown = serializeMarkdownBlocks(nextBlocks);
+
+    commit(
+      () => ({ ...current, markdown, review: { ...current.review, updatedAt: nowIso() } }),
+      { resyncDom: true }
+    );
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+    pendingCaretRef.current = { index: splitIndex + 1, offset: 0 };
+    schedulePendingCaretFlush();
+    return true;
+  }
+
   // Insert an empty paragraph immediately after a block and move the caret into
   // it — used so image blocks (which can't hold a caret) aren't a dead end.
   function insertParagraphAfterBlock(blockId: string) {
@@ -3088,6 +3173,7 @@ function useSkribeController() {
     }
     liveEditHistoryActiveRef.current = false;
     pendingCaretRef.current = { index: index + 1, offset: 0 };
+    schedulePendingCaretFlush();
     return true;
   }
 
@@ -3277,15 +3363,17 @@ function useSkribeController() {
         return;
       }
 
-      // Enter inserts a line break that the serializer turns into a new block: a
-      // paragraph break (blank line) for paragraphs/headings, a single break for
-      // code/lists/quotes (where the serializer splits each line into its own
-      // item / keeps code newlines). The caret stays in the live contentEditable
-      // — committing an immediate split here loses focus into the new block and
-      // corrupts content, so the new block lands on the next serialize.
-      const singleBreakType =
-        type === "code" || type === "ordered-list" || type === "unordered-list" || type === "quote";
-      insertEditorBreak(!singleBreakType);
+      // Code keeps Enter as a literal newline so multi-line code stays editable.
+      if (type === "code") {
+        insertEditorBreak(false);
+        rememberCanvasSelection();
+        return;
+      }
+
+      // Every other block splits at the caret into a new block immediately.
+      if (splitBlockAtCaret()) return;
+      // Fallback if the caret can't be resolved: a paragraph break.
+      insertEditorBreak(true);
       rememberCanvasSelection();
       return;
     }
@@ -5417,7 +5505,16 @@ const EditableBlock = React.memo(function EditableBlock({
     className: "editable-text"
   };
 
-  const children = renderHighlightedText(block.text, threads, activeThreadId, onActivateThread, anchorRanges);
+  // A deliberately empty block (created by Enter, marked with a zero-width space)
+  // renders a <br> so the contentEditable has a reliable, focusable caret line.
+  // A genuinely empty block (e.g. an empty document) renders nothing so its
+  // placeholder shows.
+  const isMarkedEmpty = block.text.length > 0 && block.text.replace(/\u200b/g, "").trim() === "";
+  const children = isMarkedEmpty ? (
+    <br />
+  ) : (
+    renderHighlightedText(block.text, threads, activeThreadId, onActivateThread, anchorRanges)
+  );
 
   if (block.type === "heading") {
     // Render the actual level (up to h6) so the displayed heading matches the
