@@ -2510,6 +2510,28 @@ function useSkribeController() {
       void cutActiveSelectionToClipboard();
       return;
     }
+    // Block-shape shortcuts while a cross-block (custom) selection is active —
+    // these otherwise live in the per-block handler, which doesn't fire because a
+    // custom selection moves focus to the canvas. changeBlockShape reads the
+    // selection draft and converts every block it covers.
+    if (isCommand && event.altKey && ["0", "1", "2", "3"].includes(key)) {
+      event.preventDefault();
+      if (key === "0") changeBlockShape({ type: "paragraph", level: undefined });
+      if (key === "1") changeBlockShape({ type: "heading", level: 1 });
+      if (key === "2") changeBlockShape({ type: "heading", level: 2 });
+      if (key === "3") changeBlockShape({ type: "heading", level: 3 });
+      return;
+    }
+    if (isCommand && event.shiftKey && key === "7") {
+      event.preventDefault();
+      changeBlockShape({ type: "ordered-list", marker: "1" });
+      return;
+    }
+    if (isCommand && event.shiftKey && key === "8") {
+      event.preventDefault();
+      changeBlockShape({ type: "unordered-list" });
+      return;
+    }
     if (event.key === "Backspace" || event.key === "Delete") {
       event.preventDefault();
       deletePendingMarkdownSelection();
@@ -3003,6 +3025,26 @@ function useSkribeController() {
   function selectedCanvasBlockIds(): string[] {
     const canvas = canvasRef.current;
     if (!canvas) return [];
+
+    // A drag ACROSS blocks uses the editor's own selection (pendingSelectionDraft)
+    // and clears the native selection, so window.getSelection() is empty for it.
+    // Map the draft's source range to every block it covers. (A single-block drag
+    // keeps the native selection and falls through to the logic below.)
+    if (pendingSelectionDraft) {
+      const markdown = markdownForSelection();
+      const draftRange = resolveSelectionDraftRange(markdown, pendingSelectionDraft);
+      if (draftRange && draftRange.end > draftRange.start) {
+        const spans = getMarkdownBlockLineSpans(markdown);
+        const ids = blocksForMarkdown(markdown)
+          .filter((_, index) => {
+            const span = spans[index];
+            return span && !(draftRange.end <= span.textStart || draftRange.start >= span.textEnd);
+          })
+          .map((block) => block.id);
+        if (ids.length > 0) return ids;
+      }
+    }
+
     const selection = window.getSelection();
     const liveRange =
       selection && selection.rangeCount > 0 && canvas.contains(selection.getRangeAt(0).commonAncestorContainer)
