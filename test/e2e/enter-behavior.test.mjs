@@ -235,3 +235,29 @@ test("Shift+Enter is a soft break that stays in one block", async (t) => {
     assert.equal(await blockCount(browser.cdp), 1);
   });
 });
+
+test("typing '1. ' at the start of a paragraph starts a numbered list", async (t) => {
+  await withApp(t, "hello\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 1");
+    await caretAtStart(browser.cdp, "block-0");
+    await insertText(browser.cdp, "1.");
+    await press(browser.cdp, " ", { code: "Space", keyCode: 32 });
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-list-row.ordered-list').length === 1");
+    await waitForFileText(markdownPath, /1\. hello/);
+    const saved = await readFile(markdownPath, "utf8");
+    assert.equal(saved, "1. hello\n");
+  });
+});
+
+test("typing '- ' at the start of a paragraph starts a bulleted list", async (t) => {
+  await withApp(t, "hello\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 1");
+    await caretAtStart(browser.cdp, "block-0");
+    await insertText(browser.cdp, "-");
+    await press(browser.cdp, " ", { code: "Space", keyCode: 32 });
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-list-row.unordered-list').length === 1");
+    await waitForFileText(markdownPath, /- hello/);
+    const saved = await readFile(markdownPath, "utf8");
+    assert.equal(saved, "- hello\n");
+  });
+});

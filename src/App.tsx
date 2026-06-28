@@ -3312,6 +3312,74 @@ function useSkribeController() {
     return true;
   }
 
+  // Markdown input rule: typing a list prefix at the very start of a paragraph
+  // ("1. ", "- ", "* ") turns it into a list item right away. Called on the space
+  // keypress (before the space is inserted); returns true when it converts, so
+  // the caller consumes the space. The caret block is found with the same
+  // whole-canvas sentinel as splitBlockAtCaret, so "start of paragraph" is correct
+  // even when one DOM shell holds several logical blocks.
+  function applyListInputRule() {
+    const current = stateRef.current;
+    const selection = window.getSelection();
+    if (!current || !selection || selection.rangeCount === 0 || !canvasRef.current) return false;
+
+    const range = selection.getRangeAt(0);
+    if (!range.collapsed || !canvasRef.current.contains(range.startContainer)) return false;
+
+    // Cheap pre-check so the whole-canvas serialize below only runs when the caret
+    // could actually sit right after a list prefix ("1." / "-" / "*").
+    const prevChar =
+      range.startContainer.nodeType === Node.TEXT_NODE && range.startOffset > 0
+        ? range.startContainer.textContent?.[range.startOffset - 1]
+        : "";
+    if (prevChar !== "." && prevChar !== "-" && prevChar !== "*") return false;
+
+    const sentinel = "\ue000";
+    const marker = document.createTextNode(sentinel);
+    range.insertNode(marker);
+    let raw: string;
+    try {
+      raw = serializeCanvasMarkdown(current.markdown);
+    } finally {
+      marker.remove();
+    }
+    if (!raw.includes(sentinel)) return false;
+
+    const parsed = parseMarkdownBlocks(raw);
+    const index = parsed.findIndex((block) => block.text.includes(sentinel));
+    if (index < 0) return false;
+    const target = parsed[index];
+    if (target.type !== "paragraph") return false;
+    const at = target.text.indexOf(sentinel);
+    const before = target.text.slice(0, at).replace(/\u200b/g, "");
+    const after = target.text.slice(at + sentinel.length).replace(/\u200b/g, "");
+
+    const ordered = before.match(/^(\d+)\.$/);
+    const unordered = /^[-*]$/.test(before);
+    if (!ordered && !unordered) return false;
+
+    const cleaned = parsed.map((block) => ({ ...block, text: block.text.split(sentinel).join("") }));
+    const itemText = after || "\u200b";
+    const converted = ordered
+      ? { ...cleaned[index], type: "ordered-list" as const, marker: ordered[1], level: undefined, text: itemText }
+      : { ...cleaned[index], type: "unordered-list" as const, marker: undefined, level: undefined, text: itemText };
+    const nextBlocks = [...cleaned.slice(0, index), converted, ...cleaned.slice(index + 1)];
+    const markdown = serializeMarkdownBlocks(nextBlocks);
+
+    commit(
+      () => ({ ...current, markdown, review: { ...current.review, updatedAt: nowIso() } }),
+      { resyncDom: true }
+    );
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+    pendingCaretRef.current = { index, offset: 0 };
+    schedulePendingCaretFlush();
+    return true;
+  }
+
   // Backspace at the very start of a block merges it into the previous block and
   // puts the caret at the join (the end of the previous block's text) — so an
   // empty block is removed and a non-empty one's text is appended. The caret is
@@ -3587,6 +3655,22 @@ function useSkribeController() {
       !event.nativeEvent.isComposing
     ) {
       if (mergeBlockBackward()) {
+        event.preventDefault();
+        return;
+      }
+    }
+
+    // Typing a list prefix ("1. ", "- ", "* ") at the start of a paragraph turns
+    // it into a list item; the space that triggers the rule is consumed.
+    if (
+      event.key === " " &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      !event.shiftKey &&
+      !event.nativeEvent.isComposing
+    ) {
+      if (applyListInputRule()) {
         event.preventDefault();
         return;
       }
