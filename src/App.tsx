@@ -3268,18 +3268,34 @@ function useSkribeController() {
     const after = target.text.slice(at + sentinel.length);
 
     const cleaned = parsed.map((block) => ({ ...block, text: block.text.split(sentinel).join("") }));
-    // A heading/quote continues as a paragraph; other types continue as themselves.
-    const afterType = target.type === "heading" || target.type === "quote" ? "paragraph" : target.type;
     // An empty side is kept via a zero-width space so the new block survives
     // re-parsing and renders a focusable <br> line.
     const emptyMarker = "\u200b";
-    const beforeBlock = { ...cleaned[splitIndex], text: before || emptyMarker };
-    const afterBlock =
-      afterType === target.type
-        ? { ...cleaned[splitIndex], text: after || emptyMarker }
-        : { ...cleaned[splitIndex], type: afterType, level: undefined, marker: undefined, text: after || "\u200b" };
+    const targetIsList = target.type === "ordered-list" || target.type === "unordered-list";
+    const targetIsEmpty = (before + after).replace(/\u200b/g, "").trim() === "";
 
-    const nextBlocks = [...cleaned.slice(0, splitIndex), beforeBlock, afterBlock, ...cleaned.slice(splitIndex + 1)];
+    let nextBlocks: ReturnType<typeof parseMarkdownBlocks>;
+    let caretIndex: number;
+    if (targetIsList && targetIsEmpty) {
+      // Enter on an empty list item exits the list: turn the item into an empty
+      // paragraph (which lands below the list) instead of adding another bullet.
+      nextBlocks = cleaned.map((block, index) =>
+        index === splitIndex
+          ? { ...block, type: "paragraph", level: undefined, marker: undefined, text: emptyMarker }
+          : block
+      );
+      caretIndex = splitIndex;
+    } else {
+      // A heading/quote continues as a paragraph; other types continue as themselves.
+      const afterType = target.type === "heading" || target.type === "quote" ? "paragraph" : target.type;
+      const beforeBlock = { ...cleaned[splitIndex], text: before || emptyMarker };
+      const afterBlock =
+        afterType === target.type
+          ? { ...cleaned[splitIndex], text: after || emptyMarker }
+          : { ...cleaned[splitIndex], type: afterType, level: undefined, marker: undefined, text: after || emptyMarker };
+      nextBlocks = [...cleaned.slice(0, splitIndex), beforeBlock, afterBlock, ...cleaned.slice(splitIndex + 1)];
+      caretIndex = splitIndex + 1;
+    }
     const markdown = serializeMarkdownBlocks(nextBlocks);
 
     commit(
@@ -3291,7 +3307,7 @@ function useSkribeController() {
       liveEditTimerRef.current = null;
     }
     liveEditHistoryActiveRef.current = false;
-    pendingCaretRef.current = { index: splitIndex + 1, offset: 0 };
+    pendingCaretRef.current = { index: caretIndex, offset: 0 };
     schedulePendingCaretFlush();
     return true;
   }

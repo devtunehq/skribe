@@ -135,6 +135,34 @@ test("Enter in a list creates a sibling item instantly", async (t) => {
   });
 });
 
+test("Enter on an empty list item exits the list as a paragraph", async (t) => {
+  await withApp(t, "- one\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-list-row').length === 1");
+    await caretAtEnd(browser.cdp, "block-0");
+
+    // First Enter: a new (empty) list item.
+    await press(browser.cdp, "Enter", { code: "Enter", keyCode: 13 });
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-list-row').length === 2");
+    await waitCaretInBlock(browser.cdp, 1);
+
+    // Second Enter on the empty item: leave the list — the empty item becomes a
+    // paragraph below the list (one list row left, a paragraph block after it).
+    await press(browser.cdp, "Enter", { code: "Enter", keyCode: 13 });
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-list-row').length === 1");
+    await waitFor(
+      browser.cdp,
+      "document.querySelectorAll('.editable-document [data-block-id]').length === 2"
+    );
+
+    // Typing now lands in a normal paragraph, not a list item.
+    await waitCaretInBlock(browser.cdp, 1);
+    await insertText(browser.cdp, "after");
+    await waitForFileText(markdownPath, /after/);
+    const saved = await readFile(markdownPath, "utf8");
+    assert.equal(saved, "- one\n\nafter\n");
+  });
+});
+
 async function caretAtStart(cdp, blockId) {
   await evaluate(
     cdp,
