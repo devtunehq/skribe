@@ -460,7 +460,10 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
 }
 
 function listItemLines(text: string) {
-  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+  const lines = text.split("\n").flatMap((line) => {
+    const trimmed = line.trim();
+    return trimmed ? [trimmed] : [];
+  });
   return lines.length > 0 ? lines : [""];
 }
 

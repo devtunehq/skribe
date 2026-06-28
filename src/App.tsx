@@ -890,6 +890,18 @@ function scrollToInlineChange(changeKey: string | null) {
   }, 80);
 }
 
+// Block types whose shape can be swapped by the formatting controls (paragraph /
+// heading / quote / list). Images, tables and code are left untouched.
+function isShapeConvertibleType(type: string) {
+  return (
+    type === "paragraph" ||
+    type === "heading" ||
+    type === "quote" ||
+    type === "ordered-list" ||
+    type === "unordered-list"
+  );
+}
+
 function isOlderDocument(candidate: DocumentState, current: DocumentState | null) {
   if (!current) return false;
   if (candidate.id !== current.id) return false;
@@ -3035,12 +3047,11 @@ function useSkribeController() {
       const draftRange = resolveSelectionDraftRange(markdown, pendingSelectionDraft);
       if (draftRange && draftRange.end > draftRange.start) {
         const spans = getMarkdownBlockLineSpans(markdown);
-        const ids = blocksForMarkdown(markdown)
-          .filter((_, index) => {
-            const span = spans[index];
-            return span && !(draftRange.end <= span.textStart || draftRange.start >= span.textEnd);
-          })
-          .map((block) => block.id);
+        const ids = blocksForMarkdown(markdown).flatMap((block, index) => {
+          const span = spans[index];
+          const covered = span && !(draftRange.end <= span.textStart || draftRange.start >= span.textEnd);
+          return covered ? [block.id] : [];
+        });
         if (ids.length > 0) return ids;
       }
     }
@@ -3100,15 +3111,6 @@ function useSkribeController() {
       .filter((id): id is string => Boolean(id));
   }
 
-  function isShapeConvertibleType(type: string) {
-    return (
-      type === "paragraph" ||
-      type === "heading" ||
-      type === "quote" ||
-      type === "ordered-list" ||
-      type === "unordered-list"
-    );
-  }
 
   // Apply a block-shape change (heading / list / quote / paragraph) to every
   // selected text block at once. Serializes the live DOM first so in-progress
