@@ -149,10 +149,7 @@ class Cdp {
   }
 }
 
-async function startBrowser() {
-  const executable = chromiumPath();
-  if (!executable) return null;
-
+async function launchBrowser(executable) {
   const userDataDir = await mkdtemp(join(tmpdir(), "skribe-e2e-browser-"));
   const debugPort = randomPort();
   const child = spawn(
@@ -161,6 +158,10 @@ async function startBrowser() {
       "--headless=new",
       "--disable-gpu",
       "--no-sandbox",
+      // CI containers give Chrome a tiny /dev/shm; without this it crashes once
+      // shared memory fills after a few browser instances, which shows up as a
+      // later test's launch failing to answer /json/list.
+      "--disable-dev-shm-usage",
       "--allow-file-access-from-files",
       `--remote-debugging-address=127.0.0.1`,
       `--remote-debugging-port=${debugPort}`,
@@ -173,34 +174,61 @@ async function startBrowser() {
     { stdio: ["ignore", "ignore", "ignore"] }
   );
 
-  const targetsUrl = `http://127.0.0.1:${debugPort}/json/list`;
-  const targets = await waitForHttpJson(targetsUrl, 20000);
-  const target = targets.find((item) => item.type === "page");
-  if (!target) throw new Error("No browser page target available");
-
-  const cdp = new Cdp(target.webSocketDebuggerUrl);
-  await cdp.waitOpen();
-  await cdp.send("Page.enable");
-  await cdp.send("Runtime.enable");
-  await cdp.send("DOM.enable");
-  await cdp.send("Input.setIgnoreInputEvents", { ignore: false });
-
-  return {
-    cdp,
-    async stop() {
-      cdp.close();
-      if (child.exitCode === null) {
-        child.kill("SIGTERM");
-        await Promise.race([once(child, "exit"), new Promise((resolve) => setTimeout(resolve, 1500))]);
-      }
-      if (child.exitCode === null) {
-        child.kill("SIGKILL");
-        await Promise.race([once(child, "exit"), new Promise((resolve) => setTimeout(resolve, 500))]);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      await removeTempDir(userDataDir);
+  // Kill the spawned Chrome and remove its profile if startup fails, so a failed
+  // launch can't leak a process/dir and starve later tests of resources.
+  const discard = async () => {
+    if (child.exitCode === null) {
+      child.kill("SIGKILL");
+      await Promise.race([once(child, "exit"), new Promise((resolve) => setTimeout(resolve, 500))]);
     }
+    await removeTempDir(userDataDir).catch(() => {});
   };
+
+  try {
+    const targetsUrl = `http://127.0.0.1:${debugPort}/json/list`;
+    const targets = await waitForHttpJson(targetsUrl, 20000);
+    const target = targets.find((item) => item.type === "page");
+    if (!target) throw new Error("No browser page target available");
+
+    const cdp = new Cdp(target.webSocketDebuggerUrl);
+    await cdp.waitOpen();
+    await cdp.send("Page.enable");
+    await cdp.send("Runtime.enable");
+    await cdp.send("DOM.enable");
+    await cdp.send("Input.setIgnoreInputEvents", { ignore: false });
+
+    return {
+      cdp,
+      async stop() {
+        cdp.close();
+        if (child.exitCode === null) {
+          child.kill("SIGTERM");
+          await Promise.race([once(child, "exit"), new Promise((resolve) => setTimeout(resolve, 1500))]);
+        }
+        if (child.exitCode === null) {
+          child.kill("SIGKILL");
+          await Promise.race([once(child, "exit"), new Promise((resolve) => setTimeout(resolve, 500))]);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        await removeTempDir(userDataDir);
+      }
+    };
+  } catch (error) {
+    await discard();
+    throw error;
+  }
+}
+
+async function startBrowser() {
+  const executable = chromiumPath();
+  if (!executable) return null;
+
+  try {
+    return await launchBrowser(executable);
+  } catch {
+    // One retry: a transient Chrome startup crash shouldn't fail the whole file.
+    return await launchBrowser(executable);
+  }
 }
 
 export async function evaluate(cdp, expression) {

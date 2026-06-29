@@ -88,6 +88,7 @@ import {
   parseMarkdownTable,
   parseMarkdownImage,
   parseMarkdownBlocks,
+  reconcileBlockIds,
   moveMarkdownBlock,
   serializeMarkdownBlocks,
   shouldPasteAsMarkdownBlocks,
@@ -230,7 +231,39 @@ function popDistinctSnapshot(stack: HistorySnapshot[], current: HistorySnapshot)
   return { target, stack: nextStack };
 }
 
+// Serialize an edited code block's DOM to plain text, preserving every newline,
+// blank line, and leading indentation. The generic htmlToInlineMarkdown path
+// collapses runs of newlines, trims, and treats backticks/underscores as
+// Markdown \u2014 all wrong for code. contentEditable represents line breaks as <br>
+// or wrapping <div>/<p> elements, so reconstruct newlines from those.
+function editableCodeNodeToText(node: HTMLElement) {
+  let text = "";
+  const walk = (current: Node) => {
+    for (const child of Array.from(current.childNodes)) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        text += child.textContent ?? "";
+        continue;
+      }
+      if (!(child instanceof HTMLElement)) continue;
+      const tag = child.tagName.toLowerCase();
+      if (tag === "br") {
+        text += "\n";
+        continue;
+      }
+      if (tag === "div" || tag === "p") {
+        if (text && !text.endsWith("\n")) text += "\n";
+        walk(child);
+        continue;
+      }
+      walk(child);
+    }
+  };
+  walk(node);
+  return text.replace(/\u00a0/g, " ").replace(/\u200b/g, "");
+}
+
 function blockNodeToMarkdown(node: HTMLElement, blockType?: string) {
+  if (blockType === "code") return editableCodeNodeToText(node);
   const html = blockType === "table" ? node.outerHTML : node.innerHTML;
   return htmlToInlineMarkdown(html.replace(/\u00a0/g, " ").trimEnd());
 }
@@ -656,7 +689,39 @@ function plainOffsetInEditableBlock(blockNode: HTMLElement, container: Node, off
   return range.toString().length;
 }
 
-function buildSelectionFromCanvasRange(markdown: string, range: Range): SelectionDraft | null {
+function placeCaretInEditableBlock(node: HTMLElement, plainOffset: number) {
+  node.focus();
+  const selection = window.getSelection();
+  if (!selection) return;
+  const range = document.createRange();
+  range.selectNodeContents(node);
+  range.collapse(true);
+
+  if (plainOffset > 0) {
+    let remaining = plainOffset;
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+    let textNode = walker.nextNode();
+    while (textNode) {
+      const length = textNode.textContent?.length ?? 0;
+      if (remaining <= length) {
+        range.setStart(textNode, remaining);
+        range.collapse(true);
+        break;
+      }
+      remaining -= length;
+      textNode = walker.nextNode();
+    }
+  }
+
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function buildSelectionFromCanvasRange(
+  markdown: string,
+  range: Range,
+  blocks: ReturnType<typeof parseMarkdownBlocks>
+): SelectionDraft | null {
   const startBlockNode = closestEditableBlock(range.startContainer);
   const endBlockNode = closestEditableBlock(range.endContainer);
   const startBlockId = startBlockNode?.dataset.blockId;
@@ -664,11 +729,14 @@ function buildSelectionFromCanvasRange(markdown: string, range: Range): Selectio
   if (!startBlockNode || !endBlockNode || !startBlockId || !endBlockId) return null;
 
   const spans = getMarkdownBlockLineSpans(markdown);
-  const startSpan = spans.find((span) => span.id === startBlockId);
-  const endSpan = spans.find((span) => span.id === endBlockId);
-  const blocks = parseMarkdownBlocks(markdown);
-  const startBlock = blocks.find((block) => block.id === startBlockId);
-  const endBlock = blocks.find((block) => block.id === endBlockId);
+  // Block ids are stable (reconciled); spans come from a positional re-parse, so
+  // resolve via the block's index in document order.
+  const startIndex = blocks.findIndex((block) => block.id === startBlockId);
+  const endIndex = blocks.findIndex((block) => block.id === endBlockId);
+  const startSpan = startIndex >= 0 ? spans[startIndex] : undefined;
+  const endSpan = endIndex >= 0 ? spans[endIndex] : undefined;
+  const startBlock = startIndex >= 0 ? blocks[startIndex] : undefined;
+  const endBlock = endIndex >= 0 ? blocks[endIndex] : undefined;
   if (!startSpan || !endSpan || !startBlock || !endBlock) return null;
 
   const startPlainOffset = plainOffsetInEditableBlock(startBlockNode, range.startContainer, range.startOffset);
@@ -822,6 +890,18 @@ function scrollToInlineChange(changeKey: string | null) {
   }, 80);
 }
 
+// Block types whose shape can be swapped by the formatting controls (paragraph /
+// heading / quote / list). Images, tables and code are left untouched.
+function isShapeConvertibleType(type: string) {
+  return (
+    type === "paragraph" ||
+    type === "heading" ||
+    type === "quote" ||
+    type === "ordered-list" ||
+    type === "unordered-list"
+  );
+}
+
 function isOlderDocument(candidate: DocumentState, current: DocumentState | null) {
   if (!current) return false;
   if (candidate.id !== current.id) return false;
@@ -913,6 +993,9 @@ function useSkribeController() {
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const linkInputRef = useRef<HTMLInputElement | null>(null);
   const blockRefs = useRef<Record<string, HTMLElement | null>>({});
+  const pendingCaretRef = useRef<{ index: number; offset: number } | null>(null);
+  const blockIdCounterRef = useRef(0);
+  const reconciledBlocksRef = useRef<ReturnType<typeof parseMarkdownBlocks>>([]);
   const selectionRangeRef = useRef<Range | null>(null);
   const selectionDragRef = useRef<SelectionDragState | null>(null);
   const customSelectionActiveRef = useRef(false);
@@ -931,6 +1014,52 @@ function useSkribeController() {
   const agentRuntimeRefreshInFlightRef = useRef(false);
   const agentRuntimeRefreshAtRef = useRef(0);
   const agentSession = documentState?.agentSession;
+
+  const mintBlockId = useCallback(() => `b${(blockIdCounterRef.current += 1)}`, []);
+
+  // Reconcile a markdown string into blocks whose ids are carried forward from the
+  // last render, so a block's id tracks its content across edits/reflow instead of
+  // its array position. Used for rendering and by handlers that resolve a block
+  // from a DOM data-block-id. (Pure document.ts mutators still match positional
+  // ids; translate with positionalBlockId at those boundaries.)
+  const blocksForMarkdown = useCallback(
+    (markdown: string) => reconcileBlockIds(reconciledBlocksRef.current, parseMarkdownBlocks(markdown), mintBlockId),
+    [mintBlockId]
+  );
+
+  const reconciledBlocks = useMemo(
+    () => blocksForMarkdown(documentState?.markdown ?? ""),
+    [blocksForMarkdown, documentState?.markdown]
+  );
+
+  useLayoutEffect(() => {
+    reconciledBlocksRef.current = reconciledBlocks;
+  }, [reconciledBlocks]);
+
+  const positionalBlockId = useCallback(
+    (markdown: string, stableId: string) => {
+      const index = blocksForMarkdown(markdown).findIndex((block) => block.id === stableId);
+      return index >= 0 ? markdownBlockIdFromIndex(index) : stableId;
+    },
+    [blocksForMarkdown]
+  );
+
+  // Resolve a stable block id to its block plus its positional line span (spans
+  // are derived from a positional re-parse, so align by document order).
+  const blockWithSpanById = useCallback(
+    (markdown: string, stableId: string) => {
+      const list = blocksForMarkdown(markdown);
+      const index = list.findIndex((block) => block.id === stableId);
+      if (index < 0) return { block: null, span: null };
+      return { block: list[index], span: getMarkdownBlockLineSpans(markdown)[index] ?? null };
+    },
+    [blocksForMarkdown]
+  );
+
+  const findBlockById = useCallback(
+    (markdown: string, stableId: string) => blocksForMarkdown(markdown).find((block) => block.id === stableId) ?? null,
+    [blocksForMarkdown]
+  );
 
   const clearPendingEditTimers = useCallback(() => {
     if (liveEditTimerRef.current) window.clearTimeout(liveEditTimerRef.current);
@@ -999,8 +1128,13 @@ function useSkribeController() {
         setIsRightPanelCollapsed(loadedSettings.panelState.rightCollapsed);
         setNewThreadSkillIds(loadedSettings.defaultSkills);
         setChatSkillIds(loadedSettings.defaultSkills);
-        stateRef.current = loaded;
-        setDocumentState(loaded);
+        // The initial fetch can resolve after the writer has already started
+        // editing (e.g. pressed Enter to split a block); don't let the on-disk
+        // document clobber a newer in-progress edit. Mirrors handleRemoteDocument.
+        if (!isOlderDocument(loaded, stateRef.current)) {
+          stateRef.current = loaded;
+          setDocumentState(loaded);
+        }
         setRevisionState(revisions);
         setAgentSkills(skills);
         setAgentRuntimeConfig(runtimeConfig);
@@ -1051,6 +1185,11 @@ function useSkribeController() {
       const shouldSkipRender = switchedDocument ? false : shouldAvoidDocumentRenderWhileEditing(remote);
       if (switchedDocument) {
         clearPendingEditTimers();
+        // Drop the previous document's reconciled blocks so the new document's
+        // blocks aren't reconciled against stale ids (which could reuse React
+        // keys/refs across documents and surface stale contentEditable DOM).
+        reconciledBlocksRef.current = [];
+        blockIdCounterRef.current = 0;
         undoStackRef.current = [];
         redoStackRef.current = [];
         selectionRangeRef.current = null;
@@ -1069,8 +1208,18 @@ function useSkribeController() {
         setBlockResetKeys({});
         refreshRevisions();
       }
+      const previousMarkdown = current?.markdown;
       stateRef.current = remote;
-      if (!shouldSkipRender) setDocumentState(remote);
+      if (!shouldSkipRender) {
+        // A same-document remote/agent edit changes block content under reused
+        // contentEditable nodes; remount them so the live DOM reflects the new
+        // markdown instead of staying stale until the next click. (Switched
+        // documents already cleared every block reset key above.)
+        if (!switchedDocument && previousMarkdown !== undefined && remote.markdown !== previousMarkdown) {
+          resetRenderedEditableBlocks(remote.markdown);
+        }
+        setDocumentState(remote);
+      }
       if (remote.agentSession) {
         setAgentRuntimeConfig((current) => mergeRuntimeConfigFromSession(current, remote.agentSession));
       }
@@ -1096,6 +1245,16 @@ function useSkribeController() {
   );
 
   useEffect(() => subscribeToDocumentEvents(handleRemoteDocument), [handleRemoteDocument]);
+
+  // After a structural edit remounts blocks (e.g. splitting a list item with
+  // Enter), move the caret into the freshly rendered target block. We keep the
+  // request pending and re-apply it on later re-renders (the post-commit save
+  // can otherwise blur the empty new item) until the writer actually types —
+  // `scheduleLiveCanvasCommit` clears it. We never reset the caret while the
+  // block already holds focus, so this can't fight active typing.
+  useLayoutEffect(() => {
+    applyPendingCaret();
+  }, [documentState, blockResetKeys]);
 
   useEffect(() => {
     return clearPendingEditTimers;
@@ -1353,6 +1512,9 @@ function useSkribeController() {
         updatedAt: nowIso()
       }
     };
+    // Undo/redo restores markdown out-of-band; force the contentEditable blocks
+    // to remount so the live DOM reflects the restored document.
+    resetRenderedEditableBlocks(next.markdown);
     setDocumentState(next);
     queueDocumentSave(next, { renderSavedState: true });
     historyRestoreRef.current = false;
@@ -1395,10 +1557,10 @@ function useSkribeController() {
     const shells = visibleEditableShells();
     if (shells.length === 0) return null;
 
-    const sourceBlocks = parseMarkdownBlocks(markdown);
+    const sourceBlocks = blocksForMarkdown(markdown);
     const renderedState = documentState;
     const renderedMarkdown = renderedState && renderedState.id === stateRef.current?.id ? renderedState.markdown : null;
-    const renderedBlocks = renderedMarkdown ? parseMarkdownBlocks(renderedMarkdown) : [];
+    const renderedBlocks = renderedMarkdown ? blocksForMarkdown(renderedMarkdown) : [];
     const blocksById = new Map<string, ReturnType<typeof parseMarkdownBlocks>[number]>();
     [...sourceBlocks, ...renderedBlocks].forEach((block) => blocksById.set(block.id, block));
 
@@ -1418,7 +1580,15 @@ function useSkribeController() {
       if (!node) return [sourceBlock];
 
       const text = blockNodeToMarkdown(node, sourceBlock.type);
-      return text.trim() ? [{ ...sourceBlock, text }] : [];
+      if (text.trim()) return [{ ...sourceBlock, text }];
+      // Keep an empty block while the caret is inside it — e.g. a block just
+      // created with Enter that the writer is about to fill in. Lists round-trip
+      // empty as "- "; other empty blocks need a zero-width-space sentinel so the
+      // block survives re-parsing. Empty blocks are dropped once focus leaves them.
+      if (node === document.activeElement || node.contains(document.activeElement)) {
+        return [{ ...sourceBlock, text: "\u200b" }];
+      }
+      return [];
     });
 
     return serializeMarkdownBlocks(blocks);
@@ -1428,7 +1598,7 @@ function useSkribeController() {
     const visibleMarkdown = serializeVisibleCanvasMarkdown(markdown);
     if (visibleMarkdown !== null) return visibleMarkdown;
 
-    const blocks = parseMarkdownBlocks(markdown);
+    const blocks = blocksForMarkdown(markdown);
     if (blocks.length === 0) {
       const emptyBlockId = markdownBlockIdFromIndex(0);
       const node = blockRefs.current[emptyBlockId];
@@ -1448,7 +1618,7 @@ function useSkribeController() {
   }
 
   function resetRenderedEditableBlocks(markdown: string) {
-    const ids = new Set(parseMarkdownBlocks(markdown).map((block) => block.id));
+    const ids = new Set(blocksForMarkdown(markdown).map((block) => block.id));
     visibleEditableShells().forEach((shell) => {
       if (shell.dataset.blockShell) ids.add(shell.dataset.blockShell);
     });
@@ -1473,6 +1643,12 @@ function useSkribeController() {
   }
 
   function commitCanvasDom() {
+    // A structural edit that remounts blocks (e.g. a list split) blurs the old
+    // focused node, which fires this on-blur handler. Re-serializing the DOM mid
+    // transition would drop the freshly-created empty item before the caret has
+    // moved into it, so skip until the pending caret has been placed.
+    if (pendingCaretRef.current) return;
+
     if (liveEditTimerRef.current) {
       window.clearTimeout(liveEditTimerRef.current);
       liveEditTimerRef.current = null;
@@ -1495,6 +1671,9 @@ function useSkribeController() {
   }
 
   function scheduleLiveCanvasCommit() {
+    // The writer is typing, so stop re-applying any pending caret placement
+    // (e.g. from a just-split list item) — they now own the caret.
+    pendingCaretRef.current = null;
     beginLiveEditHistory();
     if (liveEditTimerRef.current) window.clearTimeout(liveEditTimerRef.current);
     liveEditTimerRef.current = window.setTimeout(() => {
@@ -1514,13 +1693,17 @@ function useSkribeController() {
     queueDocumentSave(next, { renderSavedState: false });
   }
 
-  function commit(updater: (state: DocumentState) => DocumentState) {
+  function commit(
+    updater: (state: DocumentState) => DocumentState,
+    options?: { resyncDom?: boolean }
+  ) {
     if (!stateRef.current) return null;
 
     const current = stateRef.current;
     let next: DocumentState;
+    let base: DocumentState;
     try {
-      const base = stateWithPendingLiveCanvasEdit(current);
+      base = stateWithPendingLiveCanvasEdit(current);
       next = updater(base);
       if (!historyRestoreRef.current && next.markdown !== base.markdown) {
         pushUndoSnapshot(base);
@@ -1537,6 +1720,15 @@ function useSkribeController() {
       return null;
     }
 
+    // Structural edits (paste, delete, move, proposal apply, …) change block
+    // content/order programmatically while the live contentEditable DOM was
+    // mutated out-of-band by the browser. React cannot reliably reconcile new
+    // text into such a diverged contentEditable, so callers that restructure the
+    // document opt into a forced remount to repaint the affected blocks instead
+    // of leaving stale DOM until the next blur/click.
+    if (options?.resyncDom && next.markdown !== base.markdown) {
+      resetRenderedEditableBlocks(next.markdown);
+    }
     setDocumentState(next);
     queueDocumentSave(next, { renderSavedState: true });
     liveEditHistoryActiveRef.current = false;
@@ -1679,8 +1871,7 @@ function useSkribeController() {
     const blockId = blockNode.dataset.blockId;
     if (!blockId || !markdown) return null;
 
-    const block = parseMarkdownBlocks(markdown).find((item) => item.id === blockId);
-    const span = getMarkdownBlockLineSpans(markdown).find((item) => item.id === blockId);
+    const { block, span } = blockWithSpanById(markdown, blockId);
     if (!block || !span) return null;
 
     const rect = blockNode.getBoundingClientRect();
@@ -1725,8 +1916,7 @@ function useSkribeController() {
       return fallbackBlock ? selectionEndpointFromBlockEdge(fallbackBlock, clientX, clientY) : null;
     }
 
-    const block = parseMarkdownBlocks(markdown).find((item) => item.id === blockId);
-    const span = getMarkdownBlockLineSpans(markdown).find((item) => item.id === blockId);
+    const { block, span } = blockWithSpanById(markdown, blockId);
     if (!block || !span) return null;
 
     const plainOffset = plainOffsetInEditableBlock(blockNode, range.startContainer, range.startOffset);
@@ -1852,7 +2042,13 @@ function useSkribeController() {
     if (!nextState) return;
     sendAgentMessage({ source, body, threadId, document: nextState, skills })
       .then((remote) => {
+        const previous = stateRef.current;
         stateRef.current = remote;
+        // An agent reply can rewrite the document; remount the edited blocks so
+        // the live editor shows the change rather than stale content.
+        if (previous && remote.markdown !== previous.markdown) {
+          resetRenderedEditableBlocks(remote.markdown);
+        }
         setDocumentState(remote);
         setSaveState("saved");
       })
@@ -1928,7 +2124,7 @@ function useSkribeController() {
     if (!current || !thread) return;
 
     const candidates = getThreadAnchorCandidates(thread);
-    const targetBlock = parseMarkdownBlocks(current.markdown).find((block) =>
+    const targetBlock = blocksForMarkdown(current.markdown).find((block) =>
       candidates.some((candidate) => block.text.includes(candidate))
     );
     const blockNode = targetBlock ? blockRefs.current[targetBlock.id] : null;
@@ -1971,7 +2167,7 @@ function useSkribeController() {
     if (selectedText.length < 3) return;
 
     const markdown = markdownForSelection();
-    const nextSelection = buildSelectionFromCanvasRange(markdown, range) ?? buildSelection(markdown, selectedText);
+    const nextSelection = buildSelectionFromCanvasRange(markdown, range, blocksForMarkdown(markdown)) ?? buildSelection(markdown, selectedText);
     setSelectionDraft(nextSelection);
     setPanelMode("threads");
     setFloatingToolbar(null);
@@ -1982,19 +2178,22 @@ function useSkribeController() {
     if (!draft) return false;
 
     let didDelete = false;
-    commit((state) => {
-      const markdown = deleteSelectionDraftFromMarkdown(state.markdown, draft);
-      if (!markdown) return state;
-      didDelete = true;
-      return {
-        ...state,
-        markdown,
-        review: {
-          ...state.review,
-          updatedAt: nowIso()
-        }
-      };
-    });
+    commit(
+      (state) => {
+        const markdown = deleteSelectionDraftFromMarkdown(state.markdown, draft);
+        if (!markdown) return state;
+        didDelete = true;
+        return {
+          ...state,
+          markdown,
+          review: {
+            ...state.review,
+            updatedAt: nowIso()
+          }
+        };
+      },
+      { resyncDom: true }
+    );
 
     if (!didDelete) return false;
 
@@ -2051,7 +2250,7 @@ function useSkribeController() {
     if (!canvasRef.current.contains(range.startContainer) || !canvasRef.current.contains(range.endContainer)) return null;
 
     if (!range.collapsed) {
-      const selectedRange = buildSelectionFromCanvasRange(markdown, range);
+      const selectedRange = buildSelectionFromCanvasRange(markdown, range, blocksForMarkdown(markdown));
       if (selectedRange) return resolveSelectionDraftRange(markdown, selectedRange);
     }
 
@@ -2059,11 +2258,10 @@ function useSkribeController() {
     const blockId = blockNode?.dataset.blockId;
     if (!blockNode || !blockId) return null;
 
-    const blocks = parseMarkdownBlocks(markdown);
+    const blocks = blocksForMarkdown(markdown);
     if (blocks.length === 0 && blockId === markdownBlockIdFromIndex(0)) return { start: 0, end: 0 };
 
-    const block = blocks.find((item) => item.id === blockId);
-    const span = getMarkdownBlockLineSpans(markdown).find((item) => item.id === blockId);
+    const { block, span } = blockWithSpanById(markdown, blockId);
     if (!block || !span) return null;
 
     const plainOffset = plainOffsetInEditableBlock(blockNode, range.startContainer, range.startOffset);
@@ -2123,14 +2321,17 @@ function useSkribeController() {
     const markdown = spliceMarkdownPaste(liveState.markdown, range.start, range.end, insertion, blockMode);
     if (markdown === liveState.markdown) return false;
 
-    commit(() => ({
-      ...liveState,
-      markdown,
-      review: {
-        ...liveState.review,
-        updatedAt: nowIso()
-      }
-    }));
+    commit(
+      () => ({
+        ...liveState,
+        markdown,
+        review: {
+          ...liveState.review,
+          updatedAt: nowIso()
+        }
+      }),
+      { resyncDom: true }
+    );
     clearCanvasSelectionState();
     showTransientToast(options.asMarkdown ? "Markdown pasted" : "Text pasted");
     return true;
@@ -2148,14 +2349,17 @@ function useSkribeController() {
     const markdown = spliceMarkdownPaste(liveState.markdown, range.start, range.end, insertion, true);
     if (markdown === liveState.markdown) return false;
 
-    commit(() => ({
-      ...liveState,
-      markdown,
-      review: {
-        ...liveState.review,
-        updatedAt: nowIso()
-      }
-    }));
+    commit(
+      () => ({
+        ...liveState,
+        markdown,
+        review: {
+          ...liveState.review,
+          updatedAt: nowIso()
+        }
+      }),
+      { resyncDom: true }
+    );
     clearCanvasSelectionState();
     showTransientToast(label);
     return true;
@@ -2321,6 +2525,28 @@ function useSkribeController() {
     if (isCommand && !event.shiftKey && key === "x") {
       event.preventDefault();
       void cutActiveSelectionToClipboard();
+      return;
+    }
+    // Block-shape shortcuts while a cross-block (custom) selection is active —
+    // these otherwise live in the per-block handler, which doesn't fire because a
+    // custom selection moves focus to the canvas. changeBlockShape reads the
+    // selection draft and converts every block it covers.
+    if (isCommand && event.altKey && ["0", "1", "2", "3"].includes(key)) {
+      event.preventDefault();
+      if (key === "0") changeBlockShape({ type: "paragraph", level: undefined });
+      if (key === "1") changeBlockShape({ type: "heading", level: 1 });
+      if (key === "2") changeBlockShape({ type: "heading", level: 2 });
+      if (key === "3") changeBlockShape({ type: "heading", level: 3 });
+      return;
+    }
+    if (isCommand && event.shiftKey && key === "7") {
+      event.preventDefault();
+      changeBlockShape({ type: "ordered-list", marker: "1" });
+      return;
+    }
+    if (isCommand && event.shiftKey && key === "8") {
+      event.preventDefault();
+      changeBlockShape({ type: "unordered-list" });
       return;
     }
     if (event.key === "Backspace" || event.key === "Delete") {
@@ -2503,7 +2729,7 @@ function useSkribeController() {
           updatedAt
         }
       };
-    });
+    }, { resyncDom: true });
   }
 
   function updateProposalStatus(proposalId: string, status: "accepted" | "rejected") {
@@ -2543,7 +2769,7 @@ function useSkribeController() {
           updatedAt
         }
       };
-    });
+    }, { resyncDom: true });
   }
 
   function updateProposalChangeDecision(
@@ -2591,7 +2817,7 @@ function useSkribeController() {
           updatedAt
         }
       };
-    });
+    }, { resyncDom: true });
   }
 
   function requestProposalRevision(proposalId: string, change: ProposalChangeBlock, instruction: string) {
@@ -2713,7 +2939,7 @@ function useSkribeController() {
   }
 
   function updateCanvasBlock(blockId: string, html: string) {
-    const currentBlock = stateRef.current ? parseMarkdownBlocks(stateRef.current.markdown).find((block) => block.id === blockId) : null;
+    const currentBlock = stateRef.current ? findBlockById(stateRef.current.markdown, blockId) : null;
     const registeredNode = blockRefs.current[blockId] ?? null;
     const text = registeredNode ? blockNodeToMarkdown(registeredNode, currentBlock?.type) : htmlToInlineMarkdown(html);
     const textBlocks: string[] = [];
@@ -2729,7 +2955,7 @@ function useSkribeController() {
     }
     commit((state) => ({
       ...state,
-      markdown: updateMarkdownBlock(state.markdown, blockId, text),
+      markdown: updateMarkdownBlock(state.markdown, positionalBlockId(state.markdown, blockId), text),
       review: {
         ...state.review,
         updatedAt: nowIso()
@@ -2739,26 +2965,37 @@ function useSkribeController() {
 
   function moveCanvasBlock(blockId: string, targetBlockId: string, placement: BlockDropPlacement) {
     if (blockId === targetBlockId) return;
-    commit((state) => ({
-      ...state,
-      markdown: moveMarkdownBlock(state.markdown, blockId, targetBlockId, placement),
-      review: {
-        ...state.review,
-        updatedAt: nowIso()
-      }
-    }));
+    commit(
+      (state) => ({
+        ...state,
+        markdown: moveMarkdownBlock(
+          state.markdown,
+          positionalBlockId(state.markdown, blockId),
+          positionalBlockId(state.markdown, targetBlockId),
+          placement
+        ),
+        review: {
+          ...state.review,
+          updatedAt: nowIso()
+        }
+      }),
+      { resyncDom: true }
+    );
   }
 
   function deleteCanvasBlock(blockId: string) {
-    if (!stateRef.current || !parseMarkdownBlocks(stateRef.current.markdown).some((item) => item.id === blockId)) return;
-    commit((state) => ({
-      ...state,
-      markdown: deleteMarkdownBlock(state.markdown, blockId),
-      review: {
-        ...state.review,
-        updatedAt: nowIso()
-      }
-    }));
+    if (!stateRef.current || !findBlockById(stateRef.current.markdown, blockId)) return;
+    commit(
+      (state) => ({
+        ...state,
+        markdown: deleteMarkdownBlock(state.markdown, positionalBlockId(state.markdown, blockId)),
+        review: {
+          ...state.review,
+          updatedAt: nowIso()
+        }
+      }),
+      { resyncDom: true }
+    );
     if (activeBlockId === blockId) setActiveBlockId(null);
   }
 
@@ -2768,33 +3005,170 @@ function useSkribeController() {
 
   function updateBlockShape(blockId: string, patch: Parameters<typeof updateMarkdownBlockShape>[2]) {
     const node = blockRefs.current[blockId];
-    const currentBlock = stateRef.current ? parseMarkdownBlocks(stateRef.current.markdown).find((block) => block.id === blockId) : null;
+    const currentBlock = stateRef.current ? findBlockById(stateRef.current.markdown, blockId) : null;
     const currentText = node ? blockNodeToMarkdown(node, currentBlock?.type) : null;
 
+    // The commit below serializes the live DOM (capturing this and any other
+    // block's in-progress edits) while the debounce timer is still armed, then
+    // remounts the block under its new shape via resyncDom.
     commit((state) => {
+      const positional = positionalBlockId(state.markdown, blockId);
       const markdownWithLatestText = currentText
-        ? updateMarkdownBlock(state.markdown, blockId, currentText)
+        ? updateMarkdownBlock(state.markdown, positional, currentText)
         : state.markdown;
       return {
         ...state,
-        markdown: updateMarkdownBlockShape(markdownWithLatestText, blockId, patch),
+        markdown: updateMarkdownBlockShape(markdownWithLatestText, positional, patch),
         review: {
           ...state.review,
           updatedAt: nowIso()
         }
       };
+    }, { resyncDom: true });
+
+    // Cancel the pending live-edit debounce: its closure captured the
+    // pre-conversion render (e.g. a heading) and, if left to fire, would
+    // re-serialize the stale DOM type and silently revert the shape change.
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+  }
+
+  // The stable ids of every block the current selection touches, top to bottom.
+  // A collapsed caret yields the single block it sits in; a drag across blocks
+  // yields all of them — so formatting can apply to a whole multi-block range.
+  function selectedCanvasBlockIds(): string[] {
+    const canvas = canvasRef.current;
+    if (!canvas) return [];
+
+    // A drag ACROSS blocks uses the editor's own selection (pendingSelectionDraft)
+    // and clears the native selection, so window.getSelection() is empty for it.
+    // Map the draft's source range to every block it covers. (A single-block drag
+    // keeps the native selection and falls through to the logic below.)
+    if (pendingSelectionDraft) {
+      const markdown = markdownForSelection();
+      const draftRange = resolveSelectionDraftRange(markdown, pendingSelectionDraft);
+      if (draftRange && draftRange.end > draftRange.start) {
+        const spans = getMarkdownBlockLineSpans(markdown);
+        const ids = blocksForMarkdown(markdown).flatMap((block, index) => {
+          const span = spans[index];
+          const covered = span && !(draftRange.end <= span.textStart || draftRange.start >= span.textEnd);
+          return covered ? [block.id] : [];
+        });
+        if (ids.length > 0) return ids;
+      }
+    }
+
+    const selection = window.getSelection();
+    const liveRange =
+      selection && selection.rangeCount > 0 && canvas.contains(selection.getRangeAt(0).commonAncestorContainer)
+        ? selection.getRangeAt(0)
+        : null;
+    const range = liveRange ?? selectionRangeRef.current;
+    if (!range || !canvas.contains(range.commonAncestorContainer)) return [];
+    const all = Array.from(canvas.querySelectorAll<HTMLElement>("[data-block-id]"));
+    if (all.length === 0) return [];
+
+    // Map an arbitrary selection node to the index of the block it belongs to —
+    // directly when it's inside the editable, or via its block wrapper when an
+    // endpoint lands on a non-editable part (a list-row marker span, a quote/code
+    // wrapper). Returns -1 for container/boundary nodes.
+    const indexOfNode = (node: Node | null): number => {
+      if (!node) return -1;
+      const element = node.nodeType === Node.ELEMENT_NODE ? (node as Element) : node.parentElement;
+      if (!element) return -1;
+      const direct = element.closest("[data-block-id]");
+      if (direct) return all.indexOf(direct as HTMLElement);
+      const wrapper = element.closest(".editable-list-row, blockquote, pre, figure");
+      const inside = wrapper?.querySelector("[data-block-id]");
+      return inside ? all.indexOf(inside as HTMLElement) : -1;
+    };
+
+    // Gather every signal of the selection's extent and take the widest span.
+    // A drag across separate contentEditable blocks is reported inconsistently:
+    // getRangeAt() may stay confined to one block while the selection's logical
+    // anchor/focus span several, and either endpoint can land on a non-editable
+    // boundary node. Combining range endpoints, anchor/focus, and geometric
+    // intersection keeps a multi-block selection from collapsing to one block.
+    const indices: number[] = [];
+    const pushIndex = (node: Node | null) => {
+      const index = indexOfNode(node);
+      if (index >= 0) indices.push(index);
+    };
+    pushIndex(range.startContainer);
+    pushIndex(range.endContainer);
+    if (liveRange && selection) {
+      pushIndex(selection.anchorNode);
+      pushIndex(selection.focusNode);
+    }
+    all.forEach((node, index) => {
+      if (range.intersectsNode(node)) indices.push(index);
     });
+    if (indices.length === 0) return [];
+
+    const lo = Math.min(...indices);
+    const hi = Math.max(...indices);
+    return all
+      .slice(lo, hi + 1)
+      .map((node) => node.dataset.blockId)
+      .filter((id): id is string => Boolean(id));
+  }
+
+
+  // Apply a block-shape change (heading / list / quote / paragraph) to every
+  // selected text block at once. Serializes the live DOM first so in-progress
+  // edits are captured, then remounts so the new shapes paint immediately.
+  function updateSelectedBlocksShape(blockIds: string[], patch: Parameters<typeof updateMarkdownBlockShape>[2]) {
+    const current = stateRef.current;
+    if (!current || blockIds.length === 0) return;
+    const selected = new Set(blockIds);
+    const nextBlocks = blocksForMarkdown(serializeCanvasMarkdown(current.markdown)).map((block) =>
+      selected.has(block.id) && isShapeConvertibleType(block.type) ? { ...block, ...patch } : block
+    );
+    const markdown = serializeMarkdownBlocks(nextBlocks);
+    commit(
+      () => ({ ...current, markdown, review: { ...current.review, updatedAt: nowIso() } }),
+      { resyncDom: true }
+    );
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+    const focusId = activeBlockId && selected.has(activeBlockId) ? activeBlockId : blockIds[0];
+    const focusIndex = nextBlocks.findIndex((block) => block.id === focusId);
+    if (focusIndex >= 0) {
+      pendingCaretRef.current = { index: focusIndex, offset: 0 };
+      schedulePendingCaretFlush();
+    }
+  }
+
+  // Route a shape change to the whole selection when it spans several blocks,
+  // otherwise to the single block (the caret's block, or the given fallback).
+  function changeBlockShape(patch: Parameters<typeof updateMarkdownBlockShape>[2], fallbackId?: string | null) {
+    const ids = selectedCanvasBlockIds();
+    if (ids.length > 1) {
+      updateSelectedBlocksShape(ids, patch);
+      return;
+    }
+    const single = ids[0] ?? fallbackId ?? activeBlockId;
+    if (single) updateBlockShape(single, patch);
   }
 
   function updateActiveBlockShape(patch: Parameters<typeof updateMarkdownBlockShape>[2]) {
-    if (!activeBlockId) return;
-    updateBlockShape(activeBlockId, patch);
+    changeBlockShape(patch, activeBlockId);
   }
 
   function applyInlineCommand(command: "bold" | "italic" | "strikeThrough") {
     restoreCanvasSelection();
+    // Emit semantic tags (<strong>/<em>/<s>) rather than inline styles so the
+    // formatting survives serialization back to Markdown.
+    document.execCommand("styleWithCSS", false, "false");
     document.execCommand(command);
     rememberCanvasSelection();
+    scheduleLiveCanvasCommit();
   }
 
   function applyInlineCode() {
@@ -2813,6 +3187,7 @@ function useSkribeController() {
     nextRange.selectNodeContents(code);
     selection.addRange(nextRange);
     rememberCanvasSelection();
+    scheduleLiveCanvasCommit();
   }
 
   function insertEditorBreak(paragraphBreak: boolean) {
@@ -2836,6 +3211,284 @@ function useSkribeController() {
     nextRange.collapse(true);
     selection.removeAllRanges();
     selection.addRange(nextRange);
+    return true;
+  }
+
+  // Place the caret into the block targeted by pendingCaretRef. Returns true once
+  // that block holds focus (or there is nothing pending); a no-op while it already
+  // holds focus, so it never fights active typing.
+  function applyPendingCaret() {
+    const pending = pendingCaretRef.current;
+    if (!pending) return true;
+    const target = reconciledBlocksRef.current[pending.index];
+    if (!target) return false;
+    const node = blockRefs.current[target.id];
+    if (!node) return false;
+    if (node === document.activeElement || node.contains(document.activeElement)) return true;
+    setActiveBlockId(target.id);
+    placeCaretInEditableBlock(node, pending.offset);
+    return node === document.activeElement || node.contains(document.activeElement);
+  }
+
+  // A structural commit remounts blocks and blurs the old focus; placing the caret
+  // into a freshly-rendered (often empty) block can take a frame or two to stick,
+  // so re-apply it across several animation frames until it holds or the writer
+  // types (scheduleLiveCanvasCommit clears the pending request).
+  function schedulePendingCaretFlush(attempts = 24) {
+    if (!pendingCaretRef.current) return;
+    if (attempts <= 0) {
+      // The self-heal window (covering the post-commit save re-render) has
+      // elapsed and the caret has settled. Clear the request so the on-blur
+      // commit isn't skipped forever: otherwise creating an empty block and then
+      // leaving the editor without typing would keep the pending guard set, and
+      // the empty placeholder would never be dropped from the saved Markdown.
+      pendingCaretRef.current = null;
+      return;
+    }
+    applyPendingCaret();
+    window.requestAnimationFrame(() => schedulePendingCaretFlush(attempts - 1));
+  }
+
+  // Pressing Enter splits the current block at the caret into a new block right
+  // away. The caret is located by inserting a private-use sentinel and serializing
+  // the WHOLE canvas, so the split point is found by its exact position in the
+  // resulting markdown — correct even when one DOM block holds several logical
+  // blocks (the bug that an id-based split hit). A heading/quote continuation
+  // becomes a paragraph; an empty side is kept (lists via "- ", others via a
+  // zero-width space) so the new block survives the round-trip.
+  function splitBlockAtCaret() {
+    const current = stateRef.current;
+    const selection = window.getSelection();
+    if (!current || !selection || selection.rangeCount === 0 || !canvasRef.current) return false;
+
+    const range = selection.getRangeAt(0);
+    if (!range.collapsed || !canvasRef.current.contains(range.startContainer)) return false;
+
+    const sentinel = "\ue000";
+    const marker = document.createTextNode(sentinel);
+    range.insertNode(marker);
+    let raw: string;
+    try {
+      raw = serializeCanvasMarkdown(current.markdown);
+    } finally {
+      marker.remove();
+    }
+    if (!raw.includes(sentinel)) return false;
+
+    const parsed = parseMarkdownBlocks(raw);
+    const splitIndex = parsed.findIndex((block) => block.text.includes(sentinel));
+    if (splitIndex < 0) return false;
+    const target = parsed[splitIndex];
+    const at = target.text.indexOf(sentinel);
+    const before = target.text.slice(0, at);
+    const after = target.text.slice(at + sentinel.length);
+
+    const cleaned = parsed.map((block) => ({ ...block, text: block.text.split(sentinel).join("") }));
+    // An empty side is kept via a zero-width space so the new block survives
+    // re-parsing and renders a focusable <br> line.
+    const emptyMarker = "\u200b";
+    const targetIsList = target.type === "ordered-list" || target.type === "unordered-list";
+    const targetIsEmpty = (before + after).replace(/\u200b/g, "").trim() === "";
+
+    let nextBlocks: ReturnType<typeof parseMarkdownBlocks>;
+    let caretIndex: number;
+    if (targetIsList && targetIsEmpty) {
+      // Enter on an empty list item exits the list: turn the item into an empty
+      // paragraph (which lands below the list) instead of adding another bullet.
+      nextBlocks = cleaned.map((block, index) =>
+        index === splitIndex
+          ? { ...block, type: "paragraph", level: undefined, marker: undefined, text: emptyMarker }
+          : block
+      );
+      caretIndex = splitIndex;
+    } else {
+      // A heading/quote continues as a paragraph; other types continue as themselves.
+      const afterType = target.type === "heading" || target.type === "quote" ? "paragraph" : target.type;
+      const beforeBlock = { ...cleaned[splitIndex], text: before || emptyMarker };
+      const afterBlock =
+        afterType === target.type
+          ? { ...cleaned[splitIndex], text: after || emptyMarker }
+          : { ...cleaned[splitIndex], type: afterType, level: undefined, marker: undefined, text: after || emptyMarker };
+      nextBlocks = [...cleaned.slice(0, splitIndex), beforeBlock, afterBlock, ...cleaned.slice(splitIndex + 1)];
+      caretIndex = splitIndex + 1;
+    }
+    const markdown = serializeMarkdownBlocks(nextBlocks);
+
+    commit(
+      () => ({ ...current, markdown, review: { ...current.review, updatedAt: nowIso() } }),
+      { resyncDom: true }
+    );
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+    pendingCaretRef.current = { index: caretIndex, offset: 0 };
+    schedulePendingCaretFlush();
+    return true;
+  }
+
+  // Markdown input rule: typing a list prefix at the very start of a paragraph
+  // ("1. ", "- ", "* ") turns it into a list item right away. Called on the space
+  // keypress (before the space is inserted); returns true when it converts, so
+  // the caller consumes the space. The caret block is found with the same
+  // whole-canvas sentinel as splitBlockAtCaret, so "start of paragraph" is correct
+  // even when one DOM shell holds several logical blocks.
+  function applyListInputRule() {
+    const current = stateRef.current;
+    const selection = window.getSelection();
+    if (!current || !selection || selection.rangeCount === 0 || !canvasRef.current) return false;
+
+    const range = selection.getRangeAt(0);
+    if (!range.collapsed || !canvasRef.current.contains(range.startContainer)) return false;
+
+    // Cheap pre-check so the whole-canvas serialize below only runs when the caret
+    // could actually sit right after a list prefix ("1." / "-" / "*").
+    const prevChar =
+      range.startContainer.nodeType === Node.TEXT_NODE && range.startOffset > 0
+        ? range.startContainer.textContent?.[range.startOffset - 1]
+        : "";
+    if (prevChar !== "." && prevChar !== "-" && prevChar !== "*") return false;
+
+    const sentinel = "\ue000";
+    const marker = document.createTextNode(sentinel);
+    range.insertNode(marker);
+    let raw: string;
+    try {
+      raw = serializeCanvasMarkdown(current.markdown);
+    } finally {
+      marker.remove();
+    }
+    if (!raw.includes(sentinel)) return false;
+
+    const parsed = parseMarkdownBlocks(raw);
+    const index = parsed.findIndex((block) => block.text.includes(sentinel));
+    if (index < 0) return false;
+    const target = parsed[index];
+    if (target.type !== "paragraph") return false;
+    const at = target.text.indexOf(sentinel);
+    const before = target.text.slice(0, at).replace(/\u200b/g, "");
+    const after = target.text.slice(at + sentinel.length).replace(/\u200b/g, "");
+
+    const ordered = before.match(/^(\d+)\.$/);
+    const unordered = /^[-*]$/.test(before);
+    if (!ordered && !unordered) return false;
+
+    const cleaned = parsed.map((block) => ({ ...block, text: block.text.split(sentinel).join("") }));
+    const itemText = after || "\u200b";
+    const converted = ordered
+      ? { ...cleaned[index], type: "ordered-list" as const, marker: ordered[1], level: undefined, text: itemText }
+      : { ...cleaned[index], type: "unordered-list" as const, marker: undefined, level: undefined, text: itemText };
+    const nextBlocks = [...cleaned.slice(0, index), converted, ...cleaned.slice(index + 1)];
+    const markdown = serializeMarkdownBlocks(nextBlocks);
+
+    commit(
+      () => ({ ...current, markdown, review: { ...current.review, updatedAt: nowIso() } }),
+      { resyncDom: true }
+    );
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+    pendingCaretRef.current = { index, offset: 0 };
+    schedulePendingCaretFlush();
+    return true;
+  }
+
+  // Backspace at the very start of a block merges it into the previous block and
+  // puts the caret at the join (the end of the previous block's text) — so an
+  // empty block is removed and a non-empty one's text is appended. The caret is
+  // located by the same whole-canvas sentinel as splitBlockAtCaret, so "start of
+  // block" is correct even when one DOM shell holds several logical blocks.
+  // Returns false (letting the default Backspace delete a character) unless the
+  // caret is at the start of a block that has a text-holding block before it.
+  function mergeBlockBackward() {
+    const current = stateRef.current;
+    const selection = window.getSelection();
+    if (!current || !selection || selection.rangeCount === 0 || !canvasRef.current) return false;
+
+    const range = selection.getRangeAt(0);
+    if (!range.collapsed || !canvasRef.current.contains(range.startContainer)) return false;
+
+    const sentinel = "\ue000";
+    const marker = document.createTextNode(sentinel);
+    range.insertNode(marker);
+    let raw: string;
+    try {
+      raw = serializeCanvasMarkdown(current.markdown);
+    } finally {
+      marker.remove();
+    }
+    if (!raw.includes(sentinel)) return false;
+
+    const parsed = parseMarkdownBlocks(raw);
+    const index = parsed.findIndex((block) => block.text.includes(sentinel));
+    if (index <= 0) return false;
+    const target = parsed[index];
+    // Only act when nothing but the caret precedes the block's content.
+    if (target.text.slice(0, target.text.indexOf(sentinel)).replace(/\u200b/g, "").length > 0) return false;
+
+    const cleaned = parsed.map((block) => ({ ...block, text: block.text.split(sentinel).join("") }));
+    const previous = cleaned[index - 1];
+    const previousHoldsText =
+      previous.type === "paragraph" ||
+      previous.type === "heading" ||
+      previous.type === "quote" ||
+      previous.type === "ordered-list" ||
+      previous.type === "unordered-list";
+    if (!previousHoldsText) return false;
+
+    const previousText = previous.text.replace(/\u200b/g, "");
+    const currentText = cleaned[index].text.replace(/\u200b/g, "");
+    const mergedPrevious = { ...previous, text: previousText + currentText };
+    const nextBlocks = [...cleaned.slice(0, index - 1), mergedPrevious, ...cleaned.slice(index + 1)];
+    const markdown = serializeMarkdownBlocks(nextBlocks);
+
+    commit(
+      () => ({ ...current, markdown, review: { ...current.review, updatedAt: nowIso() } }),
+      { resyncDom: true }
+    );
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+    pendingCaretRef.current = { index: index - 1, offset: visibleMarkdownCharacters(previousText).length };
+    schedulePendingCaretFlush();
+    return true;
+  }
+
+  // Insert an empty paragraph immediately after a block and move the caret into
+  // it — used so image blocks (which can't hold a caret) aren't a dead end.
+  function insertParagraphAfterBlock(blockId: string) {
+    const current = stateRef.current;
+    if (!current) return false;
+    const liveState = stateWithLiveCanvasEdit(current);
+    const blocks = blocksForMarkdown(liveState.markdown);
+    const index = blocks.findIndex((block) => block.id === blockId);
+    if (index < 0) return false;
+
+    const nextBlocks = [
+      ...blocks.slice(0, index + 1),
+      { id: `${blockId}-after`, type: "paragraph" as const, text: "\u200b" },
+      ...blocks.slice(index + 1)
+    ];
+    commit(
+      () => ({
+        ...liveState,
+        markdown: serializeMarkdownBlocks(nextBlocks),
+        review: { ...liveState.review, updatedAt: nowIso() }
+      }),
+      { resyncDom: true }
+    );
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+    pendingCaretRef.current = { index: index + 1, offset: 0 };
+    schedulePendingCaretFlush();
     return true;
   }
 
@@ -2871,7 +3524,7 @@ function useSkribeController() {
       plainEnd: plainStart + selectedText.length,
       markdownAtOpen: blockNodeToMarkdown(
         editableBlock,
-        stateRef.current ? parseMarkdownBlocks(stateRef.current.markdown).find((block) => block.id === blockId)?.type : undefined
+        stateRef.current ? findBlockById(stateRef.current.markdown, blockId)?.type : undefined
       )
     };
     setLinkDraft(existingHref || "https://");
@@ -2884,17 +3537,20 @@ function useSkribeController() {
     const target = linkTargetRef.current;
     const currentState = stateRef.current;
     if (href && target && currentState) {
-      const block = parseMarkdownBlocks(currentState.markdown).find((item) => item.id === target.blockId);
+      const block = findBlockById(currentState.markdown, target.blockId);
       const linkedText = block ? applyMarkdownLinkToSelection(block.text, target, href) : null;
       if (block && linkedText && linkedText !== block.text) {
-        commit((state) => ({
-          ...state,
-          markdown: updateMarkdownBlock(state.markdown, target.blockId, linkedText),
-          review: {
-            ...state.review,
-            updatedAt: nowIso()
-          }
-        }));
+        commit(
+          (state) => ({
+            ...state,
+            markdown: updateMarkdownBlock(state.markdown, positionalBlockId(state.markdown, target.blockId), linkedText),
+            review: {
+              ...state.review,
+              updatedAt: nowIso()
+            }
+          }),
+          { resyncDom: true }
+        );
 
         window.getSelection()?.removeAllRanges();
         selectionRangeRef.current = null;
@@ -2954,6 +3610,23 @@ function useSkribeController() {
   function handleEditorShortcut(event: React.KeyboardEvent<HTMLElement>, blockId: string) {
     const isCommand = event.metaKey || event.ctrlKey;
     const key = event.key.toLowerCase();
+
+    // Image blocks can't hold a caret, so give them keyboard escapes: Enter adds
+    // a paragraph after the image, Backspace/Delete removes it. Other keys fall
+    // through (so Cmd+Z etc. still work).
+    if (!isCommand && (stateRef.current ? findBlockById(stateRef.current.markdown, blockId)?.type : null) === "image") {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        insertParagraphAfterBlock(blockId);
+        return;
+      }
+      if (event.key === "Backspace" || event.key === "Delete") {
+        event.preventDefault();
+        deleteCanvasBlock(blockId);
+        return;
+      }
+    }
+
     if (isCommand && !event.shiftKey && key === "a") {
       if (selectEntireDocument()) event.preventDefault();
       return;
@@ -2985,11 +3658,71 @@ function useSkribeController() {
       return;
     }
 
+    // Backspace at the very start of a block merges it into the previous block
+    // (removing an empty block; appending a non-empty one's text). When the caret
+    // isn't at a block start, mergeBlockBackward returns false and the default
+    // Backspace deletes a character as usual.
+    if (
+      event.key === "Backspace" &&
+      !event.shiftKey &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      !event.nativeEvent.isComposing
+    ) {
+      if (mergeBlockBackward()) {
+        event.preventDefault();
+        return;
+      }
+    }
+
+    // Typing a list prefix ("1. ", "- ", "* ") at the start of a paragraph turns
+    // it into a list item; the space that triggers the rule is consumed.
+    if (
+      event.key === " " &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      !event.shiftKey &&
+      !event.nativeEvent.isComposing
+    ) {
+      if (applyListInputRule()) {
+        event.preventDefault();
+        return;
+      }
+    }
+
     if (event.key === "Enter" && !event.metaKey && !event.ctrlKey && !event.altKey && !event.nativeEvent.isComposing) {
-      const currentBlock = stateRef.current ? parseMarkdownBlocks(stateRef.current.markdown).find((block) => block.id === blockId) : null;
+      const currentBlock = stateRef.current ? findBlockById(stateRef.current.markdown, blockId) : null;
       event.preventDefault();
       setActiveBlockId(blockId);
-      insertEditorBreak(currentBlock?.type !== "code" && !event.shiftKey);
+      const type = currentBlock?.type;
+
+      // Shift+Enter is a soft line break within the current block.
+      if (event.shiftKey) {
+        insertEditorBreak(false);
+        rememberCanvasSelection();
+        return;
+      }
+
+      // A table cell can't hold a line break (it collapses to a space on
+      // serialize), so swallow Enter rather than insert a break that vanishes.
+      if (type === "table") {
+        rememberCanvasSelection();
+        return;
+      }
+
+      // Code keeps Enter as a literal newline so multi-line code stays editable.
+      if (type === "code") {
+        insertEditorBreak(false);
+        rememberCanvasSelection();
+        return;
+      }
+
+      // Every other block splits at the caret into a new block immediately.
+      if (splitBlockAtCaret()) return;
+      // Fallback if the caret can't be resolved: a paragraph break.
+      insertEditorBreak(true);
       rememberCanvasSelection();
       return;
     }
@@ -3019,22 +3752,22 @@ function useSkribeController() {
     if (event.altKey && ["0", "1", "2", "3"].includes(key)) {
       event.preventDefault();
       setActiveBlockId(blockId);
-      if (key === "0") updateBlockShape(blockId, { type: "paragraph", level: undefined });
-      if (key === "1") updateBlockShape(blockId, { type: "heading", level: 1 });
-      if (key === "2") updateBlockShape(blockId, { type: "heading", level: 2 });
-      if (key === "3") updateBlockShape(blockId, { type: "heading", level: 3 });
+      if (key === "0") changeBlockShape({ type: "paragraph", level: undefined }, blockId);
+      if (key === "1") changeBlockShape({ type: "heading", level: 1 }, blockId);
+      if (key === "2") changeBlockShape({ type: "heading", level: 2 }, blockId);
+      if (key === "3") changeBlockShape({ type: "heading", level: 3 }, blockId);
       return;
     }
     if (event.shiftKey && key === "7") {
       event.preventDefault();
       setActiveBlockId(blockId);
-      updateBlockShape(blockId, { type: "ordered-list", marker: "1" });
+      changeBlockShape({ type: "ordered-list", marker: "1" }, blockId);
       return;
     }
     if (event.shiftKey && key === "8") {
       event.preventDefault();
       setActiveBlockId(blockId);
-      updateBlockShape(blockId, { type: "unordered-list" });
+      changeBlockShape({ type: "unordered-list" }, blockId);
     }
   }
 
@@ -3091,7 +3824,7 @@ function useSkribeController() {
         ],
         updatedAt: createdAt
       }
-    }));
+    }), { resyncDom: true });
   }
 
   async function restoreRevision(revisionId: string) {
@@ -3109,6 +3842,9 @@ function useSkribeController() {
       const restored = await restoreDocumentRevision(revisionId);
       if (restoreEpoch === stateEpochRef.current) {
         stateRef.current = restored.document;
+        // Restoring a revision swaps the whole document out-of-band; remount the
+        // editable blocks so the canvas shows the restored content immediately.
+        resetRenderedEditableBlocks(restored.document.markdown);
         setDocumentState(restored.document);
         setRevisionState(restored.revisions);
         setActiveThreadId(null);
@@ -3206,6 +3942,7 @@ function useSkribeController() {
     linkDraft,
     lastCopied,
     blockResetKeys,
+    blocks: reconciledBlocks,
     agentSession,
     agentRuntimeUnavailable,
     isFlowMode,
@@ -3797,6 +4534,7 @@ function CenterPane() {
     activeThread,
     appSettings,
     blockResetKeys,
+    blocks,
     canvasRef,
     documentState,
     editorLanguage,
@@ -3872,6 +4610,7 @@ function CenterPane() {
         )}
         <EditableMarkdownCanvas
           markdown={documentState.markdown}
+          blocks={blocks}
           editorLanguage={editorLanguage}
           threads={isFlowMode ? [] : threads}
           inlineProposal={isFlowMode ? null : activeInlineProposal}
@@ -4593,6 +5332,7 @@ function SkillComposer({
 
 interface MarkdownCanvasProps {
   markdown: string;
+  blocks: ReturnType<typeof parseMarkdownBlocks>;
   editorLanguage: SupportedEditorLanguage;
   threads: ReviewThread[];
   inlineProposal: InlineProposalReview | null;
@@ -4751,6 +5491,7 @@ function LinkPopover({
 
 function EditableMarkdownCanvas({
   markdown,
+  blocks,
   editorLanguage,
   threads,
   inlineProposal,
@@ -4775,11 +5516,23 @@ function EditableMarkdownCanvas({
 }: MarkdownCanvasProps) {
   const [draggingBlockId, setDraggingBlockId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<{ blockId: string; placement: BlockDropPlacement } | null>(null);
-  const blocks = useMemo(() => parseMarkdownBlocks(markdown), [markdown]);
-  const visibleBlocks = useMemo(
-    () => (blocks.length > 0 ? blocks : [{ id: markdownBlockIdFromIndex(0), type: "paragraph" as const, text: "" }]),
-    [blocks]
-  );
+  const visibleBlocks = useMemo(() => {
+    const base = blocks.length > 0 ? blocks : [{ id: markdownBlockIdFromIndex(0), type: "paragraph" as const, text: "" }];
+    // Renumber ordered-list markers per contiguous run so the displayed numbers
+    // stay sequential (1, 2, 3…) after items are deleted, reordered, or all typed
+    // as "1.". Display only — the stored markdown markers are left untouched, so
+    // block text offsets (and comment anchors) are unaffected.
+    let ordinal = 0;
+    return base.map((block) => {
+      if (block.type !== "ordered-list") {
+        ordinal = 0;
+        return block;
+      }
+      ordinal += 1;
+      const marker = String(ordinal);
+      return block.marker === marker ? block : { ...block, marker };
+    });
+  }, [blocks]);
   const blockSpans = useMemo(() => getMarkdownBlockLineSpans(markdown), [markdown]);
   const selectionPreviewThread = useMemo<ReviewThread | null>(
     () =>
@@ -4803,26 +5556,36 @@ function EditableMarkdownCanvas({
   const canvasActiveThreadId = selectionPreviewThread?.id ?? activeThreadId;
   const anchorRangesByBlock = useMemo(() => {
     const byBlock = new Map<string, BlockAnchorRange[]>();
-    const spansByBlock = new Map(blockSpans.map((span) => [span.id, span]));
+    // Block ids are stable (reconciled), but line spans come from a positional
+    // re-parse, so align them by document order rather than by id.
+    const spansByBlock = new Map(visibleBlocks.map((block, index) => [block.id, blockSpans[index] ?? null]));
+
+    // Resolve each anchor's CURRENT position by re-finding its text rather than
+    // trusting the absolute offset captured when the comment was made — otherwise
+    // editing text above a comment shifts the document and the highlight drifts.
+    const resolvedRanges = new Map<string, { start: number; end: number }>();
+    for (const thread of canvasThreads) {
+      if (thread.anchor.kind !== "markdown-range") continue;
+      if (thread.status !== "open" && thread.id !== canvasActiveThreadId) continue;
+      const resolved = resolveSelectionDraftRange(markdown, thread.anchor);
+      if (resolved && resolved.end > resolved.start) resolvedRanges.set(thread.id, resolved);
+    }
+
     for (const block of visibleBlocks) {
       const blockSpan = spansByBlock.get(block.id) ?? null;
       if (blockSpan === null) continue;
 
       const blockAnchorRanges: BlockAnchorRange[] = [];
       for (const thread of canvasThreads) {
-        if (
-          (thread.status !== "open" && thread.id !== canvasActiveThreadId) ||
-          thread.anchor.kind !== "markdown-range" ||
-          thread.anchor.end <= blockSpan.textStart ||
-          thread.anchor.start >= blockSpan.textEnd
-        ) {
+        const resolved = resolvedRanges.get(thread.id);
+        if (!resolved || resolved.end <= blockSpan.textStart || resolved.start >= blockSpan.textEnd) {
           continue;
         }
 
         const range = {
           thread,
-          start: clamp(thread.anchor.start - blockSpan.textStart, 0, block.text.length),
-          end: clamp(thread.anchor.end - blockSpan.textStart, 0, block.text.length)
+          start: clamp(resolved.start - blockSpan.textStart, 0, block.text.length),
+          end: clamp(resolved.end - blockSpan.textStart, 0, block.text.length)
         };
         if (range.end > range.start) blockAnchorRanges.push(range);
       }
@@ -4830,7 +5593,7 @@ function EditableMarkdownCanvas({
       if (blockAnchorRanges.length > 0) byBlock.set(block.id, blockAnchorRanges);
     }
     return byBlock;
-  }, [blockSpans, canvasActiveThreadId, canvasThreads, visibleBlocks]);
+  }, [blockSpans, canvasActiveThreadId, canvasThreads, markdown, visibleBlocks]);
   const inlineChangesByBlock = useMemo(() => {
     const byBlock = new Map<string, InlineProposalChange[]>();
     inlineProposal?.changes.forEach((change) => {
@@ -4895,8 +5658,11 @@ function EditableMarkdownCanvas({
         className="editable-document"
         lang={editorLanguage}
       >
-        {visibleBlocks.map((block) => {
+        {visibleBlocks.map((block, blockIndex) => {
           const blockAnchorRanges = anchorRangesByBlock.get(block.id) ?? emptyBlockAnchorRanges;
+          // Inline-proposal changes are anchored to positional block ids; map this
+          // block's position to that key (block ids themselves are stable).
+          const inlineChanges = inlineChangesByBlock.get(markdownBlockIdFromIndex(blockIndex)) ?? [];
 
           return (
             <React.Fragment key={block.id}>
@@ -4939,7 +5705,7 @@ function EditableMarkdownCanvas({
                   onTableImageExported={onTableImageExported}
                 />
               </EditableBlockShell>
-              {(inlineChangesByBlock.get(block.id) ?? []).map((change) => (
+              {inlineChanges.map((change) => (
                 <InlineProposalChangeCard
                   key={`${change.proposalId}:${change.key}`}
                   change={change}
@@ -5088,16 +5854,29 @@ const EditableBlock = React.memo(function EditableBlock({
     className: "editable-text"
   };
 
-  const children = renderHighlightedText(block.text, threads, activeThreadId, onActivateThread, anchorRanges);
+  // A deliberately empty block (created by Enter, marked with a zero-width space)
+  // renders a <br> so the contentEditable has a reliable, focusable caret line.
+  // A genuinely empty block (e.g. an empty document) renders nothing so its
+  // placeholder shows.
+  const isMarkedEmpty = block.text.length > 0 && block.text.replace(/\u200b/g, "").trim() === "";
+  const children = isMarkedEmpty ? (
+    <br />
+  ) : (
+    renderHighlightedText(block.text, threads, activeThreadId, onActivateThread, anchorRanges)
+  );
 
   if (block.type === "heading") {
-    const tag = `h${Math.min(block.level ?? 2, 3)}` as "h1" | "h2" | "h3";
+    // Render the actual level (up to h6) so the displayed heading matches the
+    // Markdown source (#### shows as an h4), instead of clamping every deep
+    // heading to h3 while the source kept its level.
+    const level = Math.min(Math.max(block.level ?? 2, 1), 6);
+    const tag = `h${level}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
     return React.createElement(
       tag,
       {
         ...editableProps,
         id: block.id,
-        className: `editable-text editable-heading level-${block.level ?? 2}`
+        className: `editable-text editable-heading level-${level}`
       },
       children
     );
@@ -5129,7 +5908,14 @@ const EditableBlock = React.memo(function EditableBlock({
   }
 
   if (block.type === "image") {
-    return <EditableImageBlock block={block} onRegisterBlock={onRegisterBlock} onFocusBlock={onFocusBlock} />;
+    return (
+      <EditableImageBlock
+        block={block}
+        onRegisterBlock={onRegisterBlock}
+        onFocusBlock={onFocusBlock}
+        onShortcut={onShortcut}
+      />
+    );
   }
 
   if (block.type === "table") {
@@ -5146,11 +5932,13 @@ const EditableBlock = React.memo(function EditableBlock({
 function EditableImageBlock({
   block,
   onRegisterBlock,
-  onFocusBlock
+  onFocusBlock,
+  onShortcut
 }: {
   block: ReturnType<typeof parseMarkdownBlocks>[number];
   onRegisterBlock: (blockId: string, node: HTMLElement | null) => void;
   onFocusBlock: (blockId: string) => void;
+  onShortcut: (event: React.KeyboardEvent<HTMLElement>, blockId: string) => void;
 }) {
   const image = parseMarkdownImage(block.text);
   if (!image) {
@@ -5178,6 +5966,7 @@ function EditableImageBlock({
       ref={(node) => onRegisterBlock(block.id, node)}
       onClick={() => onFocusBlock(block.id)}
       onFocus={() => onFocusBlock(block.id)}
+      onKeyDown={(event) => onShortcut(event, block.id)}
     >
       <div className="editable-image-frame">
         <img src={imagePreviewSrc(image.src)} alt={image.alt} title={image.title} loading="lazy" />
@@ -5360,28 +6149,26 @@ function renderHighlightedText(
       );
     }
     const isActive = activeThreadId === range.thread.id;
+    // Render the comment highlight as an inline <span>, not a <button>. A button
+    // inside a contentEditable is an atomic, non-editable element: the caret
+    // can't land inside it and arrow keys skip over it, so commented text became
+    // effectively read-only. A span keeps the text editable; clicking it (a
+    // collapsed selection) still activates the thread, and the thread remains
+    // reachable from the side panel for keyboard users.
     nodes.push(
-      <button
-        type="button"
+      <span
         key={range.thread.id}
         data-thread-id={range.thread.id}
         className={`anchor-highlight ${isActive ? "is-active" : ""}`}
-        onMouseDown={(event) => event.preventDefault()}
         onClick={() => {
           if (range.thread.id === "selection-preview") return;
           const selection = window.getSelection();
           if (selection && !selection.isCollapsed) return;
           onActivateThread(range.thread.id);
         }}
-        onKeyDown={(event) => {
-          if (range.thread.id === "selection-preview") return;
-          if (event.key !== "Enter" && event.key !== " ") return;
-          event.preventDefault();
-          onActivateThread(range.thread.id);
-        }}
       >
         <InlineMarkdown markdown={text.slice(range.start, range.end)} keyPrefix={`range-${range.thread.id}`} />
-      </button>
+      </span>
     );
     cursor = range.end;
   });

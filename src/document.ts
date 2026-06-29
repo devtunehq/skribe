@@ -37,21 +37,78 @@ function markdownBlockSignature(block: MarkdownBlockIdentity) {
   ].join("\u001f");
 }
 
-function markdownBlockIdFromSignature(signature: string, occurrence: number) {
-  let hash = 2166136261;
-  for (let index = 0; index < signature.length; index += 1) {
-    hash ^= signature.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return `block-${(hash >>> 0).toString(36)}-${occurrence}`;
-}
-
-function makeMarkdownBlockId(block: MarkdownBlockIdentity, occurrence: number) {
-  return markdownBlockIdFromSignature(markdownBlockSignature(block), occurrence);
-}
-
 export function markdownBlockIdFromIndex(index: number) {
   return `block-${index}`;
+}
+
+// Carry stable block ids forward across re-parses. Markdown has no place to
+// persist ids, so `parseMarkdownBlocks` assigns positional ones; this reconciles
+// a freshly parsed list against the previously reconciled list so a block that
+// was merely edited, moved, or shifted by an insert/delete above keeps its id,
+// and only genuinely new blocks receive fresh ids. This lets React keys, refs,
+// the active block, and review/proposal anchors track content instead of array
+// position. With no previous list (first load) the positional ids are kept.
+export function reconcileBlockIds(
+  previous: MarkdownBlock[],
+  parsed: MarkdownBlock[],
+  mintId: () => string
+): MarkdownBlock[] {
+  if (previous.length === 0) return parsed;
+
+  const used = new Set<number>();
+  const assigned: Array<string | null> = parsed.map(() => null);
+
+  const nearestUnused = (target: number, eligible: (index: number) => boolean) => {
+    let best = -1;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < previous.length; index += 1) {
+      if (used.has(index) || !eligible(index)) continue;
+      const distance = Math.abs(index - target);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = index;
+      }
+    }
+    return best;
+  };
+
+  // Pass 1: exact signature match (type/level/marker/language/text), preferring
+  // the previous block closest to this position — handles unchanged and moved
+  // blocks.
+  const previousSignatures = previous.map((block) => markdownBlockSignature(block));
+  parsed.forEach((block, index) => {
+    const signature = markdownBlockSignature(block);
+    const match = nearestUnused(index, (candidate) => previousSignatures[candidate] === signature);
+    if (match >= 0) {
+      used.add(match);
+      assigned[index] = previous[match].id;
+    }
+  });
+
+  // Pass 2: same-type match by nearest position — handles in-place text edits.
+  parsed.forEach((block, index) => {
+    if (assigned[index] !== null) return;
+    const match = nearestUnused(index, (candidate) => previous[candidate].type === block.type);
+    if (match >= 0) {
+      used.add(match);
+      assigned[index] = previous[match].id;
+    }
+  });
+
+  // Pass 3: nearest remaining by position regardless of type — keeps a block's
+  // id when it is reformatted in place (e.g. heading -> paragraph), as long as the
+  // block count is unchanged at that point.
+  parsed.forEach((_block, index) => {
+    if (assigned[index] !== null) return;
+    const match = nearestUnused(index, () => true);
+    if (match >= 0) {
+      used.add(match);
+      assigned[index] = previous[match].id;
+    }
+  });
+
+  // Pass 4: genuinely new blocks get a fresh stable id.
+  return parsed.map((block, index) => ({ ...block, id: assigned[index] ?? mintId() }));
 }
 
 export function nowIso() {
@@ -281,6 +338,10 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
 
   const flushParagraph = () => {
     if (paragraph.length === 0) return;
+    // A lone zero-width space marks a deliberately empty paragraph block (created
+    // by pressing Enter at the end of a block). Keep it: it renders invisibly but
+    // gives the empty contentEditable a focusable position, and the editor strips
+    // it from the DOM when serializing real typed content.
     pushBlock({
       type: "paragraph",
       text: paragraph.join("\n").trim()
@@ -297,13 +358,20 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       continue;
     }
 
-    const codeFence = trimmed.match(/^```(\w+)?/);
+    const codeFence = trimmed.match(/^(`{3,})(\w+)?/);
     if (codeFence) {
       flushParagraph();
-      const language = codeFence[1] ?? "";
+      const fenceLength = codeFence[1].length;
+      const language = codeFence[2] ?? "";
       const codeLines: string[] = [];
       index += 1;
-      while (index < lines.length && !lines[index].trim().startsWith("```")) {
+      // Close only on a line of at least as many backticks as the opener, so code
+      // that itself contains a ``` line (fenced with 4+ backticks) round-trips.
+      const isClosingFence = (line: string) => {
+        const fence = line.trim();
+        return /^`+$/.test(fence) && fence.length >= fenceLength;
+      };
+      while (index < lines.length && !isClosingFence(lines[index])) {
         codeLines.push(lines[index]);
         index += 1;
       }
@@ -351,23 +419,25 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       continue;
     }
 
-    const ordered = trimmed.match(/^(\d+)\.\s+(.+)$/);
+    // Allow empty list items (`1.`, `-`) so a freshly-created item survives a
+    // round-trip while the writer is about to type into it.
+    const ordered = trimmed.match(/^(\d+)\.(?:\s+(.*))?$/);
     if (ordered) {
       flushParagraph();
       pushBlock({
         type: "ordered-list",
         marker: ordered[1],
-        text: ordered[2]
+        text: ordered[2] ?? ""
       });
       continue;
     }
 
-    const unordered = trimmed.match(/^[-*]\s+(.+)$/);
+    const unordered = trimmed.match(/^[-*](?:\s+(.*))?$/);
     if (unordered) {
       flushParagraph();
       pushBlock({
         type: "unordered-list",
-        text: unordered[1]
+        text: unordered[1] ?? ""
       });
       continue;
     }
@@ -389,22 +459,54 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
   return blocks;
 }
 
+function listItemLines(text: string) {
+  const lines = text.split("\n").flatMap((line) => {
+    const trimmed = line.trim();
+    return trimmed ? [trimmed] : [];
+  });
+  return lines.length > 0 ? lines : [""];
+}
+
+function isListBlockType(type: MarkdownBlockType) {
+  return type === "ordered-list" || type === "unordered-list";
+}
+
+function serializeMarkdownBlock(block: MarkdownBlock) {
+  const text = block.text.trimEnd();
+  if (block.type === "heading") return `${"#".repeat(block.level ?? 2)} ${text}`;
+  // A list block can hold several lines once the user presses Enter inside it
+  // (each line break becomes a new sibling item). Emit one marker per line so it
+  // re-parses as a list, not a list followed by a paragraph.
+  if (block.type === "ordered-list") {
+    return listItemLines(text).map((line) => `${block.marker ?? "1"}. ${line}`).join("\n");
+  }
+  if (block.type === "unordered-list") {
+    return listItemLines(text).map((line) => `- ${line}`).join("\n");
+  }
+  if (block.type === "quote") return text.split("\n").map((line) => `> ${line}`).join("\n");
+  if (block.type === "code") {
+    // Use a fence longer than any backtick run in the code so content containing
+    // ``` doesn't terminate the block early.
+    const longestRun = (block.text.match(/`+/g) ?? []).reduce((max, run) => Math.max(max, run.length), 0);
+    const fence = "`".repeat(Math.max(3, longestRun + 1));
+    return `${fence}${block.language ?? ""}\n${block.text}\n${fence}`;
+  }
+  return text;
+}
+
 export function serializeMarkdownBlocks(blocks: MarkdownBlock[]) {
-  return blocks
-    .map((block) => {
-      const text = block.text.trimEnd();
-      if (block.type === "heading") return `${"#".repeat(block.level ?? 2)} ${text}`;
-      if (block.type === "ordered-list") return `${block.marker ?? "1"}. ${text}`;
-      if (block.type === "unordered-list") return `- ${text}`;
-      if (block.type === "quote") return text.split("\n").map((line) => `> ${line}`).join("\n");
-      if (block.type === "code") return `\`\`\`${block.language ?? ""}\n${block.text}\n\`\`\``;
-      if (block.type === "table") return text;
-      if (block.type === "image") return text;
-      return text;
-    })
-    .join("\n\n")
-    .trimEnd()
-    .concat("\n");
+  let output = "";
+  blocks.forEach((block, index) => {
+    if (index > 0) {
+      // Keep consecutive list items of the SAME kind tight (single newline) so a
+      // run reads as one list; switching ordered<->unordered (or any non-list
+      // boundary) gets a blank line so the two lists don't merge into one.
+      const previous = blocks[index - 1];
+      output += isListBlockType(block.type) && block.type === previous.type ? "\n" : "\n\n";
+    }
+    output += serializeMarkdownBlock(block);
+  });
+  return output.trimEnd().concat("\n");
 }
 
 function clampMarkdownIndex(index: number, min: number, max: number) {

@@ -1,5 +1,6 @@
 import { parseDiffFromFile } from "@pierre/diffs";
 import type { FileDiffMetadata } from "@pierre/diffs";
+import { parseMarkdownBlocks } from "./document.ts";
 import {
   characterIndexForLine,
   getMarkdownBlockLineSpans,
@@ -241,17 +242,44 @@ export function buildInlineProposalReview(proposal: DocumentProposal, currentMar
   const replacementSpans = getMarkdownBlockLineSpans(proposal.replacementMarkdown);
   const currentSpans = getMarkdownBlockLineSpans(currentMarkdown);
   const currentBlockIds = new Set(currentSpans.map((span) => span.id));
+  const originalBlocks = parseMarkdownBlocks(proposal.originalMarkdown);
+  const replacementBlocks = parseMarkdownBlocks(proposal.replacementMarkdown);
+  const currentBlocks = parseMarkdownBlocks(currentMarkdown);
+  const normalizeText = (text: string) => text.replace(/\s+/g, " ").trim();
 
   return {
     proposal,
     decidedCount: changes.filter((change) => decisions[change.key]).length,
     changes: changes.map((change) => {
       const sourceSpans = change.deletions.length > 0 ? originalSpans : replacementSpans;
+      const sourceBlocks = change.deletions.length > 0 ? originalBlocks : replacementBlocks;
       const sourceLine = change.deletions.length > 0 ? change.deletionLineStart : change.additionLineStart;
       const sourceSpan = findNearestBlockSpan(sourceSpans, sourceLine);
       const sourceIndex = sourceSpan ? sourceSpans.findIndex((span) => span.id === sourceSpan.id) : -1;
       const fallbackSpan = sourceIndex >= 0 ? currentSpans[Math.min(sourceIndex, currentSpans.length - 1)] : currentSpans.at(0);
-      const anchorBlockId = sourceSpan && currentBlockIds.has(sourceSpan.id) ? sourceSpan.id : fallbackSpan?.id ?? null;
+
+      // Prefer anchoring to the current block whose CONTENT matches the proposal's
+      // source block — so the change card follows its text if the document is
+      // edited (blocks inserted/removed above) while the proposal is pending.
+      // Fall back to positional matching when the content can't be located.
+      const sourceBlock = sourceIndex >= 0 ? sourceBlocks[sourceIndex] : undefined;
+      const normalizedSource = sourceBlock ? normalizeText(sourceBlock.text) : "";
+      // When the same text appears more than once, anchoring to the first match
+      // would re-point a change for a later duplicate onto the wrong block. Match
+      // on type as well and pick the candidate nearest the source's position.
+      const contentIndex = normalizedSource
+        ? currentBlocks.reduce<number>((best, block, index) => {
+            if (normalizeText(block.text) !== normalizedSource || block.type !== sourceBlock?.type) return best;
+            if (best < 0) return index;
+            return Math.abs(index - sourceIndex) < Math.abs(best - sourceIndex) ? index : best;
+          }, -1)
+        : -1;
+      const anchorBlockId =
+        contentIndex >= 0
+          ? currentSpans[contentIndex]?.id ?? null
+          : sourceSpan && currentBlockIds.has(sourceSpan.id)
+            ? sourceSpan.id
+            : fallbackSpan?.id ?? null;
 
       return {
         ...change,

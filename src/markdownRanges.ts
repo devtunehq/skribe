@@ -90,14 +90,22 @@ export function getMarkdownBlockLineSpans(markdown: string): MarkdownBlockLineSp
       continue;
     }
 
-    const codeFence = trimmed.match(/^```(\w+)?/);
+    const codeFence = trimmed.match(/^(`{3,})(\w+)?/);
     if (codeFence) {
       flushParagraph(index - 1);
       const startIndex = index;
-      const language = codeFence[1] ?? "";
+      const fenceLength = codeFence[1].length;
+      const language = codeFence[2] ?? "";
       const codeLines: string[] = [];
       index += 1;
-      while (index < lines.length && !lines[index].trim().startsWith("```")) {
+      // Close only on a fence at least as long as the opener — matches
+      // parseMarkdownBlocks so a 4+-backtick block containing a ``` line stays one
+      // block and the spans keep the same block count.
+      const isClosingFence = (line: string) => {
+        const fence = line.trim();
+        return /^`+$/.test(fence) && fence.length >= fenceLength;
+      };
+      while (index < lines.length && !isClosingFence(lines[index])) {
         codeLines.push(lines[index]);
         index += 1;
       }
@@ -145,8 +153,11 @@ export function getMarkdownBlockLineSpans(markdown: string): MarkdownBlockLineSp
     }
 
     const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
-    const ordered = trimmed.match(/^(\d+)\.\s+(.+)$/);
-    const unordered = trimmed.match(/^[-*]\s+(.+)$/);
+    // Allow empty list items so the spans match parseMarkdownBlocks (which keeps
+    // a freshly-created "- " / "1." item as its own block); otherwise an empty
+    // item gets absorbed into an adjacent paragraph and the block counts diverge.
+    const ordered = trimmed.match(/^(\d+)\.(?:\s+(.*))?$/);
+    const unordered = trimmed.match(/^[-*](?:\s+(.*))?$/);
     const quote = trimmed.match(/^>\s?(.+)$/);
 
     if (heading || ordered || unordered || quote) {
@@ -155,11 +166,13 @@ export function getMarkdownBlockLineSpans(markdown: string): MarkdownBlockLineSp
         const start = textOffset(index, heading[2]);
         pushSpan({ type: "heading", level: heading[1].length, text: heading[2] }, index + 1, index + 1, start, start + heading[2].length);
       } else if (ordered) {
-        const start = textOffset(index, ordered[2]);
-        pushSpan({ type: "ordered-list", marker: ordered[1], text: ordered[2] }, index + 1, index + 1, start, start + ordered[2].length);
+        const text = ordered[2] ?? "";
+        const start = text ? textOffset(index, text) : lineEnd(index);
+        pushSpan({ type: "ordered-list", marker: ordered[1], text }, index + 1, index + 1, start, start + text.length);
       } else if (unordered) {
-        const start = textOffset(index, unordered[1]);
-        pushSpan({ type: "unordered-list", text: unordered[1] }, index + 1, index + 1, start, start + unordered[1].length);
+        const text = unordered[1] ?? "";
+        const start = text ? textOffset(index, text) : lineEnd(index);
+        pushSpan({ type: "unordered-list", text }, index + 1, index + 1, start, start + text.length);
       } else if (quote) {
         const start = textOffset(index, quote[1]);
         pushSpan({ type: "quote", text: quote[1] }, index + 1, index + 1, start, start + quote[1].length);

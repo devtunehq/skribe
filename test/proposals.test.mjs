@@ -3,11 +3,14 @@ import test from "node:test";
 
 import {
   applyProposalDecisionTransitions,
+  buildInlineProposalReview,
   buildMarkdownFromProposalDecisions,
   buildProposalDiff,
   getProposalChangeBlocks,
   resolveProposalStatus
 } from "../src/proposals.ts";
+import { parseMarkdownBlocks } from "../src/document.ts";
+import { getMarkdownBlockLineSpans } from "../src/markdownRanges.ts";
 
 function makeProposal(overrides = {}) {
   return {
@@ -71,6 +74,26 @@ function changedBlocks(proposal) {
   };
 }
 
+test("inline proposal changes anchor by content when the document is edited above", () => {
+  const proposal = makeProposal({ originalMarkdown, replacementMarkdown });
+  // A new paragraph is inserted at the top of the live document, shifting every
+  // block's position down by one.
+  const currentMarkdown = originalMarkdown.replace("# Draft\n", "# Draft\n\nNewly added intro.\n");
+
+  const review = buildInlineProposalReview(proposal, currentMarkdown);
+  const firstChange = review.changes.find((change) => change.deletions.join("").includes("First original"));
+  assert.ok(firstChange, "expected a change targeting 'First original.'");
+
+  // The anchored block in the current document must actually contain the source
+  // text — not whatever now sits at the original positional index.
+  const currentBlocks = parseMarkdownBlocks(currentMarkdown);
+  const anchorIndex = getMarkdownBlockLineSpans(currentMarkdown).findIndex(
+    (span) => span.id === firstChange.anchorBlockId
+  );
+  assert.ok(anchorIndex >= 0, "anchor block id should exist in the current document");
+  assert.equal(currentBlocks[anchorIndex].text.trim(), "First original.");
+});
+
 test("proposal change decisions apply individual blocks without reordering untouched content", () => {
   const proposal = makeProposal({ originalMarkdown, replacementMarkdown });
   const { first, second } = changedBlocks(proposal);
@@ -133,4 +156,24 @@ test("proposal status distinguishes open, reviewed, accepted, and rejected state
   assert.equal(resolveProposalStatus(changes, { [first.key]: "accepted", [second.key]: "rejected" }), "reviewed");
   assert.equal(resolveProposalStatus(changes, { [first.key]: "accepted", [second.key]: "accepted" }), "accepted");
   assert.equal(resolveProposalStatus(changes, { [first.key]: "rejected", [second.key]: "rejected" }), "rejected");
+});
+
+test("inline proposal anchors a duplicated source block to the nearest occurrence, not the first", () => {
+  // "Repeated." appears twice; the proposal edits the SECOND one. The change must
+  // anchor to that block, not re-point onto the first identical block.
+  const dupOriginal = "# Draft\n\nRepeated.\n\nMiddle.\n\nRepeated.\n\nEnd.\n";
+  const dupReplacement = "# Draft\n\nRepeated.\n\nMiddle.\n\nRepeated changed.\n\nEnd.\n";
+  const proposal = makeProposal({ originalMarkdown: dupOriginal, replacementMarkdown: dupReplacement });
+
+  const review = buildInlineProposalReview(proposal, dupOriginal);
+  const change = review.changes.find((item) => item.additions.join("").includes("Repeated changed"));
+  assert.ok(change, "expected a change for the second 'Repeated.' block");
+
+  const blocks = parseMarkdownBlocks(dupOriginal);
+  const anchorIndex = getMarkdownBlockLineSpans(dupOriginal).findIndex(
+    (span) => span.id === change.anchorBlockId
+  );
+  // Blocks 1 and 3 are both "Repeated."; the edit targets the second (index 3).
+  assert.equal(anchorIndex, 3);
+  assert.equal(blocks[anchorIndex].text.trim(), "Repeated.");
 });
