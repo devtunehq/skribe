@@ -37,7 +37,7 @@
     "serve": "node server/index.mjs",
     "test": "node --test test/*.test.mjs",
     "test:coverage": "node --experimental-test-coverage --test test/*.test.mjs",
-    "test:e2e": "npm run build && node --test test/e2e/*.test.mjs",
+    "test:e2e": "npm run build && node scripts/run-e2e.mjs",
     "typecheck": "tsc -b",
     "doctor": "react-doctor",
     "doctor:diff": "react-doctor --verbose --diff main"
