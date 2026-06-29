@@ -498,10 +498,11 @@ export function serializeMarkdownBlocks(blocks: MarkdownBlock[]) {
   let output = "";
   blocks.forEach((block, index) => {
     if (index > 0) {
-      // Keep consecutive list items tight (single newline) so the list reads as
-      // one list; everything else is separated by a blank line.
+      // Keep consecutive list items of the SAME kind tight (single newline) so a
+      // run reads as one list; switching ordered<->unordered (or any non-list
+      // boundary) gets a blank line so the two lists don't merge into one.
       const previous = blocks[index - 1];
-      output += isListBlockType(block.type) && isListBlockType(previous.type) ? "\n" : "\n\n";
+      output += isListBlockType(block.type) && block.type === previous.type ? "\n" : "\n\n";
     }
     output += serializeMarkdownBlock(block);
   });

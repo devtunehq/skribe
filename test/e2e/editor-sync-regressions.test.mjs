@@ -223,9 +223,10 @@ test("a remote document edit repaints the live editor without a click", async (t
       "(document.querySelector('.editable-document')?.innerText || '').includes('Original body.')"
     );
 
-    // Let the app's EventSource subscription connect before broadcasting, so the
-    // remote edit below isn't missed by a not-yet-open stream.
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    // Wait for the app's EventSource to actually open (the app flags it on the
+    // <html> element) before broadcasting, so the remote edit below can't be
+    // missed by a not-yet-open stream — and we don't race a fixed delay.
+    await waitFor(browser.cdp, "document.documentElement.dataset.eventsConnected === 'true'");
 
     // Focus the block and detach its text node (as real editing does), so a
     // remote edit lands on a reused node whose React fiber is stale.

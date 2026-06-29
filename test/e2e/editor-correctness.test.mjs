@@ -346,14 +346,16 @@ test("Enter mid-paragraph splits it into two blocks", async (t) => {
 });
 
 test("Shift+Enter inserts a line break without creating a new block", async (t) => {
-  await withApp(t, "Line one.\n", async ({ browser }) => {
+  await withApp(t, "Line one.\n", async ({ browser, markdownPath }) => {
     await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 1");
     await caretAtEnd(browser.cdp, "block-0");
     await press(browser.cdp, "Enter", { code: "Enter", keyCode: 13, shiftKey: true });
     await insertText(browser.cdp, "line two");
-    // A soft break keeps it one block even after a re-render.
+    // A soft break keeps it one block even after a re-render. Wait for the edit to
+    // persist (deterministic) rather than sleeping a fixed 400ms, then assert it
+    // stayed a single block.
     await blurCanvas(browser.cdp);
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    await waitForFileText(markdownPath, /line two/);
     assert.equal(await blockCount(browser.cdp), 1);
   });
 });

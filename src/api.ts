@@ -160,8 +160,16 @@ export async function sendAgentMessage(request: AgentMessageRequest): Promise<Do
 
 export function subscribeToDocumentEvents(onDocument: (state: DocumentState) => void) {
   const source = new EventSource("/api/events");
+  // Expose a "stream connected" signal so callers (and e2e tests) can wait for
+  // the subscription to be live instead of racing a fixed delay.
+  source.addEventListener("open", () => {
+    document.documentElement.dataset.eventsConnected = "true";
+  });
   source.addEventListener("document", (event) => {
     onDocument(JSON.parse((event as MessageEvent).data));
   });
-  return () => source.close();
+  return () => {
+    delete document.documentElement.dataset.eventsConnected;
+    source.close();
+  };
 }

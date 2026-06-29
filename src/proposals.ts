@@ -262,11 +262,18 @@ export function buildInlineProposalReview(proposal: DocumentProposal, currentMar
       // source block — so the change card follows its text if the document is
       // edited (blocks inserted/removed above) while the proposal is pending.
       // Fall back to positional matching when the content can't be located.
-      const sourceText = sourceIndex >= 0 ? sourceBlocks[sourceIndex]?.text : undefined;
-      const contentIndex =
-        sourceText && normalizeText(sourceText)
-          ? currentBlocks.findIndex((block) => normalizeText(block.text) === normalizeText(sourceText))
-          : -1;
+      const sourceBlock = sourceIndex >= 0 ? sourceBlocks[sourceIndex] : undefined;
+      const normalizedSource = sourceBlock ? normalizeText(sourceBlock.text) : "";
+      // When the same text appears more than once, anchoring to the first match
+      // would re-point a change for a later duplicate onto the wrong block. Match
+      // on type as well and pick the candidate nearest the source's position.
+      const contentIndex = normalizedSource
+        ? currentBlocks.reduce<number>((best, block, index) => {
+            if (normalizeText(block.text) !== normalizedSource || block.type !== sourceBlock?.type) return best;
+            if (best < 0) return index;
+            return Math.abs(index - sourceIndex) < Math.abs(best - sourceIndex) ? index : best;
+          }, -1)
+        : -1;
       const anchorBlockId =
         contentIndex >= 0
           ? currentSpans[contentIndex]?.id ?? null

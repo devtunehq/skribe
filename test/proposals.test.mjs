@@ -157,3 +157,23 @@ test("proposal status distinguishes open, reviewed, accepted, and rejected state
   assert.equal(resolveProposalStatus(changes, { [first.key]: "accepted", [second.key]: "accepted" }), "accepted");
   assert.equal(resolveProposalStatus(changes, { [first.key]: "rejected", [second.key]: "rejected" }), "rejected");
 });
+
+test("inline proposal anchors a duplicated source block to the nearest occurrence, not the first", () => {
+  // "Repeated." appears twice; the proposal edits the SECOND one. The change must
+  // anchor to that block, not re-point onto the first identical block.
+  const dupOriginal = "# Draft\n\nRepeated.\n\nMiddle.\n\nRepeated.\n\nEnd.\n";
+  const dupReplacement = "# Draft\n\nRepeated.\n\nMiddle.\n\nRepeated changed.\n\nEnd.\n";
+  const proposal = makeProposal({ originalMarkdown: dupOriginal, replacementMarkdown: dupReplacement });
+
+  const review = buildInlineProposalReview(proposal, dupOriginal);
+  const change = review.changes.find((item) => item.additions.join("").includes("Repeated changed"));
+  assert.ok(change, "expected a change for the second 'Repeated.' block");
+
+  const blocks = parseMarkdownBlocks(dupOriginal);
+  const anchorIndex = getMarkdownBlockLineSpans(dupOriginal).findIndex(
+    (span) => span.id === change.anchorBlockId
+  );
+  // Blocks 1 and 3 are both "Repeated."; the edit targets the second (index 3).
+  assert.equal(anchorIndex, 3);
+  assert.equal(blocks[anchorIndex].text.trim(), "Repeated.");
+});

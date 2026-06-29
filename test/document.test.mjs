@@ -15,6 +15,7 @@ import {
   spliceMarkdownPaste,
   updateMarkdownBlock
 } from "../src/document.ts";
+import { getMarkdownBlockLineSpans } from "../src/markdownRanges.ts";
 
 test("an empty document can become editable Markdown through the virtual first block", () => {
   const emptyBlockId = markdownBlockIdFromIndex(0);
@@ -212,4 +213,41 @@ test("markdown paste helpers splice block Markdown into the document", () => {
     "Before\n\n- One\n- Two\n\nAfter\n"
   );
   assert.equal(spliceMarkdownPaste("Before after\n", 7, 7, "**middle** ", false), "Before **middle** after\n");
+});
+
+test("block line spans stay in sync with parseMarkdownBlocks for long code fences", () => {
+  // A 4+-backtick block containing a lone ``` line is one code block; the span
+  // parser must close on the same fence length or its block count diverges and
+  // selection/proposal anchoring drifts.
+  const md = "Before.\n\n````\nline1\n```\nline2\n````\n\nAfter.\n";
+  assert.equal(getMarkdownBlockLineSpans(md).length, parseMarkdownBlocks(md).length);
+});
+
+test("block line spans treat an empty list item as an empty-text block, not a paragraph", () => {
+  const md = "Intro.\n\n- \n\nOutro.\n";
+  const spans = getMarkdownBlockLineSpans(md);
+  assert.equal(spans.length, parseMarkdownBlocks(md).length);
+  // The middle block is an empty list item: its text span is empty, aligned with
+  // the parsed empty block — not the whole "- " line.
+  assert.equal(md.slice(spans[1].textStart, spans[1].textEnd), "");
+});
+
+test("mixed list types are separated by a blank line and round-trip as distinct lists", () => {
+  const md = serializeMarkdownBlocks([
+    { id: "block-0", type: "ordered-list", marker: "1", text: "one" },
+    { id: "block-1", type: "unordered-list", text: "two" }
+  ]);
+  assert.match(md, /1\. one\n\n- two/);
+  const reparsed = parseMarkdownBlocks(md);
+  assert.equal(reparsed.length, 2);
+  assert.equal(reparsed[0].type, "ordered-list");
+  assert.equal(reparsed[1].type, "unordered-list");
+});
+
+test("same-type list items stay tight (single newline)", () => {
+  const md = serializeMarkdownBlocks([
+    { id: "block-0", type: "unordered-list", text: "one" },
+    { id: "block-1", type: "unordered-list", text: "two" }
+  ]);
+  assert.equal(md, "- one\n- two\n");
 });

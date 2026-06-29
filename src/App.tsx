@@ -1185,6 +1185,11 @@ function useSkribeController() {
       const shouldSkipRender = switchedDocument ? false : shouldAvoidDocumentRenderWhileEditing(remote);
       if (switchedDocument) {
         clearPendingEditTimers();
+        // Drop the previous document's reconciled blocks so the new document's
+        // blocks aren't reconciled against stale ids (which could reuse React
+        // keys/refs across documents and surface stale contentEditable DOM).
+        reconciledBlocksRef.current = [];
+        blockIdCounterRef.current = 0;
         undoStackRef.current = [];
         redoStackRef.current = [];
         selectionRangeRef.current = null;
@@ -3230,7 +3235,16 @@ function useSkribeController() {
   // so re-apply it across several animation frames until it holds or the writer
   // types (scheduleLiveCanvasCommit clears the pending request).
   function schedulePendingCaretFlush(attempts = 24) {
-    if (attempts <= 0 || !pendingCaretRef.current) return;
+    if (!pendingCaretRef.current) return;
+    if (attempts <= 0) {
+      // The self-heal window (covering the post-commit save re-render) has
+      // elapsed and the caret has settled. Clear the request so the on-blur
+      // commit isn't skipped forever: otherwise creating an empty block and then
+      // leaving the editor without typing would keep the pending guard set, and
+      // the empty placeholder would never be dropped from the saved Markdown.
+      pendingCaretRef.current = null;
+      return;
+    }
     applyPendingCaret();
     window.requestAnimationFrame(() => schedulePendingCaretFlush(attempts - 1));
   }
