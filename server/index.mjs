@@ -404,6 +404,7 @@ function normalizeConfiguredRuntime(value) {
 
 function normalizeConfiguredModel(value) {
   const model = String(value || "").trim();
+  if (model && model !== "auto" && !/^[a-zA-Z0-9:_.-]+$/.test(model)) return "auto";
   return model || "auto";
 }
 
