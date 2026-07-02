@@ -120,3 +120,28 @@ test("Ctrl+Shift+. turns the active paragraph into a blockquote", async (t) => {
     assert.equal(await readFile(markdownPath, "utf8"), "> hello\n");
   });
 });
+
+test("Ctrl+Alt+C turns the active paragraph into a fenced code block", async (t) => {
+  await withApp(t, "print(1)\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('[data-block-id=\"block-0\"]')");
+    await caretInBlock(browser.cdp, "block-0");
+    await press(browser.cdp, "c", { code: "KeyC", keyCode: 67, ctrlKey: true, altKey: true });
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-code')");
+    await waitForFileText(markdownPath, /```\nprint\(1\)\n```/);
+    assert.equal(await readFile(markdownPath, "utf8"), "```\nprint(1)\n```\n");
+  });
+});
+
+test("typing ``` then Enter opens an empty fenced code block to type into", async (t) => {
+  await withApp(t, "", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('[data-block-id=\"block-0\"]')");
+    await caretInBlock(browser.cdp, "block-0");
+    await insertText(browser.cdp, "```");
+    await press(browser.cdp, "Enter", { code: "Enter", keyCode: 13 });
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-code')");
+    await insertText(browser.cdp, "const x = 1");
+    await waitForFileText(markdownPath, /```\nconst x = 1\n```/);
+    const saved = await readFile(markdownPath, "utf8");
+    assert.match(saved, /^```\nconst x = 1\n```/);
+  });
+});

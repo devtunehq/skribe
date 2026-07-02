@@ -35,6 +35,7 @@ import {
   Send,
   Settings,
   Sparkles,
+  SquareCode,
   Strikethrough,
   Upload,
   X
@@ -3419,6 +3420,43 @@ function useSkribeController() {
     return true;
   }
 
+  // Enter input rule: a paragraph whose whole line is a ``` fence (optionally with
+  // a language) becomes an empty fenced code block with the caret inside. It clears
+  // the ``` text before switching the shape so no bare fence line is ever reparsed
+  // (an unclosed fence would otherwise swallow the rest of the document). Mirrors
+  // updateBlockShape's commit shape, so the virtual first block is handled too.
+  function applyCodeFenceInputRule(blockId: string) {
+    const current = stateRef.current;
+    const node = blockRefs.current[blockId];
+    if (!current || !node) return false;
+    const target = findBlockById(current.markdown, blockId);
+    if (target && target.type !== "paragraph") return false;
+    const fence = blockNodeToMarkdown(node, "paragraph").replace(/​/g, "").trim().match(/^```(\w*)$/);
+    if (!fence) return false;
+    const language = fence[1] || undefined;
+
+    commit((state) => {
+      const positional = positionalBlockId(state.markdown, blockId);
+      const cleared = updateMarkdownBlock(state.markdown, positional, "​");
+      return {
+        ...state,
+        markdown: updateMarkdownBlockShape(cleared, positional, { type: "code", language, level: undefined, marker: undefined }),
+        review: { ...state.review, updatedAt: nowIso() }
+      };
+    }, { resyncDom: true });
+
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+    // A shape change keeps the block's position, so its index is unchanged (the
+    // virtual first block sits at 0).
+    pendingCaretRef.current = { index: Math.max(0, blocksForMarkdown(current.markdown).findIndex((block) => block.id === blockId)), offset: 0 };
+    schedulePendingCaretFlush();
+    return true;
+  }
+
   // Backspace at the very start of a block merges it into the previous block and
   // puts the caret at the join (the end of the previous block's text) — so an
   // empty block is removed and a non-empty one's text is appended. The caret is
@@ -3743,6 +3781,10 @@ function useSkribeController() {
         return;
       }
 
+      // Typing ``` (optionally with a language) on its own line and pressing Enter
+      // opens an empty fenced code block instead of splitting the paragraph.
+      if (applyCodeFenceInputRule(blockId)) return;
+
       // Every other block splits at the caret into a new block immediately.
       if (splitBlockAtCaret()) return;
       // Fallback if the caret can't be resolved: a paragraph break.
@@ -3783,6 +3825,12 @@ function useSkribeController() {
       setActiveBlockId(blockId);
       if (key === "0") changeBlockShape({ type: "paragraph", level: undefined }, blockId);
       else changeBlockShape({ type: "heading", level: Number(key) }, blockId);
+      return;
+    }
+    if (event.altKey && key === "c") {
+      event.preventDefault();
+      setActiveBlockId(blockId);
+      changeBlockShape({ type: "code", level: undefined, marker: undefined }, blockId);
       return;
     }
     if (event.shiftKey && key === "7") {
@@ -4731,6 +4779,9 @@ function CanvasToolbar() {
         <button type="button" title="Quote" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "quote" }); }}>
           <Quote size={16} />
         </button>
+        <button type="button" title="Code block (Ctrl/Cmd+Alt+C)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "code", level: undefined, marker: undefined }); }}>
+          <SquareCode size={16} />
+        </button>
         <span className="toolbar-divider" />
         <button type="button" title="Comment on selected text" onMouseDown={(event) => { event.preventDefault(); startCommentFromSelection(); }}>
           <MessageSquare size={16} />
@@ -4935,6 +4986,7 @@ function SkribeOverlays() {
           activeBlockId={activeBlockId}
           onParagraph={() => updateActiveBlockShape({ type: "paragraph", level: undefined })}
           onHeading={(level) => updateActiveBlockShape({ type: "heading", level })}
+          onCodeBlock={() => updateActiveBlockShape({ type: "code", level: undefined, marker: undefined })}
           onBold={() => applyInlineCommand("bold")}
           onItalic={() => applyInlineCommand("italic")}
           onStrikethrough={() => applyInlineCommand("strikeThrough")}
@@ -5400,6 +5452,7 @@ function FloatingFormatToolbar({
   activeBlockId,
   onParagraph,
   onHeading,
+  onCodeBlock,
   onBold,
   onItalic,
   onStrikethrough,
@@ -5412,6 +5465,7 @@ function FloatingFormatToolbar({
   activeBlockId: string | null;
   onParagraph: () => void;
   onHeading: (level: 1 | 2 | 3) => void;
+  onCodeBlock: () => void;
   onBold: () => void;
   onItalic: () => void;
   onStrikethrough: () => void;
@@ -5438,6 +5492,9 @@ function FloatingFormatToolbar({
       </button>
       <button type="button" title="Heading 3" disabled={!activeBlockId} onMouseDown={keepSelection} onClick={() => onHeading(3)}>
         <Heading3 size={15} />
+      </button>
+      <button type="button" title="Code block" disabled={!activeBlockId} onMouseDown={keepSelection} onClick={onCodeBlock}>
+        <SquareCode size={15} />
       </button>
       <span className="toolbar-divider" />
       <button type="button" title="Bold" onMouseDown={keepSelection} onClick={onBold}>

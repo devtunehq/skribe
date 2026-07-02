@@ -580,7 +580,7 @@ export function updateMarkdownBlock(markdown: string, blockId: string, text: str
 export function updateMarkdownBlockShape(
   markdown: string,
   blockId: string,
-  patch: Partial<Pick<MarkdownBlock, "type" | "level" | "marker">>
+  patch: Partial<Pick<MarkdownBlock, "type" | "level" | "marker" | "language">>
 ) {
   const blocks = parseMarkdownBlocks(markdown);
   return serializeMarkdownBlocks(
