@@ -35,6 +35,7 @@ import {
   Send,
   Settings,
   Sparkles,
+  Strikethrough,
   Upload,
   X
 } from "lucide-react";
@@ -3739,6 +3740,11 @@ function useSkribeController() {
       applyInlineCommand("italic");
       return;
     }
+    if (event.shiftKey && key === "x") {
+      event.preventDefault();
+      applyInlineCommand("strikeThrough");
+      return;
+    }
     if (key === "`") {
       event.preventDefault();
       applyInlineCode();
@@ -4674,6 +4680,9 @@ function CanvasToolbar() {
         <button type="button" title="Italic (Ctrl/Cmd+I)" onMouseDown={(event) => { event.preventDefault(); applyInlineCommand("italic"); }}>
           <Italic size={16} />
         </button>
+        <button type="button" title="Strikethrough (Ctrl/Cmd+Shift+X)" onMouseDown={(event) => { event.preventDefault(); applyInlineCommand("strikeThrough"); }}>
+          <Strikethrough size={16} />
+        </button>
         <button type="button" title="Inline code (Ctrl/Cmd+`)" onMouseDown={(event) => { event.preventDefault(); applyInlineCode(); }}>
           <Code2 size={16} />
         </button>
@@ -4899,6 +4908,7 @@ function SkribeOverlays() {
           onHeading={(level) => updateActiveBlockShape({ type: "heading", level })}
           onBold={() => applyInlineCommand("bold")}
           onItalic={() => applyInlineCommand("italic")}
+          onStrikethrough={() => applyInlineCommand("strikeThrough")}
           onInlineCode={applyInlineCode}
           onLink={openLinkPopover}
           onImage={() => imageInputRef.current?.click()}
@@ -5363,6 +5373,7 @@ function FloatingFormatToolbar({
   onHeading,
   onBold,
   onItalic,
+  onStrikethrough,
   onInlineCode,
   onLink,
   onImage,
@@ -5374,6 +5385,7 @@ function FloatingFormatToolbar({
   onHeading: (level: 1 | 2 | 3) => void;
   onBold: () => void;
   onItalic: () => void;
+  onStrikethrough: () => void;
   onInlineCode: () => void;
   onLink: () => void;
   onImage: () => void;
@@ -5404,6 +5416,9 @@ function FloatingFormatToolbar({
       </button>
       <button type="button" title="Italic" onMouseDown={keepSelection} onClick={onItalic}>
         <Italic size={15} />
+      </button>
+      <button type="button" title="Strikethrough" onMouseDown={keepSelection} onClick={onStrikethrough}>
+        <Strikethrough size={15} />
       </button>
       <button type="button" title="Inline code" onMouseDown={keepSelection} onClick={onInlineCode}>
         <Code2 size={15} />
