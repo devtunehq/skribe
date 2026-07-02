@@ -3052,6 +3052,34 @@ function useSkribeController() {
     liveEditHistoryActiveRef.current = false;
   }
 
+  // Flip a task-list item between done and not-done. Mirrors updateBlockShape:
+  // captures the item's live text first so an in-progress edit isn't lost, then
+  // commits the new checked state and remounts.
+  function toggleTaskListItem(blockId: string) {
+    const current = stateRef.current;
+    if (!current) return;
+    const block = findBlockById(current.markdown, blockId);
+    if (!block || block.type !== "unordered-list" || block.checked === undefined) return;
+    const node = blockRefs.current[blockId];
+    const latestText = node ? blockNodeToMarkdown(node, block.type) : null;
+
+    commit((state) => {
+      const positional = positionalBlockId(state.markdown, blockId);
+      const withText = latestText !== null ? updateMarkdownBlock(state.markdown, positional, latestText) : state.markdown;
+      return {
+        ...state,
+        markdown: updateMarkdownBlockShape(withText, positional, { checked: !block.checked }),
+        review: { ...state.review, updatedAt: nowIso() }
+      };
+    }, { resyncDom: true });
+
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+  }
+
   // The stable ids of every block the current selection touches, top to bottom.
   // A collapsed caret yields the single block it sits in; a drag across blocks
   // yields all of them — so formatting can apply to a whole multi-block range.
@@ -3359,12 +3387,13 @@ function useSkribeController() {
     if (!range.collapsed || !canvasRef.current.contains(range.startContainer)) return false;
 
     // Cheap pre-check so the whole-canvas serialize below only runs when the caret
-    // could actually sit right after a block prefix ("1." / "-" / "*" / "#" / ">").
+    // could actually sit right after a block prefix ("1." / "-" / "*" / "#" / ">" /
+    // a task box "[ ]" ending in "]").
     const prevChar =
       range.startContainer.nodeType === Node.TEXT_NODE && range.startOffset > 0
         ? range.startContainer.textContent?.[range.startOffset - 1]
         : "";
-    if (prevChar !== "." && prevChar !== "-" && prevChar !== "*" && prevChar !== "#" && prevChar !== ">") return false;
+    if (!prevChar || !".-*#>]".includes(prevChar)) return false;
 
     const sentinel = "\ue000";
     const marker = document.createTextNode(sentinel);
@@ -3396,8 +3425,14 @@ function useSkribeController() {
     // already produced a quote block with the caret at its start; the rule just
     // consumes the triggering space and re-commits it as a real quote.
     const quote = prevChar === ">" && target.type === "quote" && before === "";
+    // "[ ]" / "[x]" (empty brackets allowed) makes a task-list item, from either a
+    // paragraph or the empty text of a bullet just created by the "- " rule.
+    const task =
+      prevChar === "]" && (isParagraph || target.type === "unordered-list")
+        ? before.match(/^\[([ xX]?)\]$/)
+        : null;
 
-    if (!ordered && !heading && !unordered && !quote) return false;
+    if (!ordered && !heading && !unordered && !quote && !task) return false;
 
     const cleaned = parsed.map((block) => ({ ...block, text: block.text.split(sentinel).join("") }));
     const nextText = after || "\u200b";
@@ -3406,6 +3441,8 @@ function useSkribeController() {
       converted = { ...cleaned[index], type: "ordered-list", marker: ordered[1], level: undefined, text: nextText };
     } else if (heading) {
       converted = { ...cleaned[index], type: "heading", marker: undefined, level: heading[1].length, text: nextText };
+    } else if (task) {
+      converted = { ...cleaned[index], type: "unordered-list", marker: undefined, level: undefined, checked: task[1].toLowerCase() === "x", text: nextText };
     } else if (unordered) {
       converted = { ...cleaned[index], type: "unordered-list", marker: undefined, level: undefined, text: nextText };
     } else if (quote) {
@@ -4195,6 +4232,7 @@ function useSkribeController() {
     restoreRevision,
     updateActiveBlockShape,
     insertThematicBreakAfterBlock,
+    toggleTaskListItem,
     applyInlineCommand,
     applyInlineCode,
     openLinkPopover,
@@ -4741,7 +4779,8 @@ function CenterPane() {
     updateCanvasBlock,
     updateFloatingToolbarPosition,
     updateProposalChangeDecision,
-    updateProposalStatus
+    updateProposalStatus,
+    toggleTaskListItem
   } = useSkribeControllerContext();
 
   if (!documentState) return null;
@@ -4803,6 +4842,7 @@ function CenterPane() {
           onDocumentInput={scheduleLiveCanvasCommit}
           onMoveBlock={moveCanvasBlock}
           onDeleteBlock={deleteCanvasBlock}
+          onToggleTask={toggleTaskListItem}
           onProposalChangeDecision={updateProposalChangeDecision}
           onRequestProposalRevision={requestProposalRevision}
           onTableImageExported={notifyTableImageExported}
@@ -5534,6 +5574,7 @@ interface MarkdownCanvasProps {
   onDocumentInput: () => void;
   onMoveBlock: (blockId: string, targetBlockId: string, placement: BlockDropPlacement) => void;
   onDeleteBlock: (blockId: string) => void;
+  onToggleTask: (blockId: string) => void;
   onProposalChangeDecision: (proposalId: string, changeKey: string, decision: ProposalChangeDecision) => void;
   onRequestProposalRevision: (proposalId: string, change: ProposalChangeBlock, instruction: string) => void;
   onTableImageExported: (status: "success" | "error") => void;
@@ -5703,6 +5744,7 @@ function EditableMarkdownCanvas({
   onDocumentInput,
   onMoveBlock,
   onDeleteBlock,
+  onToggleTask,
   onProposalChangeDecision,
   onRequestProposalRevision,
   onTableImageExported
@@ -5895,6 +5937,7 @@ function EditableMarkdownCanvas({
                   onShortcut={onShortcut}
                   onCommitDocument={onCommitDocument}
                   onDocumentInput={onDocumentInput}
+                  onToggleTask={onToggleTask}
                   onTableImageExported={onTableImageExported}
                 />
               </EditableBlockShell>
@@ -5996,6 +6039,7 @@ interface EditableBlockProps {
   onShortcut: (event: React.KeyboardEvent<HTMLElement>, blockId: string) => void;
   onCommitDocument: () => void;
   onDocumentInput: () => void;
+  onToggleTask: (blockId: string) => void;
   onTableImageExported: (status: "success" | "error") => void;
 }
 
@@ -6013,6 +6057,7 @@ const EditableBlock = React.memo(function EditableBlock({
   onShortcut,
   onCommitDocument,
   onDocumentInput,
+  onToggleTask,
   onTableImageExported
 }: EditableBlockProps) {
   const editableRef = useRef<HTMLElement | null>(null);
@@ -6076,9 +6121,25 @@ const EditableBlock = React.memo(function EditableBlock({
   }
 
   if (block.type === "ordered-list" || block.type === "unordered-list") {
+    const isTask = block.type === "unordered-list" && block.checked !== undefined;
     return (
-      <div className={`editable-list-row ${block.type}`}>
-        <span className="editable-list-marker">{block.type === "ordered-list" ? `${block.marker ?? "1"}.` : "-"}</span>
+      <div className={`editable-list-row ${block.type}${isTask ? " task" : ""}${isTask && block.checked ? " checked" : ""}`}>
+        {isTask ? (
+          <button
+            type="button"
+            className="editable-task-checkbox"
+            role="checkbox"
+            aria-checked={block.checked}
+            aria-label={block.checked ? "Mark task not done" : "Mark task done"}
+            contentEditable={false}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => onToggleTask(block.id)}
+          >
+            {block.checked ? <Check size={13} /> : null}
+          </button>
+        ) : (
+          <span className="editable-list-marker">{block.type === "ordered-list" ? `${block.marker ?? "1"}.` : "-"}</span>
+        )}
         <div {...editableProps}>{children}</div>
       </div>
     );
@@ -6296,6 +6357,7 @@ function areEditableBlockPropsEqual(previous: EditableBlockProps, next: Editable
     previous.block.level === next.block.level &&
     previous.block.marker === next.block.marker &&
     previous.block.language === next.block.language &&
+    previous.block.checked === next.block.checked &&
     previous.onTableImageExported === next.onTableImageExported &&
     threadsRenderKey(previous.threads) === threadsRenderKey(next.threads)
   );

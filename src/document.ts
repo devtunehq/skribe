@@ -18,6 +18,9 @@ export interface MarkdownBlock {
   level?: number;
   marker?: string;
   language?: string;
+  // Set only on task-list items (an unordered item written as `- [ ]` / `- [x]`);
+  // undefined on every other unordered item, which keeps plain bullets bullets.
+  checked?: boolean;
 }
 
 export interface MarkdownImage {
@@ -34,6 +37,7 @@ function markdownBlockSignature(block: MarkdownBlockIdentity) {
     block.level ?? "",
     block.marker ?? "",
     block.language ?? "",
+    block.checked === undefined ? "" : block.checked ? "checked" : "unchecked",
     block.text.replace(/\s+/g, " ").trim()
   ].join("\u001f");
 }
@@ -450,9 +454,14 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
     const unordered = trimmed.match(/^[-*](?:\s+(.*))?$/);
     if (unordered) {
       flushParagraph();
+      const itemText = unordered[1] ?? "";
+      // A `[ ]` / `[x]` prefix (a space or letter needs to follow, per GFM) makes
+      // this a task-list item: strip the box from the text and record its state.
+      const task = itemText.match(/^\[([ xX])\](?:\s+(.*))?$/);
       pushBlock({
         type: "unordered-list",
-        text: unordered[1] ?? ""
+        text: task ? task[2] ?? "" : itemText,
+        checked: task ? task[1].toLowerCase() === "x" : undefined
       });
       continue;
     }
@@ -496,7 +505,8 @@ function serializeMarkdownBlock(block: MarkdownBlock) {
     return listItemLines(text).map((line) => `${block.marker ?? "1"}. ${line}`).join("\n");
   }
   if (block.type === "unordered-list") {
-    return listItemLines(text).map((line) => `- ${line}`).join("\n");
+    const box = block.checked === undefined ? "" : block.checked ? "[x] " : "[ ] ";
+    return listItemLines(text).map((line) => `- ${box}${line}`).join("\n");
   }
   if (block.type === "quote") return text.split("\n").map((line) => `> ${line}`).join("\n");
   if (block.type === "thematic-break") return "---";
@@ -596,7 +606,7 @@ export function updateMarkdownBlock(markdown: string, blockId: string, text: str
 export function updateMarkdownBlockShape(
   markdown: string,
   blockId: string,
-  patch: Partial<Pick<MarkdownBlock, "type" | "level" | "marker" | "language">>
+  patch: Partial<Pick<MarkdownBlock, "type" | "level" | "marker" | "language" | "checked">>
 ) {
   const blocks = parseMarkdownBlocks(markdown);
   return serializeMarkdownBlocks(

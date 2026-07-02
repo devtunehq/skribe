@@ -1935,6 +1935,31 @@ button {
   text-align: right;
 }
 
+.editable-task-checkbox {
+  justify-self: end;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1.5px solid var(--line-ink);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--paper);
+  cursor: pointer;
+}
+
+.editable-list-row.task.checked .editable-task-checkbox {
+  background: var(--sky-blue);
+  border-color: var(--sky-blue);
+}
+
+.editable-list-row.task.checked .editable-text {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
 .editable-quote {
   max-width: 720px;
 }

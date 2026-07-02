@@ -159,6 +159,31 @@ test("typing --- then Enter inserts a horizontal rule with a paragraph below it"
   });
 });
 
+test("typing '[ ] ' at the start of a paragraph makes a task-list item", async (t) => {
+  await withApp(t, "buy milk\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('[data-block-id=\"block-0\"]')");
+    await caretAtStart(browser.cdp, "block-0");
+    await insertText(browser.cdp, "[ ]");
+    await press(browser.cdp, " ", { code: "Space", keyCode: 32 });
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-task-checkbox')");
+    await waitForFileText(markdownPath, /^- \[ \] buy milk/);
+    assert.equal(await readFile(markdownPath, "utf8"), "- [ ] buy milk\n");
+  });
+});
+
+test("clicking a task checkbox toggles it in the file", async (t) => {
+  await withApp(t, "- [ ] ship it\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-task-checkbox')");
+    await evaluate(browser.cdp, "document.querySelector('.editable-task-checkbox').click()");
+    await waitForFileText(markdownPath, /^- \[x\] ship it/);
+    assert.equal(await readFile(markdownPath, "utf8"), "- [x] ship it\n");
+    // Toggling back returns it to unchecked.
+    await evaluate(browser.cdp, "document.querySelector('.editable-task-checkbox').click()");
+    await waitForFileText(markdownPath, /^- \[ \] ship it/);
+    assert.equal(await readFile(markdownPath, "utf8"), "- [ ] ship it\n");
+  });
+});
+
 test("a horizontal rule from the file renders and can be deleted with Backspace", async (t) => {
   await withApp(t, "above\n\n---\n\nbelow\n", async ({ browser, markdownPath }) => {
     await waitFor(browser.cdp, "!!document.querySelector('.editable-thematic-break')");

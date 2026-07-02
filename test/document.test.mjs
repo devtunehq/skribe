@@ -53,6 +53,34 @@ test("empty list items round-trip so a freshly split item survives", () => {
   assert.equal(parseMarkdownBlocks("*emphasis*")[0].type, "paragraph");
 });
 
+test("task list items parse, serialize and stay lockstep with plain bullets", () => {
+  const blocks = parseMarkdownBlocks("- [ ] todo\n- [x] done\n- plain");
+  assert.deepEqual(
+    blocks.map((block) => [block.type, block.checked, block.text]),
+    [
+      ["unordered-list", false, "todo"],
+      ["unordered-list", true, "done"],
+      ["unordered-list", undefined, "plain"]
+    ]
+  );
+  // Round-trips: the box is re-emitted for task items, omitted for plain bullets.
+  assert.equal(serializeMarkdownBlocks(blocks), "- [ ] todo\n- [x] done\n- plain\n");
+
+  // A box needs a following space to count; "[x]done" stays a plain bullet.
+  assert.equal(parseMarkdownBlocks("- [x]done")[0].checked, undefined);
+
+  // The two scanners still emit one span per parsed block.
+  const md = "- [ ] a\n- [x] b\n- c";
+  assert.equal(getMarkdownBlockLineSpans(md).length, parseMarkdownBlocks(md).length);
+
+  // Toggling only the checked state keeps the block's stable id (signature-aware).
+  const previous = parseMarkdownBlocks("- [ ] task");
+  const toggled = parseMarkdownBlocks("- [x] task");
+  const reconciled = reconcileBlockIds(previous, toggled, () => "fresh");
+  assert.equal(reconciled[0].id, previous[0].id);
+  assert.equal(reconciled[0].checked, true);
+});
+
 test("horizontal rules parse, serialize and keep the two block scanners in lockstep", () => {
   // ---, *** and ___ are thematic breaks; all serialize back to a canonical ---.
   for (const rule of ["---", "***", "___", "-----"]) {

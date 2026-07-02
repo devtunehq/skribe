@@ -178,7 +178,11 @@ export function getMarkdownBlockLineSpans(markdown: string): MarkdownBlockLineSp
         const start = text ? textOffset(index, text) : lineEnd(index);
         pushSpan({ type: "ordered-list", marker: ordered[1], text }, index + 1, index + 1, start, start + text.length);
       } else if (unordered) {
-        const text = unordered[1] ?? "";
+        // Strip a `[ ]` / `[x]` task box so the span's text offset lands on the
+        // visible text, matching the stripped block.text parseMarkdownBlocks emits.
+        const itemText = unordered[1] ?? "";
+        const task = itemText.match(/^\[([ xX])\](?:\s+(.*))?$/);
+        const text = task ? task[2] ?? "" : itemText;
         const start = text ? textOffset(index, text) : lineEnd(index);
         pushSpan({ type: "unordered-list", text }, index + 1, index + 1, start, start + text.length);
       } else if (quote) {
