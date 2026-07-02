@@ -2532,12 +2532,10 @@ function useSkribeController() {
     // these otherwise live in the per-block handler, which doesn't fire because a
     // custom selection moves focus to the canvas. changeBlockShape reads the
     // selection draft and converts every block it covers.
-    if (isCommand && event.altKey && ["0", "1", "2", "3"].includes(key)) {
+    if (isCommand && event.altKey && ["0", "1", "2", "3", "4", "5", "6"].includes(key)) {
       event.preventDefault();
       if (key === "0") changeBlockShape({ type: "paragraph", level: undefined });
-      if (key === "1") changeBlockShape({ type: "heading", level: 1 });
-      if (key === "2") changeBlockShape({ type: "heading", level: 2 });
-      if (key === "3") changeBlockShape({ type: "heading", level: 3 });
+      else changeBlockShape({ type: "heading", level: Number(key) });
       return;
     }
     if (isCommand && event.shiftKey && key === "7") {
@@ -2548,6 +2546,12 @@ function useSkribeController() {
     if (isCommand && event.shiftKey && key === "8") {
       event.preventDefault();
       changeBlockShape({ type: "unordered-list" });
+      return;
+    }
+    // Ctrl/Cmd+Shift+. (reports as ">" under Shift on many layouts) — blockquote.
+    if (isCommand && event.shiftKey && (key === "." || key === ">")) {
+      event.preventDefault();
+      changeBlockShape({ type: "quote" });
       return;
     }
     if (event.key === "Backspace" || event.key === "Delete") {
@@ -3329,13 +3333,13 @@ function useSkribeController() {
     return true;
   }
 
-  // Markdown input rule: typing a list prefix at the very start of a paragraph
-  // ("1. ", "- ", "* ") turns it into a list item right away. Called on the space
-  // keypress (before the space is inserted); returns true when it converts, so
-  // the caller consumes the space. The caret block is found with the same
-  // whole-canvas sentinel as splitBlockAtCaret, so "start of paragraph" is correct
-  // even when one DOM shell holds several logical blocks.
-  function applyListInputRule() {
+  // Markdown input rule: typing a block prefix at the very start of a paragraph
+  // ("1. ", "- ", "* ", "# "…"###### ", "> ") turns it into that block right away.
+  // Called on the space keypress (before the space is inserted); returns true when
+  // it converts, so the caller consumes the space. The caret block is found with the
+  // same whole-canvas sentinel as splitBlockAtCaret, so "start of paragraph" is
+  // correct even when one DOM shell holds several logical blocks.
+  function applyTypeInputRule() {
     const current = stateRef.current;
     const selection = window.getSelection();
     if (!current || !selection || selection.rangeCount === 0 || !canvasRef.current) return false;
@@ -3344,12 +3348,12 @@ function useSkribeController() {
     if (!range.collapsed || !canvasRef.current.contains(range.startContainer)) return false;
 
     // Cheap pre-check so the whole-canvas serialize below only runs when the caret
-    // could actually sit right after a list prefix ("1." / "-" / "*").
+    // could actually sit right after a block prefix ("1." / "-" / "*" / "#" / ">").
     const prevChar =
       range.startContainer.nodeType === Node.TEXT_NODE && range.startOffset > 0
         ? range.startContainer.textContent?.[range.startOffset - 1]
         : "";
-    if (prevChar !== "." && prevChar !== "-" && prevChar !== "*") return false;
+    if (prevChar !== "." && prevChar !== "-" && prevChar !== "*" && prevChar !== "#" && prevChar !== ">") return false;
 
     const sentinel = "\ue000";
     const marker = document.createTextNode(sentinel);
@@ -3366,20 +3370,38 @@ function useSkribeController() {
     const index = parsed.findIndex((block) => block.text.includes(sentinel));
     if (index < 0) return false;
     const target = parsed[index];
-    if (target.type !== "paragraph") return false;
     const at = target.text.indexOf(sentinel);
     const before = target.text.slice(0, at).replace(/\u200b/g, "");
     const after = target.text.slice(at + sentinel.length).replace(/\u200b/g, "");
 
-    const ordered = before.match(/^(\d+)\.$/);
-    const unordered = /^[-*]$/.test(before);
-    if (!ordered && !unordered) return false;
+    // The ordered/unordered/heading prefixes only match when the block is still a
+    // paragraph (their markers don't parse as a block without the trailing space
+    // the writer is about to type).
+    const isParagraph = target.type === "paragraph";
+    const ordered = isParagraph ? before.match(/^(\d+)\.$/) : null;
+    const heading = isParagraph ? before.match(/^(#{1,6})$/) : null;
+    const unordered = isParagraph && /^[-*]$/.test(before);
+    // ">" needs no trailing space to parse as a quote, so parseMarkdownBlocks has
+    // already produced a quote block with the caret at its start; the rule just
+    // consumes the triggering space and re-commits it as a real quote.
+    const quote = prevChar === ">" && target.type === "quote" && before === "";
+
+    if (!ordered && !heading && !unordered && !quote) return false;
 
     const cleaned = parsed.map((block) => ({ ...block, text: block.text.split(sentinel).join("") }));
-    const itemText = after || "\u200b";
-    const converted = ordered
-      ? { ...cleaned[index], type: "ordered-list" as const, marker: ordered[1], level: undefined, text: itemText }
-      : { ...cleaned[index], type: "unordered-list" as const, marker: undefined, level: undefined, text: itemText };
+    const nextText = after || "\u200b";
+    let converted: (typeof parsed)[number];
+    if (ordered) {
+      converted = { ...cleaned[index], type: "ordered-list", marker: ordered[1], level: undefined, text: nextText };
+    } else if (heading) {
+      converted = { ...cleaned[index], type: "heading", marker: undefined, level: heading[1].length, text: nextText };
+    } else if (unordered) {
+      converted = { ...cleaned[index], type: "unordered-list", marker: undefined, level: undefined, text: nextText };
+    } else if (quote) {
+      converted = { ...cleaned[index], type: "quote", marker: undefined, level: undefined, text: nextText };
+    } else {
+      return false;
+    }
     const nextBlocks = [...cleaned.slice(0, index), converted, ...cleaned.slice(index + 1)];
     const markdown = serializeMarkdownBlocks(nextBlocks);
 
@@ -3677,8 +3699,9 @@ function useSkribeController() {
       }
     }
 
-    // Typing a list prefix ("1. ", "- ", "* ") at the start of a paragraph turns
-    // it into a list item; the space that triggers the rule is consumed.
+    // Typing a block prefix ("1. ", "- ", "* ", "# ", "> ") at the start of a
+    // paragraph turns it into that block; the space that triggers the rule is
+    // consumed.
     if (
       event.key === " " &&
       !event.metaKey &&
@@ -3687,7 +3710,7 @@ function useSkribeController() {
       !event.shiftKey &&
       !event.nativeEvent.isComposing
     ) {
-      if (applyListInputRule()) {
+      if (applyTypeInputRule()) {
         event.preventDefault();
         return;
       }
@@ -3755,13 +3778,11 @@ function useSkribeController() {
       openLinkPopover();
       return;
     }
-    if (event.altKey && ["0", "1", "2", "3"].includes(key)) {
+    if (event.altKey && ["0", "1", "2", "3", "4", "5", "6"].includes(key)) {
       event.preventDefault();
       setActiveBlockId(blockId);
       if (key === "0") changeBlockShape({ type: "paragraph", level: undefined }, blockId);
-      if (key === "1") changeBlockShape({ type: "heading", level: 1 }, blockId);
-      if (key === "2") changeBlockShape({ type: "heading", level: 2 }, blockId);
-      if (key === "3") changeBlockShape({ type: "heading", level: 3 }, blockId);
+      else changeBlockShape({ type: "heading", level: Number(key) }, blockId);
       return;
     }
     if (event.shiftKey && key === "7") {
@@ -3774,6 +3795,14 @@ function useSkribeController() {
       event.preventDefault();
       setActiveBlockId(blockId);
       changeBlockShape({ type: "unordered-list" }, blockId);
+      return;
+    }
+    // Ctrl/Cmd+Shift+. — the "." key reports as ">" under Shift on many layouts,
+    // so accept either.
+    if (event.shiftKey && (key === "." || key === ">")) {
+      event.preventDefault();
+      setActiveBlockId(blockId);
+      changeBlockShape({ type: "quote" }, blockId);
     }
   }
 
