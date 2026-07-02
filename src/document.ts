@@ -224,6 +224,28 @@ function renderedMarkdownCharacters(markdown: string) {
       continue;
     }
 
+    // An autolink <https://…> renders the URL as its visible text; map its
+    // characters like a link label so the angle brackets don't shift offsets.
+    const autolinkMatch = markdown.slice(index).match(/^<((?:https?|mailto):[^>\s]+)>/);
+    if (autolinkMatch) {
+      const url = autolinkMatch[1];
+      const labelStart = index + 1;
+      const labelEnd = labelStart + url.length;
+      const linkEnd = index + autolinkMatch[0].length;
+      for (let offset = 0; offset < url.length; offset += 1) {
+        characters.push({
+          value: url[offset],
+          sourceIndex: labelStart + offset,
+          linkStart: index,
+          linkEnd,
+          linkLabelStart: labelStart,
+          linkLabelEnd: labelEnd
+        });
+      }
+      index = linkEnd - 1;
+      continue;
+    }
+
     const twoCharacterMarker = markdown.slice(index, index + 2);
     if (twoCharacterMarker === "**" || twoCharacterMarker === "__" || twoCharacterMarker === "~~") {
       index += 1;
@@ -551,6 +573,7 @@ export function looksLikeMarkdownPaste(value: string) {
     /^\s*>\s+\S/m.test(text) ||
     /\|.+\|\s*\n\s*\|?\s*:?-{3,}:?\s*(?:\||$)/m.test(text) ||
     /\[[^\]\n]+\]\([^)]+\)/.test(text) ||
+    /<(?:https?|mailto):[^>\s]+>/.test(text) ||
     /(?:\*\*|__)[^*_]+(?:\*\*|__)/.test(text) ||
     /`[^`\n]+`/.test(text) ||
     /\n\s*\n/.test(text)

@@ -184,6 +184,19 @@ test("clicking a task checkbox toggles it in the file", async (t) => {
   });
 });
 
+test("an autolink renders as a link showing the URL without the angle brackets", async (t) => {
+  await withApp(t, "see <https://example.com> now\n", async ({ browser }) => {
+    await waitFor(
+      browser.cdp,
+      "document.querySelector('.editable-document a')?.getAttribute('href') === 'https://example.com'"
+    );
+    await waitFor(
+      browser.cdp,
+      "document.querySelector('.editable-document a')?.textContent === 'https://example.com'"
+    );
+  });
+});
+
 test("a horizontal rule from the file renders and can be deleted with Backspace", async (t) => {
   await withApp(t, "above\n\n---\n\nbelow\n", async ({ browser, markdownPath }) => {
     await waitFor(browser.cdp, "!!document.querySelector('.editable-thematic-break')");

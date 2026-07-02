@@ -15,7 +15,7 @@ import {
   spliceMarkdownPaste,
   updateMarkdownBlock
 } from "../src/document.ts";
-import { getMarkdownBlockLineSpans } from "../src/markdownRanges.ts";
+import { getMarkdownBlockLineSpans, visibleMarkdownCharacters } from "../src/markdownRanges.ts";
 
 test("an empty document can become editable Markdown through the virtual first block", () => {
   const emptyBlockId = markdownBlockIdFromIndex(0);
@@ -51,6 +51,21 @@ test("empty list items round-trip so a freshly split item survives", () => {
   assert.equal(parseMarkdownBlocks("-")[0].type, "unordered-list");
   assert.equal(parseMarkdownBlocks("-nope")[0].type, "paragraph");
   assert.equal(parseMarkdownBlocks("*emphasis*")[0].type, "paragraph");
+});
+
+test("autolinks map to visible URL characters with the angle brackets hidden", () => {
+  // The rendered text of `<https://x.co>` is the URL itself; the < and > are hidden,
+  // so the visible-character map must skip them or caret/anchor offsets drift.
+  const chars = visibleMarkdownCharacters("go <https://x.co> now");
+  const visible = chars.map((c) => "go <https://x.co> now"[c.sourceIndex]).join("");
+  assert.equal(visible, "go https://x.co now");
+  // The URL characters carry link metadata (so selecting them maps to the whole
+  // <…> source range), and the brackets contribute no visible characters.
+  const urlChar = chars.find((c) => c.sourceIndex === 4); // 'h' of https
+  assert.equal(urlChar.linkStart, 3); // the '<'
+  assert.equal(urlChar.linkEnd, 17); // just past the '>'
+
+  assert.ok(looksLikeMarkdownPaste("Docs at <https://example.com>"));
 });
 
 test("task list items parse, serialize and stay lockstep with plain bullets", () => {

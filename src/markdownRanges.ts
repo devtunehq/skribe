@@ -202,6 +202,7 @@ export function getMarkdownBlockLineSpans(markdown: string): MarkdownBlockLineSp
 export function renderedMarkdownSnippet(markdown: string) {
   return markdown
     .replace(/\[([^\]\n]+)\]\([^)]+\)/g, "$1")
+    .replace(/<((?:https?|mailto):[^>\s]+)>/g, "$1")
     .replace(/(^|\n)\s{0,3}#{1,6}\s+/g, " ")
     .replace(/(^|\n)\s*(?:[-*]|\d+\.)\s+/g, " ")
     .replace(/(^|\n)\s*>\s?/g, " ")
@@ -227,6 +228,27 @@ export function visibleMarkdownCharacters(markdown: string) {
       const labelEnd = labelStart + label.length;
       const linkEnd = index + linkMatch[0].length;
       for (let offset = 0; offset < label.length; offset += 1) {
+        characters.push({
+          sourceIndex: labelStart + offset,
+          linkStart: index,
+          linkEnd,
+          linkLabelStart: labelStart,
+          linkLabelEnd: labelEnd
+        });
+      }
+      index = linkEnd - 1;
+      continue;
+    }
+
+    // An autolink <https://…> shows the URL as its own visible text, so map the URL
+    // characters like a link label and hide the surrounding angle brackets.
+    const autolinkMatch = markdown.slice(index).match(/^<((?:https?|mailto):[^>\s]+)>/);
+    if (autolinkMatch) {
+      const url = autolinkMatch[1];
+      const labelStart = index + 1;
+      const labelEnd = labelStart + url.length;
+      const linkEnd = index + autolinkMatch[0].length;
+      for (let offset = 0; offset < url.length; offset += 1) {
         characters.push({
           sourceIndex: labelStart + offset,
           linkStart: index,

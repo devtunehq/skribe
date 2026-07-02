@@ -780,7 +780,7 @@ function markdownToClipboardText(markdown: string) {
 }
 
 const inlineMarkdownPattern =
-  /`([^`]+)`|\[([^\]\n]+)\]\(([^)\s]+)\)|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|\*([^*]+)\*|_([^_]+)_|\n/g;
+  /`([^`]+)`|\[([^\]\n]+)\]\(([^)\s]+)\)|<((?:https?|mailto):[^>\s]+)>|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|\*([^*]+)\*|_([^_]+)_|\n/g;
 
 function safeRenderedMarkdownHref(href: string) {
   const trimmed = href.trim();
@@ -801,7 +801,7 @@ function inlineMarkdownNodes(markdown: string, keyPrefix = "inline") {
     const start = match.index ?? 0;
     if (start > cursor) nodes.push(markdown.slice(cursor, start));
 
-    const [raw, code, linkLabel, linkHref, boldAsterisk, boldUnderscore, strike, italicAsterisk, italicUnderscore] = match;
+    const [raw, code, linkLabel, linkHref, autolink, boldAsterisk, boldUnderscore, strike, italicAsterisk, italicUnderscore] = match;
     const nodeKey = `${keyPrefix}-${key++}`;
 
     if (code !== undefined) {
@@ -812,6 +812,18 @@ function inlineMarkdownNodes(markdown: string, keyPrefix = "inline") {
         safeHref ? (
           <a key={nodeKey} href={safeHref} target="_blank" rel="noreferrer">
             {linkLabel}
+          </a>
+        ) : (
+          raw
+        )
+      );
+    } else if (autolink !== undefined) {
+      // An autolink shows the URL itself as the link text (the <> are hidden).
+      const safeHref = safeRenderedMarkdownHref(autolink);
+      nodes.push(
+        safeHref ? (
+          <a key={nodeKey} href={safeHref} target="_blank" rel="noreferrer">
+            {autolink}
           </a>
         ) : (
           raw
