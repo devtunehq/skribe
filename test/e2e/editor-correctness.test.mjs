@@ -377,8 +377,15 @@ test("an image block is not a dead end: Enter adds a paragraph, Backspace delete
       "P"
     );
 
-    // Focus the image again and press Backspace -> the image is removed.
+    // Focus the image again and press Backspace -> the image is removed. Wait until
+    // the image actually holds focus before the keypress: the Enter above schedules
+    // an async caret flush into the new paragraph that can otherwise steal focus back
+    // between focus() and Backspace (a flaky race, worse on slow CI).
     await evaluate(browser.cdp, "document.querySelector('.editable-image-block')?.focus()");
+    await waitFor(
+      browser.cdp,
+      "document.activeElement === document.querySelector('.editable-image-block')"
+    );
     await press(browser.cdp, "Backspace", { code: "Backspace", keyCode: 8 });
     await waitFor(browser.cdp, "!document.querySelector('.editable-image-block')");
   });

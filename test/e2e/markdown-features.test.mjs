@@ -147,6 +147,26 @@ test("typing ``` then Enter opens an empty fenced code block to type into", asyn
   });
 });
 
+test("a bare ``` fence left to auto-save still closes cleanly on Enter (no swallow)", async (t) => {
+  // Regression: if the 1200ms live-save debounce fires while a bare ``` line sits
+  // in a paragraph, the model reparses it into an unclosed fence. Pressing Enter
+  // must still convert it to a closed, empty code block without eating "keep".
+  await withApp(t, "​\n\nkeep\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-document [data-block-id]').length === 2");
+    await caretInBlock(browser.cdp, "block-0");
+    await insertText(browser.cdp, "```");
+    await new Promise((resolve) => setTimeout(resolve, 1400)); // past the live-save debounce
+    await press(browser.cdp, "Enter", { code: "Enter", keyCode: 13 });
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-code')");
+    // Type into the new code block so it persists, then confirm "keep" stayed a
+    // separate block after a *closed* fence rather than being swallowed.
+    await insertText(browser.cdp, "code");
+    await waitForFileText(markdownPath, /```[\s\S]*?code[\s\S]*?```/);
+    const saved = await readFile(markdownPath, "utf8");
+    assert.match(saved, /```[\s\S]*?code[\s\S]*?```[\s\S]*keep/);
+  });
+});
+
 test("typing --- then Enter inserts a horizontal rule with a paragraph below it", async (t) => {
   await withApp(t, "", async ({ browser, markdownPath }) => {
     await waitFor(browser.cdp, "!!document.querySelector('[data-block-id=\"block-0\"]')");

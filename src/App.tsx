@@ -3495,38 +3495,52 @@ function useSkribeController() {
   }
 
   // Enter input rule: a paragraph whose whole line is a ``` fence (optionally with
-  // a language) becomes an empty fenced code block with the caret inside. It clears
-  // the ``` text before switching the shape so no bare fence line is ever reparsed
-  // (an unclosed fence would otherwise swallow the rest of the document). Mirrors
-  // updateBlockShape's commit shape, so the virtual first block is handled too.
+  // a language) becomes an empty fenced code block with the caret inside.
+  //
+  // It rebuilds from the on-screen block structure (reconciledBlocksRef) + live DOM
+  // text, NOT from a reparse of stateRef.markdown: once the 1200ms live-save debounce
+  // has run, the model already contains a bare ``` line that reparses into an
+  // unclosed fence swallowing the following blocks. The rendered blocks stay intact
+  // through that save (renderSavedState:false), so they are the reliable source.
   function applyCodeFenceInputRule(blockId: string) {
     const current = stateRef.current;
     const node = blockRefs.current[blockId];
     if (!current || !node) return false;
-    const target = findBlockById(current.markdown, blockId);
+
+    const rendered = reconciledBlocksRef.current.length
+      ? reconciledBlocksRef.current
+      : [{ id: blockId, type: "paragraph" as const, text: "" }];
+    const target = rendered.find((block) => block.id === blockId);
+    // Only a bare-fence paragraph converts; a real code/table/etc. block bails so
+    // its own Enter handling (newline / swallow) still runs.
     if (target && target.type !== "paragraph") return false;
     const fence = blockNodeToMarkdown(node, "paragraph").replace(/​/g, "").trim().match(/^```(\w*)$/);
     if (!fence) return false;
     const language = fence[1] || undefined;
 
-    commit((state) => {
-      const positional = positionalBlockId(state.markdown, blockId);
-      const cleared = updateMarkdownBlock(state.markdown, positional, "​");
-      return {
-        ...state,
-        markdown: updateMarkdownBlockShape(cleared, positional, { type: "code", language, level: undefined, marker: undefined }),
-        review: { ...state.review, updatedAt: nowIso() }
-      };
-    }, { resyncDom: true });
+    const blocks = rendered.flatMap((block) => {
+      if (block.id === blockId) {
+        return [{ ...block, type: "code" as const, language, level: undefined, marker: undefined, checked: undefined, text: "​" }];
+      }
+      if (isVoidBlockType(block.type)) return [block];
+      const domNode = blockRefs.current[block.id];
+      if (!domNode) return [block];
+      const text = blockNodeToMarkdown(domNode, block.type);
+      return text.trim() ? [{ ...block, text }] : [];
+    });
+    const markdown = serializeMarkdownBlocks(blocks);
+
+    commit(
+      () => ({ ...current, markdown, review: { ...current.review, updatedAt: nowIso() } }),
+      { resyncDom: true }
+    );
 
     if (liveEditTimerRef.current) {
       window.clearTimeout(liveEditTimerRef.current);
       liveEditTimerRef.current = null;
     }
     liveEditHistoryActiveRef.current = false;
-    // A shape change keeps the block's position, so its index is unchanged (the
-    // virtual first block sits at 0).
-    pendingCaretRef.current = { index: Math.max(0, blocksForMarkdown(current.markdown).findIndex((block) => block.id === blockId)), offset: 0 };
+    pendingCaretRef.current = { index: Math.max(0, blocks.findIndex((block) => block.id === blockId)), offset: 0 };
     schedulePendingCaretFlush();
     return true;
   }
@@ -3947,6 +3961,13 @@ function useSkribeController() {
         return;
       }
 
+      // Typing ``` (optionally with a language) on its own line and pressing Enter
+      // opens an empty fenced code block. This runs BEFORE the code/table branches:
+      // once the live-save debounce has reparsed the bare fence into an unclosed
+      // code block, `type` is already "code", so the newline path below would win
+      // and leave the fence unclosed (swallowing following blocks) if this ran later.
+      if (applyCodeFenceInputRule(blockId)) return;
+
       // A table cell can't hold a line break (it collapses to a space on
       // serialize), so swallow Enter rather than insert a break that vanishes.
       if (type === "table") {
@@ -3960,10 +3981,6 @@ function useSkribeController() {
         rememberCanvasSelection();
         return;
       }
-
-      // Typing ``` (optionally with a language) on its own line and pressing Enter
-      // opens an empty fenced code block instead of splitting the paragraph.
-      if (applyCodeFenceInputRule(blockId)) return;
 
       // Typing ---, *** or ___ on its own line and pressing Enter inserts a
       // horizontal rule and drops the caret into a fresh paragraph below it.

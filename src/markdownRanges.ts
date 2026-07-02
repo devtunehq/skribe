@@ -1,4 +1,4 @@
-import { isThematicBreak, markdownBlockIdFromIndex } from "./document.ts";
+import { isThematicBreak, markdownBlockIdFromIndex, parseMarkdownImage } from "./document.ts";
 import type { MarkdownBlockIdentity } from "./document.ts";
 
 export interface MarkdownBlockLineSpan {
@@ -152,6 +152,15 @@ export function getMarkdownBlockLineSpans(markdown: string): MarkdownBlockLineSp
       continue;
     }
 
+    // Mirror parseMarkdownBlocks: a standalone image line is its own (text-less)
+    // block. Without this it falls into the paragraph accumulator and, when it sits
+    // adjacent to a paragraph with no blank line between, the block counts diverge.
+    if (parseMarkdownImage(trimmed)) {
+      flushParagraph(index - 1);
+      pushSpan({ type: "image", text: trimmed }, index + 1, index + 1, lineStart(index), lineStart(index));
+      continue;
+    }
+
     // Mirror parseMarkdownBlocks: a horizontal rule is its own (text-less) block, so
     // it must flush the paragraph and emit a span or the block counts diverge.
     if (isThematicBreak(trimmed)) {
@@ -183,7 +192,12 @@ export function getMarkdownBlockLineSpans(markdown: string): MarkdownBlockLineSp
         const itemText = unordered[1] ?? "";
         const task = itemText.match(/^\[([ xX])\](?:\s+(.*))?$/);
         const text = task ? task[2] ?? "" : itemText;
-        const start = text ? textOffset(index, text) : lineEnd(index);
+        // Anchor from the whole item text plus the task prefix length (the box +
+        // spaces), so the offset lands on the visible text even when that text also
+        // appears inside the box — e.g. `- [x] x`, where searching for "x" alone
+        // would match the "x" in "[x]".
+        const prefixLength = task ? itemText.length - text.length : 0;
+        const start = text ? textOffset(index, itemText) + prefixLength : lineEnd(index);
         pushSpan({ type: "unordered-list", text }, index + 1, index + 1, start, start + text.length);
       } else if (quote) {
         const start = textOffset(index, quote[1]);
@@ -201,6 +215,7 @@ export function getMarkdownBlockLineSpans(markdown: string): MarkdownBlockLineSp
 
 export function renderedMarkdownSnippet(markdown: string) {
   return markdown
+    .replace(/!\[[^\]\n]*\]\([^)\s]+\)/g, "")
     .replace(/\[([^\]\n]+)\]\([^)]+\)/g, "$1")
     .replace(/<((?:https?|mailto):[^>\s]+)>/g, "$1")
     .replace(/(^|\n)\s{0,3}#{1,6}\s+/g, " ")

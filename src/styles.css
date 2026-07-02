@@ -1658,6 +1658,12 @@ button {
   margin: 0;
 }
 
+.editable-thematic-break:focus-visible {
+  outline: 2px solid var(--sky-blue);
+  outline-offset: 4px;
+  border-radius: 3px;
+}
+
 .editable-thematic-break:focus hr {
   border-top-color: var(--sky-blue);
 }

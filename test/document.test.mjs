@@ -15,7 +15,7 @@ import {
   spliceMarkdownPaste,
   updateMarkdownBlock
 } from "../src/document.ts";
-import { getMarkdownBlockLineSpans, visibleMarkdownCharacters } from "../src/markdownRanges.ts";
+import { getMarkdownBlockLineSpans, renderedMarkdownSnippet, visibleMarkdownCharacters } from "../src/markdownRanges.ts";
 
 test("an empty document can become editable Markdown through the virtual first block", () => {
   const emptyBlockId = markdownBlockIdFromIndex(0);
@@ -51,6 +51,23 @@ test("empty list items round-trip so a freshly split item survives", () => {
   assert.equal(parseMarkdownBlocks("-")[0].type, "unordered-list");
   assert.equal(parseMarkdownBlocks("-nope")[0].type, "paragraph");
   assert.equal(parseMarkdownBlocks("*emphasis*")[0].type, "paragraph");
+});
+
+test("review fixes: image scanner parity, task anchor offset, snippet image stripping", () => {
+  // Devin: a standalone image line adjacent to a paragraph (no blank line) must keep
+  // the two scanners in lockstep — one span per parsed block.
+  const adjacent = "text\n![i](a.png)";
+  assert.equal(getMarkdownBlockLineSpans(adjacent).length, parseMarkdownBlocks(adjacent).length);
+
+  // CodeRabbit: `- [x] x` — the span must anchor the visible "x" (index 6), not the
+  // "x" inside the checkbox at index 3.
+  const taskSpan = getMarkdownBlockLineSpans("- [x] x")[0];
+  assert.equal(taskSpan.textStart, 6);
+  assert.equal(taskSpan.textEnd, 7);
+
+  // CodeRabbit: inline images render with no text, so snippets drop them entirely
+  // rather than leaking "!alt".
+  assert.equal(renderedMarkdownSnippet("a ![pic](x.png) b"), "a b");
 });
 
 test("inline images contribute no visible characters and stay inside a paragraph", () => {

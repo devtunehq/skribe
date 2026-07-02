@@ -748,8 +748,10 @@ export function htmlToInlineMarkdown(html: string) {
     if (tag === "br") return "\n";
     if (tag === "img") {
       // Prefer the original markdown src stashed on inline images; fall back to the
-      // live src for pasted/foreign <img> elements.
-      const src = (node.getAttribute("data-md-src") ?? node.getAttribute("src"))?.trim();
+      // live src for pasted/foreign <img> elements — including when data-md-src is
+      // present but blank.
+      const markdownSrc = node.getAttribute("data-md-src")?.trim();
+      const src = markdownSrc || node.getAttribute("src")?.trim();
       if (!src) return "";
       return serializeMarkdownImage({ alt: node.getAttribute("alt") ?? "", src });
     }
