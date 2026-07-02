@@ -204,6 +204,14 @@ function renderedMarkdownCharacters(markdown: string) {
   }> = [];
 
   for (let index = 0; index < markdown.length; index += 1) {
+    // Inline images have no rendered text, so contribute no characters — skip the
+    // whole syntax before the link rule can match the "[alt](src)" tail.
+    const imageMatch = markdown.slice(index).match(/^!\[[^\]\n]*\]\([^)\s]+\)/);
+    if (imageMatch) {
+      index += imageMatch[0].length - 1;
+      continue;
+    }
+
     const linkMatch = markdown.slice(index).match(/^\[([^\]\n]+)\]\(([^)\s]+)\)/);
     if (linkMatch) {
       const label = linkMatch[1];
@@ -739,7 +747,9 @@ export function htmlToInlineMarkdown(html: string) {
     const tag = node.tagName.toLowerCase();
     if (tag === "br") return "\n";
     if (tag === "img") {
-      const src = node.getAttribute("src")?.trim();
+      // Prefer the original markdown src stashed on inline images; fall back to the
+      // live src for pasted/foreign <img> elements.
+      const src = (node.getAttribute("data-md-src") ?? node.getAttribute("src"))?.trim();
       if (!src) return "";
       return serializeMarkdownImage({ alt: node.getAttribute("alt") ?? "", src });
     }

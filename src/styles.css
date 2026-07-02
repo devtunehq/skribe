@@ -1633,6 +1633,14 @@ button {
   outline-offset: 3px;
 }
 
+.inline-image {
+  max-height: 1.4em;
+  max-width: 100%;
+  vertical-align: text-bottom;
+  border-radius: 3px;
+  margin: 0 2px;
+}
+
 .editable-thematic-break {
   display: block;
   width: min(100%, 720px);

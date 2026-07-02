@@ -197,6 +197,35 @@ test("an autolink renders as a link showing the URL without the angle brackets",
   });
 });
 
+test("an inline image renders inside a paragraph and round-trips its markdown src", async (t) => {
+  await withApp(t, "hello ![pic](https://x.co/a.png) world\n", async ({ browser, markdownPath }) => {
+    await waitFor(
+      browser.cdp,
+      "document.querySelector('.editable-document img.inline-image')?.getAttribute('data-md-src') === 'https://x.co/a.png'"
+    );
+    // The paragraph stays editable text around the image (not a block image).
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-document p .inline-image')");
+    // Editing the paragraph re-serializes the DOM; the image markdown must survive
+    // via data-md-src rather than the preview src.
+    await evaluate(
+      browser.cdp,
+      `(() => {
+        const p = document.querySelector('.editable-document p');
+        p.focus();
+        const r = document.createRange();
+        r.selectNodeContents(p);
+        r.collapse(false);
+        const s = getSelection();
+        s.removeAllRanges();
+        s.addRange(r);
+        return true;
+      })()`
+    );
+    await insertText(browser.cdp, "!");
+    await waitForFileText(markdownPath, /hello !\[pic\]\(https:\/\/x\.co\/a\.png\) world!/);
+  });
+});
+
 test("a horizontal rule from the file renders and can be deleted with Backspace", async (t) => {
   await withApp(t, "above\n\n---\n\nbelow\n", async ({ browser, markdownPath }) => {
     await waitFor(browser.cdp, "!!document.querySelector('.editable-thematic-break')");

@@ -780,7 +780,7 @@ function markdownToClipboardText(markdown: string) {
 }
 
 const inlineMarkdownPattern =
-  /`([^`]+)`|\[([^\]\n]+)\]\(([^)\s]+)\)|<((?:https?|mailto):[^>\s]+)>|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|\*([^*]+)\*|_([^_]+)_|\n/g;
+  /`([^`]+)`|!\[([^\]\n]*)\]\(([^)\s]+)\)|\[([^\]\n]+)\]\(([^)\s]+)\)|<((?:https?|mailto):[^>\s]+)>|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|\*([^*]+)\*|_([^_]+)_|\n/g;
 
 function safeRenderedMarkdownHref(href: string) {
   const trimmed = href.trim();
@@ -801,11 +801,25 @@ function inlineMarkdownNodes(markdown: string, keyPrefix = "inline") {
     const start = match.index ?? 0;
     if (start > cursor) nodes.push(markdown.slice(cursor, start));
 
-    const [raw, code, linkLabel, linkHref, autolink, boldAsterisk, boldUnderscore, strike, italicAsterisk, italicUnderscore] = match;
+    const [raw, code, imageAlt, imageSrc, linkLabel, linkHref, autolink, boldAsterisk, boldUnderscore, strike, italicAsterisk, italicUnderscore] = match;
     const nodeKey = `${keyPrefix}-${key++}`;
 
     if (code !== undefined) {
       nodes.push(<code key={nodeKey}>{code}</code>);
+    } else if (imageSrc !== undefined) {
+      // Inline image: display through imagePreviewSrc but keep the original markdown
+      // src in data-md-src so htmlToInlineMarkdown round-trips it (the preview src
+      // may be rewritten to /api/assets for non-http paths).
+      nodes.push(
+        <img
+          key={nodeKey}
+          className="inline-image"
+          src={imagePreviewSrc(imageSrc)}
+          data-md-src={imageSrc}
+          alt={imageAlt ?? ""}
+          loading="lazy"
+        />
+      );
     } else if (linkLabel !== undefined && linkHref !== undefined) {
       const safeHref = safeRenderedMarkdownHref(linkHref);
       nodes.push(

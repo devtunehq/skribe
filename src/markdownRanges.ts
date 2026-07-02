@@ -221,6 +221,15 @@ export function visibleMarkdownCharacters(markdown: string) {
   }> = [];
 
   for (let index = 0; index < markdown.length; index += 1) {
+    // An inline image renders as an image element with no text content, so it
+    // contributes no visible characters — skip its whole syntax (checked before the
+    // link rule, whose bracket pattern would otherwise match the "[alt](src)" tail).
+    const imageMatch = markdown.slice(index).match(/^!\[[^\]\n]*\]\([^)\s]+\)/);
+    if (imageMatch) {
+      index += imageMatch[0].length - 1;
+      continue;
+    }
+
     const linkMatch = markdown.slice(index).match(/^\[([^\]\n]+)\]\(([^)\s]+)\)/);
     if (linkMatch) {
       const label = linkMatch[1];

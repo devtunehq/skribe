@@ -53,6 +53,17 @@ test("empty list items round-trip so a freshly split item survives", () => {
   assert.equal(parseMarkdownBlocks("*emphasis*")[0].type, "paragraph");
 });
 
+test("inline images contribute no visible characters and stay inside a paragraph", () => {
+  // An image within text keeps the block a paragraph (only a whole-line image is a
+  // block image), and the inline image syntax maps to zero visible characters so
+  // the <img> (no text content) and the char map agree.
+  assert.equal(parseMarkdownBlocks("look ![pic](a.png) here")[0].type, "paragraph");
+
+  const source = "a ![x](y.png) b";
+  const chars = visibleMarkdownCharacters(source);
+  assert.equal(chars.map((c) => source[c.sourceIndex]).join(""), "a  b");
+});
+
 test("autolinks map to visible URL characters with the angle brackets hidden", () => {
   // The rendered text of `<https://x.co>` is the URL itself; the < and > are hidden,
   // so the visible-character map must skip them or caret/anchor offsets drift.
