@@ -1633,6 +1633,27 @@ button {
   outline-offset: 3px;
 }
 
+.editable-thematic-break {
+  display: block;
+  width: min(100%, 720px);
+  margin: 26px auto;
+  padding: 6px 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  outline: none;
+}
+
+.editable-thematic-break hr {
+  border: 0;
+  border-top: 2px solid var(--line-ink);
+  margin: 0;
+}
+
+.editable-thematic-break:focus hr {
+  border-top-color: var(--sky-blue);
+}
+
 .editable-image-frame img {
   display: block;
   max-width: 100%;

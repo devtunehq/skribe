@@ -25,6 +25,7 @@ import {
   List,
   ListOrdered,
   MessageSquare,
+  Minus,
   Pilcrow,
   Quote,
   RefreshCw,
@@ -84,6 +85,7 @@ import {
   titleFromMarkdown,
   wordCount,
   htmlToInlineMarkdown,
+  isThematicBreak,
   looksLikeMarkdownPaste,
   markdownBlockIdFromIndex,
   normalizeMarkdownPaste,
@@ -904,6 +906,14 @@ function isShapeConvertibleType(type: string) {
   );
 }
 
+// Blocks with no editable text: they are kept verbatim on serialize (never
+// re-read from the DOM) and get keyboard escapes (Enter/Backspace) instead of a
+// caret. Images carry their markdown in `text`; a thematic break serializes to a
+// fixed "---".
+function isVoidBlockType(type: string) {
+  return type === "image" || type === "thematic-break";
+}
+
 function isOlderDocument(candidate: DocumentState, current: DocumentState | null) {
   if (!current) return false;
   if (candidate.id !== current.id) return false;
@@ -1576,7 +1586,7 @@ function useSkribeController() {
         text: ""
       };
 
-      if (sourceBlock.type === "image") return [sourceBlock];
+      if (isVoidBlockType(sourceBlock.type)) return [sourceBlock];
 
       const node = shell.querySelector<HTMLElement>("[data-block-id]");
       if (!node) return [sourceBlock];
@@ -1610,7 +1620,7 @@ function useSkribeController() {
 
     return serializeMarkdownBlocks(
       blocks.flatMap((block) => {
-        if (block.type === "image") return [block];
+        if (isVoidBlockType(block.type)) return [block];
         const node = blockRefs.current[block.id];
         if (!node) return [block];
         const text = blockNodeToMarkdown(node, block.type);
@@ -3457,6 +3467,45 @@ function useSkribeController() {
     return true;
   }
 
+  // Enter input rule: a paragraph whose whole line is a --- / *** / ___ rule becomes
+  // a horizontal-rule block followed by an empty paragraph for the caret.
+  function applyThematicBreakInputRule(blockId: string) {
+    const current = stateRef.current;
+    const node = blockRefs.current[blockId];
+    if (!current || !node) return false;
+    const target = findBlockById(current.markdown, blockId);
+    if (target && target.type !== "paragraph") return false;
+    if (!isThematicBreak(blockNodeToMarkdown(node, "paragraph").replace(/​/g, ""))) return false;
+
+    const liveState = stateWithLiveCanvasEdit(current);
+    const blocks = blocksForMarkdown(liveState.markdown);
+    const index = blocks.findIndex((block) => block.id === blockId);
+    const before = index >= 0 ? blocks.slice(0, index) : [];
+    const after = index >= 0 ? blocks.slice(index + 1) : [];
+    const nextBlocks = [
+      ...before,
+      { id: blockId, type: "thematic-break" as const, text: "" },
+      { id: `${blockId}-after`, type: "paragraph" as const, text: "​" },
+      ...after
+    ];
+    commit(
+      () => ({
+        ...liveState,
+        markdown: serializeMarkdownBlocks(nextBlocks),
+        review: { ...liveState.review, updatedAt: nowIso() }
+      }),
+      { resyncDom: true }
+    );
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+    pendingCaretRef.current = { index: (index >= 0 ? index : 0) + 1, offset: 0 };
+    schedulePendingCaretFlush();
+    return true;
+  }
+
   // Backspace at the very start of a block merges it into the previous block and
   // puts the caret at the join (the end of the previous block's text) — so an
   // empty block is removed and a non-empty one's text is appended. The caret is
@@ -3549,6 +3598,40 @@ function useSkribeController() {
     }
     liveEditHistoryActiveRef.current = false;
     pendingCaretRef.current = { index: index + 1, offset: 0 };
+    schedulePendingCaretFlush();
+    return true;
+  }
+
+  // Insert a horizontal rule after the given block, plus an empty paragraph below
+  // it so the caret has somewhere to land (the rule itself is a void block).
+  function insertThematicBreakAfterBlock(blockId: string) {
+    const current = stateRef.current;
+    if (!current) return false;
+    const liveState = stateWithLiveCanvasEdit(current);
+    const blocks = blocksForMarkdown(liveState.markdown);
+    const index = blocks.findIndex((block) => block.id === blockId);
+    if (index < 0) return false;
+
+    const nextBlocks = [
+      ...blocks.slice(0, index + 1),
+      { id: `${blockId}-hr`, type: "thematic-break" as const, text: "" },
+      { id: `${blockId}-hr-after`, type: "paragraph" as const, text: "​" },
+      ...blocks.slice(index + 1)
+    ];
+    commit(
+      () => ({
+        ...liveState,
+        markdown: serializeMarkdownBlocks(nextBlocks),
+        review: { ...liveState.review, updatedAt: nowIso() }
+      }),
+      { resyncDom: true }
+    );
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+    pendingCaretRef.current = { index: index + 2, offset: 0 };
     schedulePendingCaretFlush();
     return true;
   }
@@ -3672,10 +3755,10 @@ function useSkribeController() {
     const isCommand = event.metaKey || event.ctrlKey;
     const key = event.key.toLowerCase();
 
-    // Image blocks can't hold a caret, so give them keyboard escapes: Enter adds
-    // a paragraph after the image, Backspace/Delete removes it. Other keys fall
-    // through (so Cmd+Z etc. still work).
-    if (!isCommand && (stateRef.current ? findBlockById(stateRef.current.markdown, blockId)?.type : null) === "image") {
+    // Void blocks (images, horizontal rules) can't hold a caret, so give them
+    // keyboard escapes: Enter adds a paragraph after, Backspace/Delete removes the
+    // block. Other keys fall through (so Cmd+Z etc. still work).
+    if (!isCommand && isVoidBlockType((stateRef.current ? findBlockById(stateRef.current.markdown, blockId)?.type : null) ?? "")) {
       if (event.key === "Enter") {
         event.preventDefault();
         insertParagraphAfterBlock(blockId);
@@ -3784,6 +3867,10 @@ function useSkribeController() {
       // Typing ``` (optionally with a language) on its own line and pressing Enter
       // opens an empty fenced code block instead of splitting the paragraph.
       if (applyCodeFenceInputRule(blockId)) return;
+
+      // Typing ---, *** or ___ on its own line and pressing Enter inserts a
+      // horizontal rule and drops the caret into a fresh paragraph below it.
+      if (applyThematicBreakInputRule(blockId)) return;
 
       // Every other block splits at the caret into a new block immediately.
       if (splitBlockAtCaret()) return;
@@ -4107,6 +4194,7 @@ function useSkribeController() {
     updatePanelState,
     restoreRevision,
     updateActiveBlockShape,
+    insertThematicBreakAfterBlock,
     applyInlineCommand,
     applyInlineCode,
     openLinkPopover,
@@ -4732,7 +4820,8 @@ function CanvasToolbar() {
     applyInlineCommand,
     openLinkPopover,
     startCommentFromSelection,
-    updateActiveBlockShape
+    updateActiveBlockShape,
+    insertThematicBreakAfterBlock
   } = useSkribeControllerContext();
 
   return (
@@ -4781,6 +4870,9 @@ function CanvasToolbar() {
         </button>
         <button type="button" title="Code block (Ctrl/Cmd+Alt+C)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "code", level: undefined, marker: undefined }); }}>
           <SquareCode size={16} />
+        </button>
+        <button type="button" title="Horizontal rule" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); if (activeBlockId) insertThematicBreakAfterBlock(activeBlockId); }}>
+          <Minus size={16} />
         </button>
         <span className="toolbar-divider" />
         <button type="button" title="Comment on selected text" onMouseDown={(event) => { event.preventDefault(); startCommentFromSelection(); }}>
@@ -6005,6 +6097,26 @@ const EditableBlock = React.memo(function EditableBlock({
       <pre className="editable-code">
         <code {...editableProps}>{block.text}</code>
       </pre>
+    );
+  }
+
+  if (block.type === "thematic-break") {
+    return (
+      <div
+        id={block.id}
+        data-block-id={block.id}
+        className="editable-thematic-break"
+        contentEditable={false}
+        tabIndex={0}
+        role="separator"
+        aria-label="Horizontal rule"
+        ref={(node) => onRegisterBlock(block.id, node)}
+        onClick={() => onFocusBlock(block.id)}
+        onFocus={() => onFocusBlock(block.id)}
+        onKeyDown={(event) => onShortcut(event, block.id)}
+      >
+        <hr />
+      </div>
     );
   }
 

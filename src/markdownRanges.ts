@@ -1,4 +1,4 @@
-import { markdownBlockIdFromIndex } from "./document.ts";
+import { isThematicBreak, markdownBlockIdFromIndex } from "./document.ts";
 import type { MarkdownBlockIdentity } from "./document.ts";
 
 export interface MarkdownBlockLineSpan {
@@ -149,6 +149,14 @@ export function getMarkdownBlockLineSpans(markdown: string): MarkdownBlockLineSp
         lineStart(startIndex),
         lineEnd(index)
       );
+      continue;
+    }
+
+    // Mirror parseMarkdownBlocks: a horizontal rule is its own (text-less) block, so
+    // it must flush the paragraph and emit a span or the block counts diverge.
+    if (isThematicBreak(trimmed)) {
+      flushParagraph(index - 1);
+      pushSpan({ type: "thematic-break", text: "" }, index + 1, index + 1, lineStart(index), lineStart(index));
       continue;
     }
 

@@ -145,3 +145,28 @@ test("typing ``` then Enter opens an empty fenced code block to type into", asyn
     assert.match(saved, /^```\nconst x = 1\n```/);
   });
 });
+
+test("typing --- then Enter inserts a horizontal rule with a paragraph below it", async (t) => {
+  await withApp(t, "", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('[data-block-id=\"block-0\"]')");
+    await caretInBlock(browser.cdp, "block-0");
+    await insertText(browser.cdp, "---");
+    await press(browser.cdp, "Enter", { code: "Enter", keyCode: 13 });
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-thematic-break')");
+    await insertText(browser.cdp, "below");
+    await waitForFileText(markdownPath, /---\n\nbelow/);
+    assert.match(await readFile(markdownPath, "utf8"), /^---\n\nbelow/);
+  });
+});
+
+test("a horizontal rule from the file renders and can be deleted with Backspace", async (t) => {
+  await withApp(t, "above\n\n---\n\nbelow\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-thematic-break')");
+    // Focus the rule (a void block) and delete it.
+    await evaluate(browser.cdp, "document.querySelector('.editable-thematic-break').focus()");
+    await press(browser.cdp, "Backspace", { code: "Backspace", keyCode: 8 });
+    await waitFor(browser.cdp, "!document.querySelector('.editable-thematic-break')");
+    await waitForFileText(markdownPath, /above\n\nbelow/);
+    assert.equal(await readFile(markdownPath, "utf8"), "above\n\nbelow\n");
+  });
+});

@@ -8,7 +8,8 @@ export type MarkdownBlockType =
   | "quote"
   | "code"
   | "table"
-  | "image";
+  | "image"
+  | "thematic-break";
 
 export interface MarkdownBlock {
   id: string;
@@ -297,6 +298,10 @@ function isTableStart(lines: string[], index: number) {
   return isTableRow(lines[index] ?? "") && isTableSeparator(lines[index + 1] ?? "");
 }
 
+export function isThematicBreak(line: string) {
+  return /^(?:-{3,}|\*{3,}|_{3,})$/.test(line.trim());
+}
+
 export function parseMarkdownImage(markdown: string): MarkdownImage | null {
   const match = markdown.trim().match(/^!\[([^\]\n]*)\]\((.*?)\)$/);
   if (!match) return null;
@@ -408,6 +413,16 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       continue;
     }
 
+    // A line of 3+ matching -, * or _ is a horizontal rule. It sits after the
+    // table check (a table separator only parses with a preceding header row) and
+    // before the list checks (their markers need a trailing space, so "---" etc.
+    // never reach them anyway).
+    if (isThematicBreak(trimmed)) {
+      flushParagraph();
+      pushBlock({ type: "thematic-break", text: "" });
+      continue;
+    }
+
     const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
     if (heading) {
       flushParagraph();
@@ -484,6 +499,7 @@ function serializeMarkdownBlock(block: MarkdownBlock) {
     return listItemLines(text).map((line) => `- ${line}`).join("\n");
   }
   if (block.type === "quote") return text.split("\n").map((line) => `> ${line}`).join("\n");
+  if (block.type === "thematic-break") return "---";
   if (block.type === "code") {
     // Use a fence longer than any backtick run in the code so content containing
     // ``` doesn't terminate the block early.

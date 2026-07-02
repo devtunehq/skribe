@@ -53,6 +53,30 @@ test("empty list items round-trip so a freshly split item survives", () => {
   assert.equal(parseMarkdownBlocks("*emphasis*")[0].type, "paragraph");
 });
 
+test("horizontal rules parse, serialize and keep the two block scanners in lockstep", () => {
+  // ---, *** and ___ are thematic breaks; all serialize back to a canonical ---.
+  for (const rule of ["---", "***", "___", "-----"]) {
+    const blocks = parseMarkdownBlocks(`before\n\n${rule}\n\nafter`);
+    assert.deepEqual(
+      blocks.map((block) => block.type),
+      ["paragraph", "thematic-break", "paragraph"]
+    );
+    assert.equal(serializeMarkdownBlocks(blocks), "before\n\n---\n\nafter\n");
+  }
+
+  // A --- directly under text still splits into a paragraph + rule (we do not
+  // support setext headings), and consecutive rules stay distinct blocks.
+  assert.deepEqual(
+    parseMarkdownBlocks("text\n---\n---").map((block) => block.type),
+    ["paragraph", "thematic-break", "thematic-break"]
+  );
+
+  // Invariant: getMarkdownBlockLineSpans must emit one span per parsed block.
+  for (const markdown of ["a\n\n---\n\nb", "text\n---\n---", "---\n---\n---"]) {
+    assert.equal(getMarkdownBlockLineSpans(markdown).length, parseMarkdownBlocks(markdown).length);
+  }
+});
+
 test("splitting a list item serializes into two sibling items", () => {
   // Mirrors splitListBlockAtCaret: one list block becomes two at the caret.
   const [item] = parseMarkdownBlocks("- Groceries: milk and eggs");
