@@ -8,6 +8,7 @@ import {
   evaluate,
   insertText,
   makeMarkdownDoc,
+  mouseClick,
   navigate,
   press,
   removeTempDir,
@@ -223,6 +224,36 @@ test("an inline image renders inside a paragraph and round-trips its markdown sr
     );
     await insertText(browser.cdp, "!");
     await waitForFileText(markdownPath, /hello !\[pic\]\(https:\/\/x\.co\/a\.png\) world!/);
+  });
+});
+
+test("the toolbar inserts a starter table after the active block", async (t) => {
+  await withApp(t, "intro\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('[data-block-id=\"block-0\"]')");
+    // A real click sets the active block (onMouseUp), which enables the button.
+    const blockPoint = await evaluate(
+      browser.cdp,
+      `(() => {
+        const b = document.querySelector('[data-block-id="block-0"]');
+        const r = b.getBoundingClientRect();
+        return { x: r.left + 4, y: r.top + r.height / 2 };
+      })()`
+    );
+    await mouseClick(browser.cdp, blockPoint);
+    await waitFor(browser.cdp, "!document.querySelector('button[title=\"Insert table\"]')?.disabled");
+    const point = await evaluate(
+      browser.cdp,
+      `(() => {
+        const b = document.querySelector('button[title="Insert table"]');
+        const r = b.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      })()`
+    );
+    await mouseClick(browser.cdp, point);
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-document table')");
+    await waitForFileText(markdownPath, /\| Column 1 \| Column 2 \|/);
+    const saved = await readFile(markdownPath, "utf8");
+    assert.match(saved, /intro\n\n\| Column 1 \| Column 2 \|/);
   });
 });
 

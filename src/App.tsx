@@ -38,6 +38,7 @@ import {
   Sparkles,
   SquareCode,
   Strikethrough,
+  Table,
   Upload,
   X
 } from "lucide-react";
@@ -3699,6 +3700,39 @@ function useSkribeController() {
     return true;
   }
 
+  // Insert a starter 2×2 table after the given block and drop the caret into it.
+  function insertTableAfterBlock(blockId: string) {
+    const current = stateRef.current;
+    if (!current) return false;
+    const liveState = stateWithLiveCanvasEdit(current);
+    const blocks = blocksForMarkdown(liveState.markdown);
+    const index = blocks.findIndex((block) => block.id === blockId);
+    if (index < 0) return false;
+
+    const tableText = "| Column 1 | Column 2 |\n| --- | --- |\n| Cell | Cell |";
+    const nextBlocks = [
+      ...blocks.slice(0, index + 1),
+      { id: `${blockId}-table`, type: "table" as const, text: tableText },
+      ...blocks.slice(index + 1)
+    ];
+    commit(
+      () => ({
+        ...liveState,
+        markdown: serializeMarkdownBlocks(nextBlocks),
+        review: { ...liveState.review, updatedAt: nowIso() }
+      }),
+      { resyncDom: true }
+    );
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+    pendingCaretRef.current = { index: index + 1, offset: 0 };
+    schedulePendingCaretFlush();
+    return true;
+  }
+
   function openLinkPopover() {
     restoreCanvasSelection();
     const selection = window.getSelection();
@@ -4258,6 +4292,7 @@ function useSkribeController() {
     restoreRevision,
     updateActiveBlockShape,
     insertThematicBreakAfterBlock,
+    insertTableAfterBlock,
     toggleTaskListItem,
     applyInlineCommand,
     applyInlineCode,
@@ -4887,7 +4922,8 @@ function CanvasToolbar() {
     openLinkPopover,
     startCommentFromSelection,
     updateActiveBlockShape,
-    insertThematicBreakAfterBlock
+    insertThematicBreakAfterBlock,
+    insertTableAfterBlock
   } = useSkribeControllerContext();
 
   return (
@@ -4939,6 +4975,9 @@ function CanvasToolbar() {
         </button>
         <button type="button" title="Horizontal rule" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); if (activeBlockId) insertThematicBreakAfterBlock(activeBlockId); }}>
           <Minus size={16} />
+        </button>
+        <button type="button" title="Insert table" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); if (activeBlockId) insertTableAfterBlock(activeBlockId); }}>
+          <Table size={16} />
         </button>
         <span className="toolbar-divider" />
         <button type="button" title="Comment on selected text" onMouseDown={(event) => { event.preventDefault(); startCommentFromSelection(); }}>
