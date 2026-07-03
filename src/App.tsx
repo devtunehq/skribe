@@ -6530,7 +6530,7 @@ function EditableTableBlock({
           <tr>
             {headerCells.map(({ item: cell, key }, columnIndex) => (
               <th key={key} style={cellStyle(columnIndex)}>
-                <InlineMarkdown markdown={cell} keyPrefix={key} />
+                {cell ? <InlineMarkdown markdown={cell} keyPrefix={key} /> : <br />}
                 {columnCount > 2 ? (
                   <button
                     type="button"
@@ -6569,7 +6569,7 @@ function EditableTableBlock({
                         <X size={11} />
                       </button>
                     ) : null}
-                    <InlineMarkdown markdown={cell} keyPrefix={key} />
+                    {cell ? <InlineMarkdown markdown={cell} keyPrefix={key} /> : <br />}
                   </td>
                 ))}
               </tr>

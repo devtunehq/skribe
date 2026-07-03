@@ -65,6 +65,19 @@ test("the add-row control appends an empty body row", async (t) => {
     assert.ok(await clickControl(browser.cdp, ".table-add-row"));
     await waitFor(browser.cdp, "document.querySelectorAll('.editable-table tbody tr').length === 2");
     await waitForFileText(markdownPath, /\| 1 \| 2 \|\n\|\s*\|\s*\|/);
+    // The new empty row shouldn't collapse thinner than the filled one (empty cells
+    // render a <br> so they keep a full line box).
+    const heights = await evaluate(
+      browser.cdp,
+      `(() => {
+        const rows = document.querySelectorAll('.editable-table tbody tr');
+        return { filled: rows[0].offsetHeight, empty: rows[1].offsetHeight };
+      })()`
+    );
+    assert.ok(
+      heights.empty >= heights.filled * 0.9,
+      `empty row (${heights.empty}px) collapsed vs filled row (${heights.filled}px)`
+    );
   });
 });
 
