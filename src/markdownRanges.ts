@@ -1,4 +1,4 @@
-import { markdownBlockIdFromIndex } from "./document.ts";
+import { isThematicBreak, markdownBlockIdFromIndex, parseMarkdownImage } from "./document.ts";
 import type { MarkdownBlockIdentity } from "./document.ts";
 
 export interface MarkdownBlockLineSpan {
@@ -152,6 +152,23 @@ export function getMarkdownBlockLineSpans(markdown: string): MarkdownBlockLineSp
       continue;
     }
 
+    // Mirror parseMarkdownBlocks: a standalone image line is its own (text-less)
+    // block. Without this it falls into the paragraph accumulator and, when it sits
+    // adjacent to a paragraph with no blank line between, the block counts diverge.
+    if (parseMarkdownImage(trimmed)) {
+      flushParagraph(index - 1);
+      pushSpan({ type: "image", text: trimmed }, index + 1, index + 1, lineStart(index), lineStart(index));
+      continue;
+    }
+
+    // Mirror parseMarkdownBlocks: a horizontal rule is its own (text-less) block, so
+    // it must flush the paragraph and emit a span or the block counts diverge.
+    if (isThematicBreak(trimmed)) {
+      flushParagraph(index - 1);
+      pushSpan({ type: "thematic-break", text: "" }, index + 1, index + 1, lineStart(index), lineStart(index));
+      continue;
+    }
+
     const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
     // Allow empty list items so the spans match parseMarkdownBlocks (which keeps
     // a freshly-created "- " / "1." item as its own block); otherwise an empty
@@ -170,8 +187,17 @@ export function getMarkdownBlockLineSpans(markdown: string): MarkdownBlockLineSp
         const start = text ? textOffset(index, text) : lineEnd(index);
         pushSpan({ type: "ordered-list", marker: ordered[1], text }, index + 1, index + 1, start, start + text.length);
       } else if (unordered) {
-        const text = unordered[1] ?? "";
-        const start = text ? textOffset(index, text) : lineEnd(index);
+        // Strip a `[ ]` / `[x]` task box so the span's text offset lands on the
+        // visible text, matching the stripped block.text parseMarkdownBlocks emits.
+        const itemText = unordered[1] ?? "";
+        const task = itemText.match(/^\[([ xX])\](?:\s+(.*))?$/);
+        const text = task ? task[2] ?? "" : itemText;
+        // Anchor from the whole item text plus the task prefix length (the box +
+        // spaces), so the offset lands on the visible text even when that text also
+        // appears inside the box — e.g. `- [x] x`, where searching for "x" alone
+        // would match the "x" in "[x]".
+        const prefixLength = task ? itemText.length - text.length : 0;
+        const start = text ? textOffset(index, itemText) + prefixLength : lineEnd(index);
         pushSpan({ type: "unordered-list", text }, index + 1, index + 1, start, start + text.length);
       } else if (quote) {
         const start = textOffset(index, quote[1]);
@@ -189,7 +215,9 @@ export function getMarkdownBlockLineSpans(markdown: string): MarkdownBlockLineSp
 
 export function renderedMarkdownSnippet(markdown: string) {
   return markdown
+    .replace(/!\[[^\]\n]*\]\([^)\s]+\)/g, "")
     .replace(/\[([^\]\n]+)\]\([^)]+\)/g, "$1")
+    .replace(/<((?:https?|mailto):[^>\s]+)>/g, "$1")
     .replace(/(^|\n)\s{0,3}#{1,6}\s+/g, " ")
     .replace(/(^|\n)\s*(?:[-*]|\d+\.)\s+/g, " ")
     .replace(/(^|\n)\s*>\s?/g, " ")
@@ -208,6 +236,15 @@ export function visibleMarkdownCharacters(markdown: string) {
   }> = [];
 
   for (let index = 0; index < markdown.length; index += 1) {
+    // An inline image renders as an image element with no text content, so it
+    // contributes no visible characters — skip its whole syntax (checked before the
+    // link rule, whose bracket pattern would otherwise match the "[alt](src)" tail).
+    const imageMatch = markdown.slice(index).match(/^!\[[^\]\n]*\]\([^)\s]+\)/);
+    if (imageMatch) {
+      index += imageMatch[0].length - 1;
+      continue;
+    }
+
     const linkMatch = markdown.slice(index).match(/^\[([^\]\n]+)\]\(([^)\s]+)\)/);
     if (linkMatch) {
       const label = linkMatch[1];
@@ -215,6 +252,27 @@ export function visibleMarkdownCharacters(markdown: string) {
       const labelEnd = labelStart + label.length;
       const linkEnd = index + linkMatch[0].length;
       for (let offset = 0; offset < label.length; offset += 1) {
+        characters.push({
+          sourceIndex: labelStart + offset,
+          linkStart: index,
+          linkEnd,
+          linkLabelStart: labelStart,
+          linkLabelEnd: labelEnd
+        });
+      }
+      index = linkEnd - 1;
+      continue;
+    }
+
+    // An autolink <https://…> shows the URL as its own visible text, so map the URL
+    // characters like a link label and hide the surrounding angle brackets.
+    const autolinkMatch = markdown.slice(index).match(/^<((?:https?|mailto):[^>\s]+)>/);
+    if (autolinkMatch) {
+      const url = autolinkMatch[1];
+      const labelStart = index + 1;
+      const labelEnd = labelStart + url.length;
+      const linkEnd = index + autolinkMatch[0].length;
+      for (let offset = 0; offset < url.length; offset += 1) {
         characters.push({
           sourceIndex: labelStart + offset,
           linkStart: index,

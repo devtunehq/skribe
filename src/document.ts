@@ -8,7 +8,8 @@ export type MarkdownBlockType =
   | "quote"
   | "code"
   | "table"
-  | "image";
+  | "image"
+  | "thematic-break";
 
 export interface MarkdownBlock {
   id: string;
@@ -17,6 +18,9 @@ export interface MarkdownBlock {
   level?: number;
   marker?: string;
   language?: string;
+  // Set only on task-list items (an unordered item written as `- [ ]` / `- [x]`);
+  // undefined on every other unordered item, which keeps plain bullets bullets.
+  checked?: boolean;
 }
 
 export interface MarkdownImage {
@@ -33,6 +37,7 @@ function markdownBlockSignature(block: MarkdownBlockIdentity) {
     block.level ?? "",
     block.marker ?? "",
     block.language ?? "",
+    block.checked === undefined ? "" : block.checked ? "checked" : "unchecked",
     block.text.replace(/\s+/g, " ").trim()
   ].join("\u001f");
 }
@@ -199,6 +204,14 @@ function renderedMarkdownCharacters(markdown: string) {
   }> = [];
 
   for (let index = 0; index < markdown.length; index += 1) {
+    // Inline images have no rendered text, so contribute no characters — skip the
+    // whole syntax before the link rule can match the "[alt](src)" tail.
+    const imageMatch = markdown.slice(index).match(/^!\[[^\]\n]*\]\([^)\s]+\)/);
+    if (imageMatch) {
+      index += imageMatch[0].length - 1;
+      continue;
+    }
+
     const linkMatch = markdown.slice(index).match(/^\[([^\]\n]+)\]\(([^)\s]+)\)/);
     if (linkMatch) {
       const label = linkMatch[1];
@@ -208,6 +221,28 @@ function renderedMarkdownCharacters(markdown: string) {
       for (let offset = 0; offset < label.length; offset += 1) {
         characters.push({
           value: label[offset],
+          sourceIndex: labelStart + offset,
+          linkStart: index,
+          linkEnd,
+          linkLabelStart: labelStart,
+          linkLabelEnd: labelEnd
+        });
+      }
+      index = linkEnd - 1;
+      continue;
+    }
+
+    // An autolink <https://…> renders the URL as its visible text; map its
+    // characters like a link label so the angle brackets don't shift offsets.
+    const autolinkMatch = markdown.slice(index).match(/^<((?:https?|mailto):[^>\s]+)>/);
+    if (autolinkMatch) {
+      const url = autolinkMatch[1];
+      const labelStart = index + 1;
+      const labelEnd = labelStart + url.length;
+      const linkEnd = index + autolinkMatch[0].length;
+      for (let offset = 0; offset < url.length; offset += 1) {
+        characters.push({
+          value: url[offset],
           sourceIndex: labelStart + offset,
           linkStart: index,
           linkEnd,
@@ -295,6 +330,10 @@ function isTableSeparator(line: string) {
 
 function isTableStart(lines: string[], index: number) {
   return isTableRow(lines[index] ?? "") && isTableSeparator(lines[index + 1] ?? "");
+}
+
+export function isThematicBreak(line: string) {
+  return /^(?:-{3,}|\*{3,}|_{3,})$/.test(line.trim());
 }
 
 export function parseMarkdownImage(markdown: string): MarkdownImage | null {
@@ -408,6 +447,16 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       continue;
     }
 
+    // A line of 3+ matching -, * or _ is a horizontal rule. It sits after the
+    // table check (a table separator only parses with a preceding header row) and
+    // before the list checks (their markers need a trailing space, so "---" etc.
+    // never reach them anyway).
+    if (isThematicBreak(trimmed)) {
+      flushParagraph();
+      pushBlock({ type: "thematic-break", text: "" });
+      continue;
+    }
+
     const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
     if (heading) {
       flushParagraph();
@@ -435,9 +484,14 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
     const unordered = trimmed.match(/^[-*](?:\s+(.*))?$/);
     if (unordered) {
       flushParagraph();
+      const itemText = unordered[1] ?? "";
+      // A `[ ]` / `[x]` prefix (a space or letter needs to follow, per GFM) makes
+      // this a task-list item: strip the box from the text and record its state.
+      const task = itemText.match(/^\[([ xX])\](?:\s+(.*))?$/);
       pushBlock({
         type: "unordered-list",
-        text: unordered[1] ?? ""
+        text: task ? task[2] ?? "" : itemText,
+        checked: task ? task[1].toLowerCase() === "x" : undefined
       });
       continue;
     }
@@ -481,9 +535,11 @@ function serializeMarkdownBlock(block: MarkdownBlock) {
     return listItemLines(text).map((line) => `${block.marker ?? "1"}. ${line}`).join("\n");
   }
   if (block.type === "unordered-list") {
-    return listItemLines(text).map((line) => `- ${line}`).join("\n");
+    const box = block.checked === undefined ? "" : block.checked ? "[x] " : "[ ] ";
+    return listItemLines(text).map((line) => `- ${box}${line}`).join("\n");
   }
   if (block.type === "quote") return text.split("\n").map((line) => `> ${line}`).join("\n");
+  if (block.type === "thematic-break") return "---";
   if (block.type === "code") {
     // Use a fence longer than any backtick run in the code so content containing
     // ``` doesn't terminate the block early.
@@ -525,6 +581,7 @@ export function looksLikeMarkdownPaste(value: string) {
     /^\s*>\s+\S/m.test(text) ||
     /\|.+\|\s*\n\s*\|?\s*:?-{3,}:?\s*(?:\||$)/m.test(text) ||
     /\[[^\]\n]+\]\([^)]+\)/.test(text) ||
+    /<(?:https?|mailto):[^>\s]+>/.test(text) ||
     /(?:\*\*|__)[^*_]+(?:\*\*|__)/.test(text) ||
     /`[^`\n]+`/.test(text) ||
     /\n\s*\n/.test(text)
@@ -580,7 +637,7 @@ export function updateMarkdownBlock(markdown: string, blockId: string, text: str
 export function updateMarkdownBlockShape(
   markdown: string,
   blockId: string,
-  patch: Partial<Pick<MarkdownBlock, "type" | "level" | "marker">>
+  patch: Partial<Pick<MarkdownBlock, "type" | "level" | "marker" | "language" | "checked">>
 ) {
   const blocks = parseMarkdownBlocks(markdown);
   return serializeMarkdownBlocks(
@@ -690,7 +747,11 @@ export function htmlToInlineMarkdown(html: string) {
     const tag = node.tagName.toLowerCase();
     if (tag === "br") return "\n";
     if (tag === "img") {
-      const src = node.getAttribute("src")?.trim();
+      // Prefer the original markdown src stashed on inline images; fall back to the
+      // live src for pasted/foreign <img> elements — including when data-md-src is
+      // present but blank.
+      const markdownSrc = node.getAttribute("data-md-src")?.trim();
+      const src = markdownSrc || node.getAttribute("src")?.trim();
       if (!src) return "";
       return serializeMarkdownImage({ alt: node.getAttribute("alt") ?? "", src });
     }

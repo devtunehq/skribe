@@ -15,7 +15,7 @@ import {
   spliceMarkdownPaste,
   updateMarkdownBlock
 } from "../src/document.ts";
-import { getMarkdownBlockLineSpans } from "../src/markdownRanges.ts";
+import { getMarkdownBlockLineSpans, renderedMarkdownSnippet, visibleMarkdownCharacters } from "../src/markdownRanges.ts";
 
 test("an empty document can become editable Markdown through the virtual first block", () => {
   const emptyBlockId = markdownBlockIdFromIndex(0);
@@ -51,6 +51,101 @@ test("empty list items round-trip so a freshly split item survives", () => {
   assert.equal(parseMarkdownBlocks("-")[0].type, "unordered-list");
   assert.equal(parseMarkdownBlocks("-nope")[0].type, "paragraph");
   assert.equal(parseMarkdownBlocks("*emphasis*")[0].type, "paragraph");
+});
+
+test("review fixes: image scanner parity, task anchor offset, snippet image stripping", () => {
+  // Devin: a standalone image line adjacent to a paragraph (no blank line) must keep
+  // the two scanners in lockstep — one span per parsed block.
+  const adjacent = "text\n![i](a.png)";
+  assert.equal(getMarkdownBlockLineSpans(adjacent).length, parseMarkdownBlocks(adjacent).length);
+
+  // CodeRabbit: `- [x] x` — the span must anchor the visible "x" (index 6), not the
+  // "x" inside the checkbox at index 3.
+  const taskSpan = getMarkdownBlockLineSpans("- [x] x")[0];
+  assert.equal(taskSpan.textStart, 6);
+  assert.equal(taskSpan.textEnd, 7);
+
+  // CodeRabbit: inline images render with no text, so snippets drop them entirely
+  // rather than leaking "!alt".
+  assert.equal(renderedMarkdownSnippet("a ![pic](x.png) b"), "a b");
+});
+
+test("inline images contribute no visible characters and stay inside a paragraph", () => {
+  // An image within text keeps the block a paragraph (only a whole-line image is a
+  // block image), and the inline image syntax maps to zero visible characters so
+  // the <img> (no text content) and the char map agree.
+  assert.equal(parseMarkdownBlocks("look ![pic](a.png) here")[0].type, "paragraph");
+
+  const source = "a ![x](y.png) b";
+  const chars = visibleMarkdownCharacters(source);
+  assert.equal(chars.map((c) => source[c.sourceIndex]).join(""), "a  b");
+});
+
+test("autolinks map to visible URL characters with the angle brackets hidden", () => {
+  // The rendered text of `<https://x.co>` is the URL itself; the < and > are hidden,
+  // so the visible-character map must skip them or caret/anchor offsets drift.
+  const chars = visibleMarkdownCharacters("go <https://x.co> now");
+  const visible = chars.map((c) => "go <https://x.co> now"[c.sourceIndex]).join("");
+  assert.equal(visible, "go https://x.co now");
+  // The URL characters carry link metadata (so selecting them maps to the whole
+  // <…> source range), and the brackets contribute no visible characters.
+  const urlChar = chars.find((c) => c.sourceIndex === 4); // 'h' of https
+  assert.equal(urlChar.linkStart, 3); // the '<'
+  assert.equal(urlChar.linkEnd, 17); // just past the '>'
+
+  assert.ok(looksLikeMarkdownPaste("Docs at <https://example.com>"));
+});
+
+test("task list items parse, serialize and stay lockstep with plain bullets", () => {
+  const blocks = parseMarkdownBlocks("- [ ] todo\n- [x] done\n- plain");
+  assert.deepEqual(
+    blocks.map((block) => [block.type, block.checked, block.text]),
+    [
+      ["unordered-list", false, "todo"],
+      ["unordered-list", true, "done"],
+      ["unordered-list", undefined, "plain"]
+    ]
+  );
+  // Round-trips: the box is re-emitted for task items, omitted for plain bullets.
+  assert.equal(serializeMarkdownBlocks(blocks), "- [ ] todo\n- [x] done\n- plain\n");
+
+  // A box needs a following space to count; "[x]done" stays a plain bullet.
+  assert.equal(parseMarkdownBlocks("- [x]done")[0].checked, undefined);
+
+  // The two scanners still emit one span per parsed block.
+  const md = "- [ ] a\n- [x] b\n- c";
+  assert.equal(getMarkdownBlockLineSpans(md).length, parseMarkdownBlocks(md).length);
+
+  // Toggling only the checked state keeps the block's stable id (signature-aware).
+  const previous = parseMarkdownBlocks("- [ ] task");
+  const toggled = parseMarkdownBlocks("- [x] task");
+  const reconciled = reconcileBlockIds(previous, toggled, () => "fresh");
+  assert.equal(reconciled[0].id, previous[0].id);
+  assert.equal(reconciled[0].checked, true);
+});
+
+test("horizontal rules parse, serialize and keep the two block scanners in lockstep", () => {
+  // ---, *** and ___ are thematic breaks; all serialize back to a canonical ---.
+  for (const rule of ["---", "***", "___", "-----"]) {
+    const blocks = parseMarkdownBlocks(`before\n\n${rule}\n\nafter`);
+    assert.deepEqual(
+      blocks.map((block) => block.type),
+      ["paragraph", "thematic-break", "paragraph"]
+    );
+    assert.equal(serializeMarkdownBlocks(blocks), "before\n\n---\n\nafter\n");
+  }
+
+  // A --- directly under text still splits into a paragraph + rule (we do not
+  // support setext headings), and consecutive rules stay distinct blocks.
+  assert.deepEqual(
+    parseMarkdownBlocks("text\n---\n---").map((block) => block.type),
+    ["paragraph", "thematic-break", "thematic-break"]
+  );
+
+  // Invariant: getMarkdownBlockLineSpans must emit one span per parsed block.
+  for (const markdown of ["a\n\n---\n\nb", "text\n---\n---", "---\n---\n---"]) {
+    assert.equal(getMarkdownBlockLineSpans(markdown).length, parseMarkdownBlocks(markdown).length);
+  }
 });
 
 test("splitting a list item serializes into two sibling items", () => {

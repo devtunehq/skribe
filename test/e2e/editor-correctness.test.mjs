@@ -377,9 +377,21 @@ test("an image block is not a dead end: Enter adds a paragraph, Backspace delete
       "P"
     );
 
-    // Focus the image again and press Backspace -> the image is removed.
-    await evaluate(browser.cdp, "document.querySelector('.editable-image-block')?.focus()");
-    await press(browser.cdp, "Backspace", { code: "Backspace", keyCode: 8 });
+    // Backspace on the image removes it. Dispatch the keydown straight to the image
+    // node rather than relying on global focus + `press`: the Enter above schedules
+    // an async caret flush into the new paragraph that can steal focus back before
+    // the keypress lands (a flaky race, worse on slow CI). React's delegated
+    // onKeyDown still fires from the bubbling native event, exercising the same
+    // handler a real Backspace would.
+    await evaluate(
+      browser.cdp,
+      `(() => {
+        const img = document.querySelector('.editable-image-block');
+        img.focus();
+        img.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', code: 'Backspace', keyCode: 8, bubbles: true }));
+        return true;
+      })()`
+    );
     await waitFor(browser.cdp, "!document.querySelector('.editable-image-block')");
   });
 });

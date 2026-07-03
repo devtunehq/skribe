@@ -25,6 +25,7 @@ import {
   List,
   ListOrdered,
   MessageSquare,
+  Minus,
   Pilcrow,
   Quote,
   RefreshCw,
@@ -35,6 +36,9 @@ import {
   Send,
   Settings,
   Sparkles,
+  SquareCode,
+  Strikethrough,
+  Table,
   Upload,
   X
 } from "lucide-react";
@@ -82,6 +86,7 @@ import {
   titleFromMarkdown,
   wordCount,
   htmlToInlineMarkdown,
+  isThematicBreak,
   looksLikeMarkdownPaste,
   markdownBlockIdFromIndex,
   normalizeMarkdownPaste,
@@ -776,7 +781,7 @@ function markdownToClipboardText(markdown: string) {
 }
 
 const inlineMarkdownPattern =
-  /`([^`]+)`|\[([^\]\n]+)\]\(([^)\s]+)\)|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|\*([^*]+)\*|_([^_]+)_|\n/g;
+  /`([^`]+)`|!\[([^\]\n]*)\]\(([^)\s]+)\)|\[([^\]\n]+)\]\(([^)\s]+)\)|<((?:https?|mailto):[^>\s]+)>|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|\*([^*]+)\*|_([^_]+)_|\n/g;
 
 function safeRenderedMarkdownHref(href: string) {
   const trimmed = href.trim();
@@ -797,17 +802,43 @@ function inlineMarkdownNodes(markdown: string, keyPrefix = "inline") {
     const start = match.index ?? 0;
     if (start > cursor) nodes.push(markdown.slice(cursor, start));
 
-    const [raw, code, linkLabel, linkHref, boldAsterisk, boldUnderscore, strike, italicAsterisk, italicUnderscore] = match;
+    const [raw, code, imageAlt, imageSrc, linkLabel, linkHref, autolink, boldAsterisk, boldUnderscore, strike, italicAsterisk, italicUnderscore] = match;
     const nodeKey = `${keyPrefix}-${key++}`;
 
     if (code !== undefined) {
       nodes.push(<code key={nodeKey}>{code}</code>);
+    } else if (imageSrc !== undefined) {
+      // Inline image: display through imagePreviewSrc but keep the original markdown
+      // src in data-md-src so htmlToInlineMarkdown round-trips it (the preview src
+      // may be rewritten to /api/assets for non-http paths).
+      nodes.push(
+        <img
+          key={nodeKey}
+          className="inline-image"
+          src={imagePreviewSrc(imageSrc)}
+          data-md-src={imageSrc}
+          alt={imageAlt ?? ""}
+          loading="lazy"
+        />
+      );
     } else if (linkLabel !== undefined && linkHref !== undefined) {
       const safeHref = safeRenderedMarkdownHref(linkHref);
       nodes.push(
         safeHref ? (
           <a key={nodeKey} href={safeHref} target="_blank" rel="noreferrer">
             {linkLabel}
+          </a>
+        ) : (
+          raw
+        )
+      );
+    } else if (autolink !== undefined) {
+      // An autolink shows the URL itself as the link text (the <> are hidden).
+      const safeHref = safeRenderedMarkdownHref(autolink);
+      nodes.push(
+        safeHref ? (
+          <a key={nodeKey} href={safeHref} target="_blank" rel="noreferrer">
+            {autolink}
           </a>
         ) : (
           raw
@@ -900,6 +931,14 @@ function isShapeConvertibleType(type: string) {
     type === "ordered-list" ||
     type === "unordered-list"
   );
+}
+
+// Blocks with no editable text: they are kept verbatim on serialize (never
+// re-read from the DOM) and get keyboard escapes (Enter/Backspace) instead of a
+// caret. Images carry their markdown in `text`; a thematic break serializes to a
+// fixed "---".
+function isVoidBlockType(type: string) {
+  return type === "image" || type === "thematic-break";
 }
 
 function isOlderDocument(candidate: DocumentState, current: DocumentState | null) {
@@ -1574,7 +1613,7 @@ function useSkribeController() {
         text: ""
       };
 
-      if (sourceBlock.type === "image") return [sourceBlock];
+      if (isVoidBlockType(sourceBlock.type)) return [sourceBlock];
 
       const node = shell.querySelector<HTMLElement>("[data-block-id]");
       if (!node) return [sourceBlock];
@@ -1608,7 +1647,7 @@ function useSkribeController() {
 
     return serializeMarkdownBlocks(
       blocks.flatMap((block) => {
-        if (block.type === "image") return [block];
+        if (isVoidBlockType(block.type)) return [block];
         const node = blockRefs.current[block.id];
         if (!node) return [block];
         const text = blockNodeToMarkdown(node, block.type);
@@ -2531,12 +2570,10 @@ function useSkribeController() {
     // these otherwise live in the per-block handler, which doesn't fire because a
     // custom selection moves focus to the canvas. changeBlockShape reads the
     // selection draft and converts every block it covers.
-    if (isCommand && event.altKey && ["0", "1", "2", "3"].includes(key)) {
+    if (isCommand && event.altKey && ["0", "1", "2", "3", "4", "5", "6"].includes(key)) {
       event.preventDefault();
       if (key === "0") changeBlockShape({ type: "paragraph", level: undefined });
-      if (key === "1") changeBlockShape({ type: "heading", level: 1 });
-      if (key === "2") changeBlockShape({ type: "heading", level: 2 });
-      if (key === "3") changeBlockShape({ type: "heading", level: 3 });
+      else changeBlockShape({ type: "heading", level: Number(key) });
       return;
     }
     if (isCommand && event.shiftKey && key === "7") {
@@ -2547,6 +2584,12 @@ function useSkribeController() {
     if (isCommand && event.shiftKey && key === "8") {
       event.preventDefault();
       changeBlockShape({ type: "unordered-list" });
+      return;
+    }
+    // Ctrl/Cmd+Shift+. (reports as ">" under Shift on many layouts) — blockquote.
+    if (isCommand && event.shiftKey && (key === "." || key === ">")) {
+      event.preventDefault();
+      changeBlockShape({ type: "quote" });
       return;
     }
     if (event.key === "Backspace" || event.key === "Delete") {
@@ -3036,6 +3079,34 @@ function useSkribeController() {
     liveEditHistoryActiveRef.current = false;
   }
 
+  // Flip a task-list item between done and not-done. Mirrors updateBlockShape:
+  // captures the item's live text first so an in-progress edit isn't lost, then
+  // commits the new checked state and remounts.
+  function toggleTaskListItem(blockId: string) {
+    const current = stateRef.current;
+    if (!current) return;
+    const block = findBlockById(current.markdown, blockId);
+    if (!block || block.type !== "unordered-list" || block.checked === undefined) return;
+    const node = blockRefs.current[blockId];
+    const latestText = node ? blockNodeToMarkdown(node, block.type) : null;
+
+    commit((state) => {
+      const positional = positionalBlockId(state.markdown, blockId);
+      const withText = latestText !== null ? updateMarkdownBlock(state.markdown, positional, latestText) : state.markdown;
+      return {
+        ...state,
+        markdown: updateMarkdownBlockShape(withText, positional, { checked: !block.checked }),
+        review: { ...state.review, updatedAt: nowIso() }
+      };
+    }, { resyncDom: true });
+
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+  }
+
   // The stable ids of every block the current selection touches, top to bottom.
   // A collapsed caret yields the single block it sits in; a drag across blocks
   // yields all of them — so formatting can apply to a whole multi-block range.
@@ -3328,13 +3399,13 @@ function useSkribeController() {
     return true;
   }
 
-  // Markdown input rule: typing a list prefix at the very start of a paragraph
-  // ("1. ", "- ", "* ") turns it into a list item right away. Called on the space
-  // keypress (before the space is inserted); returns true when it converts, so
-  // the caller consumes the space. The caret block is found with the same
-  // whole-canvas sentinel as splitBlockAtCaret, so "start of paragraph" is correct
-  // even when one DOM shell holds several logical blocks.
-  function applyListInputRule() {
+  // Markdown input rule: typing a block prefix at the very start of a paragraph
+  // ("1. ", "- ", "* ", "# "…"###### ", "> ") turns it into that block right away.
+  // Called on the space keypress (before the space is inserted); returns true when
+  // it converts, so the caller consumes the space. The caret block is found with the
+  // same whole-canvas sentinel as splitBlockAtCaret, so "start of paragraph" is
+  // correct even when one DOM shell holds several logical blocks.
+  function applyTypeInputRule() {
     const current = stateRef.current;
     const selection = window.getSelection();
     if (!current || !selection || selection.rangeCount === 0 || !canvasRef.current) return false;
@@ -3343,12 +3414,13 @@ function useSkribeController() {
     if (!range.collapsed || !canvasRef.current.contains(range.startContainer)) return false;
 
     // Cheap pre-check so the whole-canvas serialize below only runs when the caret
-    // could actually sit right after a list prefix ("1." / "-" / "*").
+    // could actually sit right after a block prefix ("1." / "-" / "*" / "#" / ">" /
+    // a task box "[ ]" ending in "]").
     const prevChar =
       range.startContainer.nodeType === Node.TEXT_NODE && range.startOffset > 0
         ? range.startContainer.textContent?.[range.startOffset - 1]
         : "";
-    if (prevChar !== "." && prevChar !== "-" && prevChar !== "*") return false;
+    if (!prevChar || !".-*#>]".includes(prevChar)) return false;
 
     const sentinel = "\ue000";
     const marker = document.createTextNode(sentinel);
@@ -3365,20 +3437,46 @@ function useSkribeController() {
     const index = parsed.findIndex((block) => block.text.includes(sentinel));
     if (index < 0) return false;
     const target = parsed[index];
-    if (target.type !== "paragraph") return false;
     const at = target.text.indexOf(sentinel);
     const before = target.text.slice(0, at).replace(/\u200b/g, "");
     const after = target.text.slice(at + sentinel.length).replace(/\u200b/g, "");
 
-    const ordered = before.match(/^(\d+)\.$/);
-    const unordered = /^[-*]$/.test(before);
-    if (!ordered && !unordered) return false;
+    // The ordered/unordered/heading prefixes only match when the block is still a
+    // paragraph (their markers don't parse as a block without the trailing space
+    // the writer is about to type).
+    const isParagraph = target.type === "paragraph";
+    const ordered = isParagraph ? before.match(/^(\d+)\.$/) : null;
+    const heading = isParagraph ? before.match(/^(#{1,6})$/) : null;
+    const unordered = isParagraph && /^[-*]$/.test(before);
+    // ">" needs no trailing space to parse as a quote, so parseMarkdownBlocks has
+    // already produced a quote block with the caret at its start; the rule just
+    // consumes the triggering space and re-commits it as a real quote.
+    const quote = prevChar === ">" && target.type === "quote" && before === "";
+    // "[ ]" / "[x]" (empty brackets allowed) makes a task-list item, from either a
+    // paragraph or the empty text of a bullet just created by the "- " rule.
+    const task =
+      prevChar === "]" && (isParagraph || target.type === "unordered-list")
+        ? before.match(/^\[([ xX]?)\]$/)
+        : null;
+
+    if (!ordered && !heading && !unordered && !quote && !task) return false;
 
     const cleaned = parsed.map((block) => ({ ...block, text: block.text.split(sentinel).join("") }));
-    const itemText = after || "\u200b";
-    const converted = ordered
-      ? { ...cleaned[index], type: "ordered-list" as const, marker: ordered[1], level: undefined, text: itemText }
-      : { ...cleaned[index], type: "unordered-list" as const, marker: undefined, level: undefined, text: itemText };
+    const nextText = after || "\u200b";
+    let converted: (typeof parsed)[number];
+    if (ordered) {
+      converted = { ...cleaned[index], type: "ordered-list", marker: ordered[1], level: undefined, text: nextText };
+    } else if (heading) {
+      converted = { ...cleaned[index], type: "heading", marker: undefined, level: heading[1].length, text: nextText };
+    } else if (task) {
+      converted = { ...cleaned[index], type: "unordered-list", marker: undefined, level: undefined, checked: task[1].toLowerCase() === "x", text: nextText };
+    } else if (unordered) {
+      converted = { ...cleaned[index], type: "unordered-list", marker: undefined, level: undefined, text: nextText };
+    } else if (quote) {
+      converted = { ...cleaned[index], type: "quote", marker: undefined, level: undefined, text: nextText };
+    } else {
+      return false;
+    }
     const nextBlocks = [...cleaned.slice(0, index), converted, ...cleaned.slice(index + 1)];
     const markdown = serializeMarkdownBlocks(nextBlocks);
 
@@ -3392,6 +3490,96 @@ function useSkribeController() {
     }
     liveEditHistoryActiveRef.current = false;
     pendingCaretRef.current = { index, offset: 0 };
+    schedulePendingCaretFlush();
+    return true;
+  }
+
+  // Enter input rule: a paragraph whose whole line is a ``` fence (optionally with
+  // a language) becomes an empty fenced code block with the caret inside.
+  //
+  // It rebuilds from the on-screen block structure (reconciledBlocksRef) + live DOM
+  // text, NOT from a reparse of stateRef.markdown: once the 1200ms live-save debounce
+  // has run, the model already contains a bare ``` line that reparses into an
+  // unclosed fence swallowing the following blocks. The rendered blocks stay intact
+  // through that save (renderSavedState:false), so they are the reliable source.
+  function applyCodeFenceInputRule(blockId: string) {
+    const current = stateRef.current;
+    const node = blockRefs.current[blockId];
+    if (!current || !node) return false;
+
+    const rendered = reconciledBlocksRef.current.length
+      ? reconciledBlocksRef.current
+      : [{ id: blockId, type: "paragraph" as const, text: "" }];
+    const target = rendered.find((block) => block.id === blockId);
+    // Only a bare-fence paragraph converts; a real code/table/etc. block bails so
+    // its own Enter handling (newline / swallow) still runs.
+    if (target && target.type !== "paragraph") return false;
+    const fence = blockNodeToMarkdown(node, "paragraph").replace(/​/g, "").trim().match(/^```(\w*)$/);
+    if (!fence) return false;
+    const language = fence[1] || undefined;
+
+    const blocks = rendered.flatMap((block) => {
+      if (block.id === blockId) {
+        return [{ ...block, type: "code" as const, language, level: undefined, marker: undefined, checked: undefined, text: "​" }];
+      }
+      if (isVoidBlockType(block.type)) return [block];
+      const domNode = blockRefs.current[block.id];
+      if (!domNode) return [block];
+      const text = blockNodeToMarkdown(domNode, block.type);
+      return text.trim() ? [{ ...block, text }] : [];
+    });
+    const markdown = serializeMarkdownBlocks(blocks);
+
+    commit(
+      () => ({ ...current, markdown, review: { ...current.review, updatedAt: nowIso() } }),
+      { resyncDom: true }
+    );
+
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+    pendingCaretRef.current = { index: Math.max(0, blocks.findIndex((block) => block.id === blockId)), offset: 0 };
+    schedulePendingCaretFlush();
+    return true;
+  }
+
+  // Enter input rule: a paragraph whose whole line is a --- / *** / ___ rule becomes
+  // a horizontal-rule block followed by an empty paragraph for the caret.
+  function applyThematicBreakInputRule(blockId: string) {
+    const current = stateRef.current;
+    const node = blockRefs.current[blockId];
+    if (!current || !node) return false;
+    const target = findBlockById(current.markdown, blockId);
+    if (target && target.type !== "paragraph") return false;
+    if (!isThematicBreak(blockNodeToMarkdown(node, "paragraph").replace(/​/g, ""))) return false;
+
+    const liveState = stateWithLiveCanvasEdit(current);
+    const blocks = blocksForMarkdown(liveState.markdown);
+    const index = blocks.findIndex((block) => block.id === blockId);
+    const before = index >= 0 ? blocks.slice(0, index) : [];
+    const after = index >= 0 ? blocks.slice(index + 1) : [];
+    const nextBlocks = [
+      ...before,
+      { id: blockId, type: "thematic-break" as const, text: "" },
+      { id: `${blockId}-after`, type: "paragraph" as const, text: "​" },
+      ...after
+    ];
+    commit(
+      () => ({
+        ...liveState,
+        markdown: serializeMarkdownBlocks(nextBlocks),
+        review: { ...liveState.review, updatedAt: nowIso() }
+      }),
+      { resyncDom: true }
+    );
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+    pendingCaretRef.current = { index: (index >= 0 ? index : 0) + 1, offset: 0 };
     schedulePendingCaretFlush();
     return true;
   }
@@ -3472,6 +3660,73 @@ function useSkribeController() {
     const nextBlocks = [
       ...blocks.slice(0, index + 1),
       { id: `${blockId}-after`, type: "paragraph" as const, text: "\u200b" },
+      ...blocks.slice(index + 1)
+    ];
+    commit(
+      () => ({
+        ...liveState,
+        markdown: serializeMarkdownBlocks(nextBlocks),
+        review: { ...liveState.review, updatedAt: nowIso() }
+      }),
+      { resyncDom: true }
+    );
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+    pendingCaretRef.current = { index: index + 1, offset: 0 };
+    schedulePendingCaretFlush();
+    return true;
+  }
+
+  // Insert a horizontal rule after the given block, plus an empty paragraph below
+  // it so the caret has somewhere to land (the rule itself is a void block).
+  function insertThematicBreakAfterBlock(blockId: string) {
+    const current = stateRef.current;
+    if (!current) return false;
+    const liveState = stateWithLiveCanvasEdit(current);
+    const blocks = blocksForMarkdown(liveState.markdown);
+    const index = blocks.findIndex((block) => block.id === blockId);
+    if (index < 0) return false;
+
+    const nextBlocks = [
+      ...blocks.slice(0, index + 1),
+      { id: `${blockId}-hr`, type: "thematic-break" as const, text: "" },
+      { id: `${blockId}-hr-after`, type: "paragraph" as const, text: "​" },
+      ...blocks.slice(index + 1)
+    ];
+    commit(
+      () => ({
+        ...liveState,
+        markdown: serializeMarkdownBlocks(nextBlocks),
+        review: { ...liveState.review, updatedAt: nowIso() }
+      }),
+      { resyncDom: true }
+    );
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+    pendingCaretRef.current = { index: index + 2, offset: 0 };
+    schedulePendingCaretFlush();
+    return true;
+  }
+
+  // Insert a starter 2×2 table after the given block and drop the caret into it.
+  function insertTableAfterBlock(blockId: string) {
+    const current = stateRef.current;
+    if (!current) return false;
+    const liveState = stateWithLiveCanvasEdit(current);
+    const blocks = blocksForMarkdown(liveState.markdown);
+    const index = blocks.findIndex((block) => block.id === blockId);
+    if (index < 0) return false;
+
+    const tableText = "| Column 1 | Column 2 |\n| --- | --- |\n| Cell | Cell |";
+    const nextBlocks = [
+      ...blocks.slice(0, index + 1),
+      { id: `${blockId}-table`, type: "table" as const, text: tableText },
       ...blocks.slice(index + 1)
     ];
     commit(
@@ -3611,10 +3866,10 @@ function useSkribeController() {
     const isCommand = event.metaKey || event.ctrlKey;
     const key = event.key.toLowerCase();
 
-    // Image blocks can't hold a caret, so give them keyboard escapes: Enter adds
-    // a paragraph after the image, Backspace/Delete removes it. Other keys fall
-    // through (so Cmd+Z etc. still work).
-    if (!isCommand && (stateRef.current ? findBlockById(stateRef.current.markdown, blockId)?.type : null) === "image") {
+    // Void blocks (images, horizontal rules) can't hold a caret, so give them
+    // keyboard escapes: Enter adds a paragraph after, Backspace/Delete removes the
+    // block. Other keys fall through (so Cmd+Z etc. still work).
+    if (!isCommand && isVoidBlockType((stateRef.current ? findBlockById(stateRef.current.markdown, blockId)?.type : null) ?? "")) {
       if (event.key === "Enter") {
         event.preventDefault();
         insertParagraphAfterBlock(blockId);
@@ -3676,8 +3931,9 @@ function useSkribeController() {
       }
     }
 
-    // Typing a list prefix ("1. ", "- ", "* ") at the start of a paragraph turns
-    // it into a list item; the space that triggers the rule is consumed.
+    // Typing a block prefix ("1. ", "- ", "* ", "# ", "> ") at the start of a
+    // paragraph turns it into that block; the space that triggers the rule is
+    // consumed.
     if (
       event.key === " " &&
       !event.metaKey &&
@@ -3686,7 +3942,7 @@ function useSkribeController() {
       !event.shiftKey &&
       !event.nativeEvent.isComposing
     ) {
-      if (applyListInputRule()) {
+      if (applyTypeInputRule()) {
         event.preventDefault();
         return;
       }
@@ -3705,6 +3961,13 @@ function useSkribeController() {
         return;
       }
 
+      // Typing ``` (optionally with a language) on its own line and pressing Enter
+      // opens an empty fenced code block. This runs BEFORE the code/table branches:
+      // once the live-save debounce has reparsed the bare fence into an unclosed
+      // code block, `type` is already "code", so the newline path below would win
+      // and leave the fence unclosed (swallowing following blocks) if this ran later.
+      if (applyCodeFenceInputRule(blockId)) return;
+
       // A table cell can't hold a line break (it collapses to a space on
       // serialize), so swallow Enter rather than insert a break that vanishes.
       if (type === "table") {
@@ -3718,6 +3981,10 @@ function useSkribeController() {
         rememberCanvasSelection();
         return;
       }
+
+      // Typing ---, *** or ___ on its own line and pressing Enter inserts a
+      // horizontal rule and drops the caret into a fresh paragraph below it.
+      if (applyThematicBreakInputRule(blockId)) return;
 
       // Every other block splits at the caret into a new block immediately.
       if (splitBlockAtCaret()) return;
@@ -3739,6 +4006,11 @@ function useSkribeController() {
       applyInlineCommand("italic");
       return;
     }
+    if (event.shiftKey && key === "x") {
+      event.preventDefault();
+      applyInlineCommand("strikeThrough");
+      return;
+    }
     if (key === "`") {
       event.preventDefault();
       applyInlineCode();
@@ -3749,13 +4021,17 @@ function useSkribeController() {
       openLinkPopover();
       return;
     }
-    if (event.altKey && ["0", "1", "2", "3"].includes(key)) {
+    if (event.altKey && ["0", "1", "2", "3", "4", "5", "6"].includes(key)) {
       event.preventDefault();
       setActiveBlockId(blockId);
       if (key === "0") changeBlockShape({ type: "paragraph", level: undefined }, blockId);
-      if (key === "1") changeBlockShape({ type: "heading", level: 1 }, blockId);
-      if (key === "2") changeBlockShape({ type: "heading", level: 2 }, blockId);
-      if (key === "3") changeBlockShape({ type: "heading", level: 3 }, blockId);
+      else changeBlockShape({ type: "heading", level: Number(key) }, blockId);
+      return;
+    }
+    if (event.altKey && key === "c") {
+      event.preventDefault();
+      setActiveBlockId(blockId);
+      changeBlockShape({ type: "code", level: undefined, marker: undefined }, blockId);
       return;
     }
     if (event.shiftKey && key === "7") {
@@ -3768,6 +4044,14 @@ function useSkribeController() {
       event.preventDefault();
       setActiveBlockId(blockId);
       changeBlockShape({ type: "unordered-list" }, blockId);
+      return;
+    }
+    // Ctrl/Cmd+Shift+. — the "." key reports as ">" under Shift on many layouts,
+    // so accept either.
+    if (event.shiftKey && (key === "." || key === ">")) {
+      event.preventDefault();
+      setActiveBlockId(blockId);
+      changeBlockShape({ type: "quote" }, blockId);
     }
   }
 
@@ -4024,6 +4308,9 @@ function useSkribeController() {
     updatePanelState,
     restoreRevision,
     updateActiveBlockShape,
+    insertThematicBreakAfterBlock,
+    insertTableAfterBlock,
+    toggleTaskListItem,
     applyInlineCommand,
     applyInlineCode,
     openLinkPopover,
@@ -4570,7 +4857,8 @@ function CenterPane() {
     updateCanvasBlock,
     updateFloatingToolbarPosition,
     updateProposalChangeDecision,
-    updateProposalStatus
+    updateProposalStatus,
+    toggleTaskListItem
   } = useSkribeControllerContext();
 
   if (!documentState) return null;
@@ -4632,6 +4920,7 @@ function CenterPane() {
           onDocumentInput={scheduleLiveCanvasCommit}
           onMoveBlock={moveCanvasBlock}
           onDeleteBlock={deleteCanvasBlock}
+          onToggleTask={toggleTaskListItem}
           onProposalChangeDecision={updateProposalChangeDecision}
           onRequestProposalRevision={requestProposalRevision}
           onTableImageExported={notifyTableImageExported}
@@ -4649,7 +4938,9 @@ function CanvasToolbar() {
     applyInlineCommand,
     openLinkPopover,
     startCommentFromSelection,
-    updateActiveBlockShape
+    updateActiveBlockShape,
+    insertThematicBreakAfterBlock,
+    insertTableAfterBlock
   } = useSkribeControllerContext();
 
   return (
@@ -4674,6 +4965,9 @@ function CanvasToolbar() {
         <button type="button" title="Italic (Ctrl/Cmd+I)" onMouseDown={(event) => { event.preventDefault(); applyInlineCommand("italic"); }}>
           <Italic size={16} />
         </button>
+        <button type="button" title="Strikethrough (Ctrl/Cmd+Shift+X)" onMouseDown={(event) => { event.preventDefault(); applyInlineCommand("strikeThrough"); }}>
+          <Strikethrough size={16} />
+        </button>
         <button type="button" title="Inline code (Ctrl/Cmd+`)" onMouseDown={(event) => { event.preventDefault(); applyInlineCode(); }}>
           <Code2 size={16} />
         </button>
@@ -4692,6 +4986,15 @@ function CanvasToolbar() {
         </button>
         <button type="button" title="Quote" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "quote" }); }}>
           <Quote size={16} />
+        </button>
+        <button type="button" title="Code block (Ctrl/Cmd+Alt+C)" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); updateActiveBlockShape({ type: "code", level: undefined, marker: undefined }); }}>
+          <SquareCode size={16} />
+        </button>
+        <button type="button" title="Horizontal rule" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); if (activeBlockId) insertThematicBreakAfterBlock(activeBlockId); }}>
+          <Minus size={16} />
+        </button>
+        <button type="button" title="Insert table" disabled={!activeBlockId} onMouseDown={(event) => { event.preventDefault(); if (activeBlockId) insertTableAfterBlock(activeBlockId); }}>
+          <Table size={16} />
         </button>
         <span className="toolbar-divider" />
         <button type="button" title="Comment on selected text" onMouseDown={(event) => { event.preventDefault(); startCommentFromSelection(); }}>
@@ -4897,8 +5200,10 @@ function SkribeOverlays() {
           activeBlockId={activeBlockId}
           onParagraph={() => updateActiveBlockShape({ type: "paragraph", level: undefined })}
           onHeading={(level) => updateActiveBlockShape({ type: "heading", level })}
+          onCodeBlock={() => updateActiveBlockShape({ type: "code", level: undefined, marker: undefined })}
           onBold={() => applyInlineCommand("bold")}
           onItalic={() => applyInlineCommand("italic")}
+          onStrikethrough={() => applyInlineCommand("strikeThrough")}
           onInlineCode={applyInlineCode}
           onLink={openLinkPopover}
           onImage={() => imageInputRef.current?.click()}
@@ -5351,6 +5656,7 @@ interface MarkdownCanvasProps {
   onDocumentInput: () => void;
   onMoveBlock: (blockId: string, targetBlockId: string, placement: BlockDropPlacement) => void;
   onDeleteBlock: (blockId: string) => void;
+  onToggleTask: (blockId: string) => void;
   onProposalChangeDecision: (proposalId: string, changeKey: string, decision: ProposalChangeDecision) => void;
   onRequestProposalRevision: (proposalId: string, change: ProposalChangeBlock, instruction: string) => void;
   onTableImageExported: (status: "success" | "error") => void;
@@ -5361,8 +5667,10 @@ function FloatingFormatToolbar({
   activeBlockId,
   onParagraph,
   onHeading,
+  onCodeBlock,
   onBold,
   onItalic,
+  onStrikethrough,
   onInlineCode,
   onLink,
   onImage,
@@ -5372,8 +5680,10 @@ function FloatingFormatToolbar({
   activeBlockId: string | null;
   onParagraph: () => void;
   onHeading: (level: 1 | 2 | 3) => void;
+  onCodeBlock: () => void;
   onBold: () => void;
   onItalic: () => void;
+  onStrikethrough: () => void;
   onInlineCode: () => void;
   onLink: () => void;
   onImage: () => void;
@@ -5398,12 +5708,18 @@ function FloatingFormatToolbar({
       <button type="button" title="Heading 3" disabled={!activeBlockId} onMouseDown={keepSelection} onClick={() => onHeading(3)}>
         <Heading3 size={15} />
       </button>
+      <button type="button" title="Code block" disabled={!activeBlockId} onMouseDown={keepSelection} onClick={onCodeBlock}>
+        <SquareCode size={15} />
+      </button>
       <span className="toolbar-divider" />
       <button type="button" title="Bold" onMouseDown={keepSelection} onClick={onBold}>
         <Bold size={15} />
       </button>
       <button type="button" title="Italic" onMouseDown={keepSelection} onClick={onItalic}>
         <Italic size={15} />
+      </button>
+      <button type="button" title="Strikethrough" onMouseDown={keepSelection} onClick={onStrikethrough}>
+        <Strikethrough size={15} />
       </button>
       <button type="button" title="Inline code" onMouseDown={keepSelection} onClick={onInlineCode}>
         <Code2 size={15} />
@@ -5510,6 +5826,7 @@ function EditableMarkdownCanvas({
   onDocumentInput,
   onMoveBlock,
   onDeleteBlock,
+  onToggleTask,
   onProposalChangeDecision,
   onRequestProposalRevision,
   onTableImageExported
@@ -5702,6 +6019,7 @@ function EditableMarkdownCanvas({
                   onShortcut={onShortcut}
                   onCommitDocument={onCommitDocument}
                   onDocumentInput={onDocumentInput}
+                  onToggleTask={onToggleTask}
                   onTableImageExported={onTableImageExported}
                 />
               </EditableBlockShell>
@@ -5803,6 +6121,7 @@ interface EditableBlockProps {
   onShortcut: (event: React.KeyboardEvent<HTMLElement>, blockId: string) => void;
   onCommitDocument: () => void;
   onDocumentInput: () => void;
+  onToggleTask: (blockId: string) => void;
   onTableImageExported: (status: "success" | "error") => void;
 }
 
@@ -5820,6 +6139,7 @@ const EditableBlock = React.memo(function EditableBlock({
   onShortcut,
   onCommitDocument,
   onDocumentInput,
+  onToggleTask,
   onTableImageExported
 }: EditableBlockProps) {
   const editableRef = useRef<HTMLElement | null>(null);
@@ -5883,9 +6203,25 @@ const EditableBlock = React.memo(function EditableBlock({
   }
 
   if (block.type === "ordered-list" || block.type === "unordered-list") {
+    const isTask = block.type === "unordered-list" && block.checked !== undefined;
     return (
-      <div className={`editable-list-row ${block.type}`}>
-        <span className="editable-list-marker">{block.type === "ordered-list" ? `${block.marker ?? "1"}.` : "-"}</span>
+      <div className={`editable-list-row ${block.type}${isTask ? " task" : ""}${isTask && block.checked ? " checked" : ""}`}>
+        {isTask ? (
+          <button
+            type="button"
+            className="editable-task-checkbox"
+            role="checkbox"
+            aria-checked={block.checked}
+            aria-label={block.checked ? "Mark task not done" : "Mark task done"}
+            contentEditable={false}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => onToggleTask(block.id)}
+          >
+            {block.checked ? <Check size={13} /> : null}
+          </button>
+        ) : (
+          <span className="editable-list-marker">{block.type === "ordered-list" ? `${block.marker ?? "1"}.` : "-"}</span>
+        )}
         <div {...editableProps}>{children}</div>
       </div>
     );
@@ -5904,6 +6240,26 @@ const EditableBlock = React.memo(function EditableBlock({
       <pre className="editable-code">
         <code {...editableProps}>{block.text}</code>
       </pre>
+    );
+  }
+
+  if (block.type === "thematic-break") {
+    return (
+      <div
+        id={block.id}
+        data-block-id={block.id}
+        className="editable-thematic-break"
+        contentEditable={false}
+        tabIndex={0}
+        role="separator"
+        aria-label="Horizontal rule"
+        ref={(node) => onRegisterBlock(block.id, node)}
+        onClick={() => onFocusBlock(block.id)}
+        onFocus={() => onFocusBlock(block.id)}
+        onKeyDown={(event) => onShortcut(event, block.id)}
+      >
+        <hr />
+      </div>
     );
   }
 
@@ -6083,6 +6439,7 @@ function areEditableBlockPropsEqual(previous: EditableBlockProps, next: Editable
     previous.block.level === next.block.level &&
     previous.block.marker === next.block.marker &&
     previous.block.language === next.block.language &&
+    previous.block.checked === next.block.checked &&
     previous.onTableImageExported === next.onTableImageExported &&
     threadsRenderKey(previous.threads) === threadsRenderKey(next.threads)
   );
