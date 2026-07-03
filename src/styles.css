@@ -1774,11 +1774,13 @@ button {
 
 .table-add-column {
   position: absolute;
-  top: -34px;
+  /* Sit just above the table's top-right, within its 24px top margin, so the
+     hover control can't spill into a tightly-spaced block above. */
+  top: -22px;
   right: 34px;
   z-index: 3;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   border-radius: var(--radius);
   box-shadow: -2px 2px 0 0 var(--ink);
 }

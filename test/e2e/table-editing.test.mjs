@@ -64,7 +64,7 @@ test("the add-row control appends an empty body row", async (t) => {
     assert.deepEqual(await tableCounts(browser.cdp), { cols: 2, rows: 1 });
     assert.ok(await clickControl(browser.cdp, ".table-add-row"));
     await waitFor(browser.cdp, "document.querySelectorAll('.editable-table tbody tr').length === 2");
-    await waitForFileText(markdownPath, /\| 1 \| 2 \|\n\|\s*\|\s*\|/);
+    await waitForFileText(markdownPath, /\| 1 \| 2 \|\n\|[ \t]*\|[ \t]*\|/);
     // The new empty row shouldn't collapse thinner than the filled one (empty cells
     // render a <br> so they keep a full line box).
     const heights = await evaluate(
@@ -86,8 +86,8 @@ test("the add-column control appends an empty column", async (t) => {
     await waitFor(browser.cdp, "!!document.querySelector('.editable-table')");
     assert.ok(await clickControl(browser.cdp, ".table-add-column"));
     await waitFor(browser.cdp, "document.querySelectorAll('.editable-table thead th').length === 3");
-    // Header row now has three cells.
-    await waitForFileText(markdownPath, /\| A \| B \|\s*\|/);
+    // Header row now has three cells (match only within the single header line).
+    await waitForFileText(markdownPath, /\| A \| B \|[ \t]*\|/);
   });
 });
 
@@ -99,7 +99,7 @@ test("the per-row delete control removes that body row", async (t) => {
     assert.ok(await clickControl(browser.cdp, ".table-delete-row", 1));
     await waitFor(browser.cdp, "document.querySelectorAll('.editable-table tbody tr').length === 1");
     // "keep" ends the table only after the delete saves (originally "drop" followed).
-    await waitForFileText(markdownPath, /\| keep \| x \|\s*$/);
+    await waitForFileText(markdownPath, /\| keep \| x \|[ \t]*\n?$/);
     const saved = await readFile(markdownPath, "utf8");
     assert.match(saved, /keep/);
     assert.doesNotMatch(saved, /drop/);
@@ -127,6 +127,30 @@ test("a two-column table exposes no delete-column control (min two columns)", as
       await evaluate(browser.cdp, "document.querySelectorAll('.table-delete-column').length"),
       0
     );
+  });
+});
+
+test("a single-row table exposes no delete-row control (min one body row)", async (t) => {
+  await withApp(t, TABLE, async ({ browser }) => {
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-table tbody tr').length === 1");
+    assert.equal(
+      await evaluate(browser.cdp, "document.querySelectorAll('.table-delete-row').length"),
+      0
+    );
+  });
+});
+
+test("a cell containing a pipe survives a structural edit without corruption", async (t) => {
+  // "a | b" is stored escaped as "a \\| b"; adding a row round-trips through the DOM
+  // (htmlToInlineMarkdown -> serializeMarkdownTable) and must not double the backslash.
+  const md = "| h1 | h2 |\n| --- | --- |\n| a \\| b | c |\n";
+  await withApp(t, md, async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-table')");
+    assert.ok(await clickControl(browser.cdp, ".table-add-row"));
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-table tbody tr').length === 2");
+    await waitForFileText(markdownPath, /a \\\| b/);
+    const saved = await readFile(markdownPath, "utf8");
+    assert.doesNotMatch(saved, /\\\\/); // no doubled backslash
   });
 });
 
@@ -185,6 +209,6 @@ test("Tab in the last cell appends a new row", async (t) => {
     assert.ok(await caretInCell(browser.cdp, 3));
     await press(browser.cdp, "Tab", { code: "Tab", keyCode: 9 });
     await waitFor(browser.cdp, "document.querySelectorAll('.editable-table tbody tr').length === 2");
-    await waitForFileText(markdownPath, /\| 1 \| 2 \|\n\|\s*\|\s*\|/);
+    await waitForFileText(markdownPath, /\| 1 \| 2 \|\n\|[ \t]*\|[ \t]*\|/);
   });
 });

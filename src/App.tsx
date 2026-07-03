@@ -3155,10 +3155,12 @@ function useSkribeController() {
     liveEditHistoryActiveRef.current = false;
   }
 
-  // Put the caret at the end of a table cell's content.
+  // Put the caret at the end of a table cell's content. Focuses the editable table
+  // first so the caret is real even when the cell lives in a freshly remounted node.
   function focusTableCell(cell: Element) {
     const selection = window.getSelection();
     if (!selection) return;
+    (cell.closest("[contenteditable='true']") as HTMLElement | null)?.focus();
     const range = document.createRange();
     range.selectNodeContents(cell);
     range.collapse(false);
@@ -3185,13 +3187,22 @@ function useSkribeController() {
     if (targetIndex < 0) return false;
     if (targetIndex >= cells.length) {
       if (backwards) return false;
+      const priorRowCount = tableNode.querySelectorAll("tbody tr").length;
       editTable(blockId, { kind: "add-row" });
-      // The add remounts the table, so focus the new row's first cell next frame.
-      requestAnimationFrame(() => {
+      // The add commits with resyncDom, so the new row appears after React remounts
+      // the table. Poll a few frames (rather than a single rAF) until the extra row
+      // exists, then focus its first cell — the remount can miss one frame under load.
+      let attempts = 0;
+      const focusNewRow = () => {
         const bodyRows = blockRefs.current[blockId]?.querySelectorAll("tbody tr");
-        const firstCell = bodyRows?.[bodyRows.length - 1]?.querySelector("td");
-        if (firstCell) focusTableCell(firstCell);
-      });
+        if (bodyRows && bodyRows.length > priorRowCount) {
+          const firstCell = bodyRows[bodyRows.length - 1].querySelector("td");
+          if (firstCell) focusTableCell(firstCell);
+        } else if (attempts++ < 10) {
+          requestAnimationFrame(focusNewRow);
+        }
+      };
+      requestAnimationFrame(focusNewRow);
       return true;
     }
 
@@ -6477,6 +6488,9 @@ function EditableTableBlock({
   const columnCount = Math.max(table.headers.length, ...table.rows.map((row) => row.length), 2);
   const headers = Array.from({ length: columnCount }, (_, index) => table.headers[index] ?? "");
   const hasBodyRows = table.rows.length > 0;
+  // Deleting the last body row would leave a header-only table (blocked in
+  // withTableRowRemoved), so only offer the delete-row control at two rows or more.
+  const canDeleteRows = table.rows.length > 1;
   const rows = hasBodyRows ? table.rows : [Array.from({ length: columnCount }, () => "")];
   const headerCells = keyedRenderItems(headers, `header-${block.id}`, (cell) => cell);
   const rowEntries = keyedRenderItems(rows, `row-${block.id}`, (row) => row.join("\u001f"));
@@ -6556,7 +6570,7 @@ function EditableTableBlock({
               <tr key={rowKey}>
                 {rowCells.map(({ item: cell, key }, columnIndex) => (
                   <td key={key} style={cellStyle(columnIndex)}>
-                    {columnIndex === 0 && hasBodyRows ? (
+                    {columnIndex === 0 && canDeleteRows ? (
                       <button
                         type="button"
                         className="table-delete-row"

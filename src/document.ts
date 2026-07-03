@@ -297,12 +297,15 @@ function splitTableRow(line: string) {
 
   for (const character of trimmed) {
     if (escaped) {
+      // Unescape: keep the escaped character, drop the backslash. Returning clean
+      // (unescaped) cell values keeps parse -> serialize idempotent — serialization
+      // is the single place that re-escapes, so pipes can't accrue backslashes on
+      // repeated edits.
       cell += character;
       escaped = false;
       continue;
     }
     if (character === "\\") {
-      cell += character;
       escaped = true;
       continue;
     }
@@ -675,9 +678,12 @@ function escapeTableCell(value: string) {
   return value.replace(/\|/g, "\\|").replace(/\n+/g, " ").trim();
 }
 
+// Pad every row to a common width (minimum two columns). Cell values are left as
+// they are — escaping happens once, at serialize time (serializeMarkdownTable), so
+// values pass through here unchanged whether they came from a parse or an edit.
 function normalizeTableRows(rows: string[][]) {
   const width = Math.max(2, ...rows.map((row) => row.length));
-  return rows.map((row) => Array.from({ length: width }, (_, index) => escapeTableCell(row[index] ?? "")));
+  return rows.map((row) => Array.from({ length: width }, (_, index) => row[index] ?? ""));
 }
 
 export function parseMarkdownTable(markdown: string) {
@@ -738,8 +744,10 @@ export function withTableRowAdded(markdown: string) {
 
 export function withTableRowRemoved(markdown: string, rowIndex: number) {
   const table = parseMarkdownTable(markdown);
-  // rowIndex is the body-row index; the header row is structural and can't go.
-  if (!table) return markdown;
+  // rowIndex is the body-row index; the header row is structural and can't go. Keep
+  // at least one body row: a header-only table renders a synthetic placeholder row
+  // that the live-save would serialize back, silently undoing the delete.
+  if (!table || table.rows.length <= 1) return markdown;
   return serializeMarkdownTable(table.headers, table.rows.filter((_, index) => index !== rowIndex));
 }
 
