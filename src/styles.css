@@ -1527,20 +1527,24 @@ button {
   margin-bottom: 22px;
 }
 
+/* A quote is an accent-bar blockquote — deliberately NOT the recessed smoke-gray
+   box that code blocks use, so the two read as different at a glance. */
 .markdown-canvas blockquote,
 .editable-quote {
-  border: 1px solid var(--line-ink);
-  background: var(--smoke-gray);
-  margin: 26px auto;
-  padding: 16px 18px;
+  border: 0;
+  border-left: 4px solid var(--line-ink);
+  background: transparent;
+  margin: 22px auto;
+  padding: 2px 0 2px 22px;
   color: var(--text);
-  border-radius: var(--radius-card);
+  border-radius: 0;
 }
 
 .editable-quote .editable-text {
   font-family: var(--font-document);
   font-size: 18px;
   line-height: 1.6;
+  font-style: italic;
 }
 
 .markdown-canvas code {

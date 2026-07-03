@@ -420,3 +420,31 @@ test("converting an empty code block to a quote keeps it and does not hijack the
     );
   });
 });
+
+test("a quote block is styled distinctly from a code block (accent bar, not a box)", async (t) => {
+  await withApp(t, "> a quote\n\n```\ncode\n```\n", async ({ browser }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-quote') && !!document.querySelector('.editable-code')");
+    const style = await evaluate(
+      browser.cdp,
+      `(() => {
+        const q = getComputedStyle(document.querySelector('.editable-quote'));
+        const c = getComputedStyle(document.querySelector('.editable-code'));
+        const qtext = getComputedStyle(document.querySelector('.editable-quote .editable-text'));
+        return {
+          quoteBorderLeft: parseFloat(q.borderLeftWidth),
+          quoteBorderTop: parseFloat(q.borderTopWidth),
+          quoteBg: q.backgroundColor,
+          codeBg: c.backgroundColor,
+          quoteItalic: qtext.fontStyle
+        };
+      })()`
+    );
+    // Accent bar: a thick left border, no top border.
+    assert.ok(style.quoteBorderLeft >= 3, `quote left border too thin (${style.quoteBorderLeft})`);
+    assert.equal(style.quoteBorderTop, 0, "quote should not have a full box border");
+    // Not the recessed code box: transparent background, unlike the code block.
+    assert.match(style.quoteBg, /rgba\(0, 0, 0, 0\)|transparent/, "quote should have no box background");
+    assert.notEqual(style.quoteBg, style.codeBg);
+    assert.equal(style.quoteItalic, "italic");
+  });
+});
