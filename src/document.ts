@@ -297,12 +297,15 @@ function splitTableRow(line: string) {
 
   for (const character of trimmed) {
     if (escaped) {
+      // Unescape: keep the escaped character, drop the backslash. Returning clean
+      // (unescaped) cell values keeps parse -> serialize idempotent — serialization
+      // is the single place that re-escapes, so pipes can't accrue backslashes on
+      // repeated edits.
       cell += character;
       escaped = false;
       continue;
     }
     if (character === "\\") {
-      cell += character;
       escaped = true;
       continue;
     }
@@ -675,9 +678,12 @@ function escapeTableCell(value: string) {
   return value.replace(/\|/g, "\\|").replace(/\n+/g, " ").trim();
 }
 
+// Pad every row to a common width (minimum two columns). Cell values are left as
+// they are — escaping happens once, at serialize time (serializeMarkdownTable), so
+// values pass through here unchanged whether they came from a parse or an edit.
 function normalizeTableRows(rows: string[][]) {
   const width = Math.max(2, ...rows.map((row) => row.length));
-  return rows.map((row) => Array.from({ length: width }, (_, index) => escapeTableCell(row[index] ?? "")));
+  return rows.map((row) => Array.from({ length: width }, (_, index) => row[index] ?? ""));
 }
 
 export function parseMarkdownTable(markdown: string) {
@@ -710,7 +716,42 @@ export function parseMarkdownTable(markdown: string) {
   };
 }
 
-function serializeMarkdownTable(headers: string[], rows: string[][]) {
+// Structure edits on a table's Markdown text. Each parses, transforms the
+// headers/body, and re-serializes; an unparseable string (or an edit that would
+// break the 2-column / header-row minimums Markdown tables require) is returned
+// unchanged. Column alignment is not preserved — serializeMarkdownTable already
+// drops it on every edit, so these match that existing behaviour.
+export function withTableColumnAdded(markdown: string) {
+  const table = parseMarkdownTable(markdown);
+  if (!table) return markdown;
+  return serializeMarkdownTable([...table.headers, ""], table.rows.map((row) => [...row, ""]));
+}
+
+export function withTableColumnRemoved(markdown: string, columnIndex: number) {
+  const table = parseMarkdownTable(markdown);
+  // A Markdown table needs at least two columns, so refuse to drop below that.
+  if (!table || table.headers.length <= 2) return markdown;
+  const dropColumn = (row: string[]) => row.filter((_, index) => index !== columnIndex);
+  return serializeMarkdownTable(dropColumn(table.headers), table.rows.map(dropColumn));
+}
+
+export function withTableRowAdded(markdown: string) {
+  const table = parseMarkdownTable(markdown);
+  if (!table) return markdown;
+  const emptyRow = Array.from({ length: table.headers.length }, () => "");
+  return serializeMarkdownTable(table.headers, [...table.rows, emptyRow]);
+}
+
+export function withTableRowRemoved(markdown: string, rowIndex: number) {
+  const table = parseMarkdownTable(markdown);
+  // rowIndex is the body-row index; the header row is structural and can't go. Keep
+  // at least one body row: a header-only table renders a synthetic placeholder row
+  // that the live-save would serialize back, silently undoing the delete.
+  if (!table || table.rows.length <= 1) return markdown;
+  return serializeMarkdownTable(table.headers, table.rows.filter((_, index) => index !== rowIndex));
+}
+
+export function serializeMarkdownTable(headers: string[], rows: string[][]) {
   const normalizedRows = normalizeTableRows([headers, ...rows]);
   const width = normalizedRows[0]?.length ?? 2;
   const header = normalizedRows[0] ?? Array.from({ length: width }, () => "");

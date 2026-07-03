@@ -11,6 +11,10 @@ import {
   parseMarkdownTable,
   reconcileBlockIds,
   serializeMarkdownBlocks,
+  withTableColumnAdded,
+  withTableColumnRemoved,
+  withTableRowAdded,
+  withTableRowRemoved,
   shouldPasteAsMarkdownBlocks,
   spliceMarkdownPaste,
   updateMarkdownBlock
@@ -51,6 +55,45 @@ test("empty list items round-trip so a freshly split item survives", () => {
   assert.equal(parseMarkdownBlocks("-")[0].type, "unordered-list");
   assert.equal(parseMarkdownBlocks("-nope")[0].type, "paragraph");
   assert.equal(parseMarkdownBlocks("*emphasis*")[0].type, "paragraph");
+});
+
+test("table structure helpers add and remove rows and columns", () => {
+  const base = "| A | B |\n| --- | --- |\n| 1 | 2 |";
+
+  // Add a body row (empty cells) and a column (empty header + cell).
+  assert.deepEqual(parseMarkdownTable(withTableRowAdded(base)).rows, [["1", "2"], ["", ""]]);
+  const widened = parseMarkdownTable(withTableColumnAdded(base));
+  assert.deepEqual(widened.headers, ["A", "B", ""]);
+  assert.deepEqual(widened.rows, [["1", "2", ""]]);
+
+  // Remove a body row from a two-row table; the last remaining body row can't be
+  // deleted (that would leave a header-only table the live-save would refill).
+  const twoRow = "| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |";
+  assert.deepEqual(parseMarkdownTable(withTableRowRemoved(twoRow, 1)).rows, [["1", "2"]]);
+  assert.equal(withTableRowRemoved(base, 0), base);
+
+  // Remove a middle column from a 3-column table.
+  const threeCol = "| A | B | C |\n| --- | --- | --- |\n| 1 | 2 | 3 |";
+  const narrowed = parseMarkdownTable(withTableColumnRemoved(threeCol, 1));
+  assert.deepEqual(narrowed.headers, ["A", "C"]);
+  assert.deepEqual(narrowed.rows, [["1", "3"]]);
+
+  // Guards: can't drop below two columns, and a non-table string is unchanged.
+  assert.equal(withTableColumnRemoved(base, 0), base);
+  assert.equal(withTableRowAdded("not a table"), "not a table");
+});
+
+test("table cells with pipes stay clean and don't accumulate backslashes on edits", () => {
+  // parse returns unescaped cell values, and serialization re-escapes exactly once,
+  // so repeated structural edits never grow extra backslashes.
+  const piped = "| a \\| b | c |\n| --- | --- |\n| x | y |";
+  assert.deepEqual(parseMarkdownTable(piped).headers, ["a | b", "c"]);
+
+  let md = piped;
+  for (let i = 0; i < 3; i += 1) md = withTableRowAdded(md);
+  assert.doesNotMatch(md, /\\\\/); // no doubled backslashes
+  assert.match(md, /a \\\| b/); // header pipe still singly escaped
+  assert.deepEqual(parseMarkdownTable(md).headers, ["a | b", "c"]);
 });
 
 test("review fixes: image scanner parity, task anchor offset, snippet image stripping", () => {
@@ -291,10 +334,12 @@ test("markdown tables preserve alignment and escaped pipe markers", () => {
     "| Retention | 31% | trims cells |"
   ].join("\n"));
 
+  // The escaped pipe parses to a literal "|" (unescaped); serialization re-escapes
+  // it, so the round-trip stays idempotent instead of accreting backslashes.
   assert.deepEqual(table, {
     headers: ["Metric", "Result", "Notes"],
     rows: [
-      ["Activation", "42%", "handles escaped \\\\| pipes"],
+      ["Activation", "42%", "handles escaped | pipes"],
       ["Retention", "31%", "trims cells"]
     ],
     alignments: ["left", "right", "center"]
