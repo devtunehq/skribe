@@ -288,3 +288,89 @@ test("a horizontal rule from the file renders and can be deleted with Backspace"
     assert.equal(await readFile(markdownPath, "utf8"), "above\n\nbelow\n");
   });
 });
+
+// --- Backfill: affordances that shipped without their own e2e coverage ---
+
+async function selectBlockText(cdp, blockId) {
+  return evaluate(
+    cdp,
+    `(() => {
+      const b = document.querySelector('[data-block-id="${blockId}"]');
+      b.focus();
+      const r = document.createRange();
+      r.selectNodeContents(b);
+      const s = getSelection();
+      s.removeAllRanges();
+      s.addRange(r);
+      return true;
+    })()`
+  );
+}
+
+async function focusBlockByClick(cdp, blockId) {
+  const point = await evaluate(
+    cdp,
+    `(() => {
+      const b = document.querySelector('[data-block-id="${blockId}"]');
+      const r = b.getBoundingClientRect();
+      return { x: r.left + 4, y: r.top + r.height / 2 };
+    })()`
+  );
+  await mouseClick(cdp, point);
+}
+
+// Toolbar buttons act on mousedown, so drive them with a real CDP click (which
+// fires mousedown), not a programmatic .click().
+async function clickToolbarButton(cdp, selector) {
+  const point = await evaluate(
+    cdp,
+    `(() => {
+      const b = document.querySelector('${selector}');
+      if (!b) return null;
+      const r = b.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    })()`
+  );
+  assert.ok(point, `toolbar button not found: ${selector}`);
+  await mouseClick(cdp, point);
+}
+
+test("Ctrl+Shift+X strikes through the selection", async (t) => {
+  await withApp(t, "strike me\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('[data-block-id=\"block-0\"]')");
+    await selectBlockText(browser.cdp, "block-0");
+    await press(browser.cdp, "x", { code: "KeyX", keyCode: 88, ctrlKey: true, shiftKey: true });
+    await waitForFileText(markdownPath, /~~strike me~~/);
+  });
+});
+
+test("the strikethrough toolbar button strikes the selection", async (t) => {
+  await withApp(t, "cross out\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('[data-block-id=\"block-0\"]')");
+    await selectBlockText(browser.cdp, "block-0");
+    await clickToolbarButton(browser.cdp, '.format-toolbar button[title^="Strikethrough"]');
+    await waitForFileText(markdownPath, /~~cross out~~/);
+  });
+});
+
+test("the code-block toolbar button converts the active block", async (t) => {
+  await withApp(t, "printf\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('[data-block-id=\"block-0\"]')");
+    await focusBlockByClick(browser.cdp, "block-0");
+    await waitFor(browser.cdp, "!document.querySelector('button[title^=\"Code block\"]')?.disabled");
+    await clickToolbarButton(browser.cdp, 'button[title^="Code block"]');
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-code')");
+    await waitForFileText(markdownPath, /```\nprintf\n```/);
+  });
+});
+
+test("the horizontal-rule toolbar button inserts a rule", async (t) => {
+  await withApp(t, "intro\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('[data-block-id=\"block-0\"]')");
+    await focusBlockByClick(browser.cdp, "block-0");
+    await waitFor(browser.cdp, "!document.querySelector('button[title=\"Horizontal rule\"]')?.disabled");
+    await clickToolbarButton(browser.cdp, 'button[title="Horizontal rule"]');
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-thematic-break')");
+    await waitForFileText(markdownPath, /intro\n\n---/);
+  });
+});
