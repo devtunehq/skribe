@@ -260,7 +260,7 @@ test("the toolbar inserts a starter table after the active block", async (t) => 
       })()`
     );
     await mouseClick(browser.cdp, blockPoint);
-    await waitFor(browser.cdp, "!document.querySelector('button[title=\"Insert table\"]')?.disabled");
+    await waitFor(browser.cdp, "!!document.querySelector('button[title=\"Insert table\"]') && !document.querySelector('button[title=\"Insert table\"]').disabled");
     const point = await evaluate(
       browser.cdp,
       `(() => {
@@ -357,7 +357,7 @@ test("the code-block toolbar button converts the active block", async (t) => {
   await withApp(t, "printf\n", async ({ browser, markdownPath }) => {
     await waitFor(browser.cdp, "!!document.querySelector('[data-block-id=\"block-0\"]')");
     await focusBlockByClick(browser.cdp, "block-0");
-    await waitFor(browser.cdp, "!document.querySelector('button[title^=\"Code block\"]')?.disabled");
+    await waitFor(browser.cdp, "!!document.querySelector('button[title^=\"Code block\"]') && !document.querySelector('button[title^=\"Code block\"]').disabled");
     await clickToolbarButton(browser.cdp, 'button[title^="Code block"]');
     await waitFor(browser.cdp, "!!document.querySelector('.editable-code')");
     await waitForFileText(markdownPath, /```\nprintf\n```/);
@@ -368,7 +368,7 @@ test("the horizontal-rule toolbar button inserts a rule", async (t) => {
   await withApp(t, "intro\n", async ({ browser, markdownPath }) => {
     await waitFor(browser.cdp, "!!document.querySelector('[data-block-id=\"block-0\"]')");
     await focusBlockByClick(browser.cdp, "block-0");
-    await waitFor(browser.cdp, "!document.querySelector('button[title=\"Horizontal rule\"]')?.disabled");
+    await waitFor(browser.cdp, "!!document.querySelector('button[title=\"Horizontal rule\"]') && !document.querySelector('button[title=\"Horizontal rule\"]').disabled");
     await clickToolbarButton(browser.cdp, 'button[title="Horizontal rule"]');
     await waitFor(browser.cdp, "!!document.querySelector('.editable-thematic-break')");
     await waitForFileText(markdownPath, /intro\n\n---/);
@@ -405,7 +405,7 @@ test("converting an empty code block to a quote keeps it and does not hijack the
     );
     // Focus the empty code block with a real click, then convert via the toolbar.
     await clickToolbarButton(browser.cdp, ".editable-code code");
-    await waitFor(browser.cdp, "!document.querySelector('button[title=\"Quote\"]')?.disabled");
+    await waitFor(browser.cdp, "!!document.querySelector('button[title=\"Quote\"]') && !document.querySelector('button[title=\"Quote\"]').disabled");
     await clickToolbarButton(browser.cdp, 'button[title="Quote"]');
     await new Promise((r) => setTimeout(r, 700));
     const saved = await readFile(markdownPath, "utf8");
@@ -418,5 +418,74 @@ test("converting an empty code block to a quote keeps it and does not hijack the
       0,
       "removeChild error thrown during conversion"
     );
+  });
+});
+
+test("a quote block is styled distinctly from a code block (accent bar, not a box)", async (t) => {
+  await withApp(t, "> a quote\n\n```\ncode\n```\n", async ({ browser }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-quote') && !!document.querySelector('.editable-code')");
+    const style = await evaluate(
+      browser.cdp,
+      `(() => {
+        const q = getComputedStyle(document.querySelector('.editable-quote'));
+        const c = getComputedStyle(document.querySelector('.editable-code'));
+        const qtext = getComputedStyle(document.querySelector('.editable-quote .editable-text'));
+        return {
+          quoteBorderLeft: parseFloat(q.borderLeftWidth),
+          quoteBorderTop: parseFloat(q.borderTopWidth),
+          quoteBg: q.backgroundColor,
+          codeBg: c.backgroundColor,
+          quoteItalic: qtext.fontStyle
+        };
+      })()`
+    );
+    // Accent bar: a thick left border, no top border.
+    assert.ok(style.quoteBorderLeft >= 3, `quote left border too thin (${style.quoteBorderLeft})`);
+    assert.equal(style.quoteBorderTop, 0, "quote should not have a full box border");
+    // Not the recessed code box: transparent background, unlike the code block.
+    assert.match(style.quoteBg, /rgba\(0, 0, 0, 0\)|transparent/, "quote should have no box background");
+    assert.notEqual(style.quoteBg, style.codeBg);
+    assert.equal(style.quoteItalic, "italic");
+  });
+});
+
+test("code content with HTML-like text renders literally (no injection) and round-trips", async (t) => {
+  // dangerouslySetInnerHTML must escape, so `<b>`/`<script>` are shown as text, not
+  // injected as elements, and the markdown file keeps the raw characters.
+  const md = "```\n<b>x</b> & <script>y</script>\n```\n";
+  await withApp(t, md, async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-code')");
+    assert.equal(
+      await evaluate(browser.cdp, "document.querySelectorAll('.editable-code code b, .editable-code code script').length"),
+      0,
+      "HTML in code was injected as real elements"
+    );
+    assert.match(
+      await evaluate(browser.cdp, "document.querySelector('.editable-code code').textContent"),
+      /<b>x<\/b> & <script>y<\/script>/
+    );
+    assert.equal(await readFile(markdownPath, "utf8"), md); // file keeps raw characters
+  });
+});
+
+test("converting a code block with content to a quote does not throw (removeChild regression)", async (t) => {
+  await withApp(t, "```js\nconst a = 1;\nconst b = 2;\n```\n\nafter\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-code')");
+    await evaluate(
+      browser.cdp,
+      "window.__errs = []; window.addEventListener('error', (e) => window.__errs.push(String(e.message)));"
+    );
+    await clickToolbarButton(browser.cdp, ".editable-code code");
+    await waitFor(browser.cdp, "!!document.querySelector('button[title=\"Quote\"]') && !document.querySelector('button[title=\"Quote\"]').disabled");
+    await clickToolbarButton(browser.cdp, 'button[title="Quote"]');
+    await new Promise((r) => setTimeout(r, 600));
+    assert.equal(
+      (await evaluate(browser.cdp, "window.__errs || []")).filter((e) => /removeChild|not a child/.test(e)).length,
+      0
+    );
+    // The code content became a quote; "after" is untouched.
+    const saved = await readFile(markdownPath, "utf8");
+    assert.doesNotMatch(saved, /```/, "block should no longer be code");
+    assert.match(saved, /after/);
   });
 });
