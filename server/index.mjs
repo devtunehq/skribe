@@ -404,6 +404,7 @@ function normalizeConfiguredRuntime(value) {
 
 function normalizeConfiguredModel(value) {
   const model = String(value || "").trim();
+  if (model && model !== "auto" && !/^[a-zA-Z0-9:_.-]+$/.test(model)) return "auto";
   return model || "auto";
 }
 
@@ -3725,7 +3726,8 @@ function runProcess(command, args, stdin, timeoutMs, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd || activeDocument.docDir,
-      stdio: ["pipe", "pipe", "pipe"]
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: process.platform === "win32"
     });
     let stdout = "";
     let stderr = "";
