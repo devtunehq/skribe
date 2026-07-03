@@ -14,7 +14,8 @@ function chromiumPath() {
 }
 
 function randomPort() {
-  return 47000 + Math.floor(Math.random() * 1000);
+  // Wide range so parallel/sequential test servers rarely collide.
+  return 20000 + Math.floor(Math.random() * 25000);
 }
 
 async function waitForHttpJson(url, timeoutMs = 8000) {
@@ -56,6 +57,22 @@ export async function makeMarkdownDoc(name, markdown) {
 }
 
 export async function startSkribeServer(markdownPath, options = {}) {
+  // When the caller doesn't pin a port, retry on a fresh random port if the server
+  // can't bind — CI picks from a shared range and occasionally hits one already in
+  // use, which used to fail the test outright.
+  const attempts = options.port ? 1 : 5;
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await startSkribeServerOnce(markdownPath, options);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+async function startSkribeServerOnce(markdownPath, options = {}) {
   const configDir = await mkdtemp(join(tmpdir(), "skribe-e2e-config-"));
   const dataDir = await mkdtemp(join(tmpdir(), "skribe-e2e-data-"));
   const port = options.port ?? randomPort();
