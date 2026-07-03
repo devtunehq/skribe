@@ -11,6 +11,10 @@ import {
   parseMarkdownTable,
   reconcileBlockIds,
   serializeMarkdownBlocks,
+  withTableColumnAdded,
+  withTableColumnRemoved,
+  withTableRowAdded,
+  withTableRowRemoved,
   shouldPasteAsMarkdownBlocks,
   spliceMarkdownPaste,
   updateMarkdownBlock
@@ -51,6 +55,29 @@ test("empty list items round-trip so a freshly split item survives", () => {
   assert.equal(parseMarkdownBlocks("-")[0].type, "unordered-list");
   assert.equal(parseMarkdownBlocks("-nope")[0].type, "paragraph");
   assert.equal(parseMarkdownBlocks("*emphasis*")[0].type, "paragraph");
+});
+
+test("table structure helpers add and remove rows and columns", () => {
+  const base = "| A | B |\n| --- | --- |\n| 1 | 2 |";
+
+  // Add a body row (empty cells) and a column (empty header + cell).
+  assert.deepEqual(parseMarkdownTable(withTableRowAdded(base)).rows, [["1", "2"], ["", ""]]);
+  const widened = parseMarkdownTable(withTableColumnAdded(base));
+  assert.deepEqual(widened.headers, ["A", "B", ""]);
+  assert.deepEqual(widened.rows, [["1", "2", ""]]);
+
+  // Remove the only body row -> a header-only table (still valid).
+  assert.deepEqual(parseMarkdownTable(withTableRowRemoved(base, 0)).rows, []);
+
+  // Remove a middle column from a 3-column table.
+  const threeCol = "| A | B | C |\n| --- | --- | --- |\n| 1 | 2 | 3 |";
+  const narrowed = parseMarkdownTable(withTableColumnRemoved(threeCol, 1));
+  assert.deepEqual(narrowed.headers, ["A", "C"]);
+  assert.deepEqual(narrowed.rows, [["1", "3"]]);
+
+  // Guards: can't drop below two columns, and a non-table string is unchanged.
+  assert.equal(withTableColumnRemoved(base, 0), base);
+  assert.equal(withTableRowAdded("not a table"), "not a table");
 });
 
 test("review fixes: image scanner parity, task anchor offset, snippet image stripping", () => {
