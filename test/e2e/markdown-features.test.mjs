@@ -260,7 +260,7 @@ test("the toolbar inserts a starter table after the active block", async (t) => 
       })()`
     );
     await mouseClick(browser.cdp, blockPoint);
-    await waitFor(browser.cdp, "!document.querySelector('button[title=\"Insert table\"]')?.disabled");
+    await waitFor(browser.cdp, "!!document.querySelector('button[title=\"Insert table\"]') && !document.querySelector('button[title=\"Insert table\"]').disabled");
     const point = await evaluate(
       browser.cdp,
       `(() => {
@@ -357,7 +357,7 @@ test("the code-block toolbar button converts the active block", async (t) => {
   await withApp(t, "printf\n", async ({ browser, markdownPath }) => {
     await waitFor(browser.cdp, "!!document.querySelector('[data-block-id=\"block-0\"]')");
     await focusBlockByClick(browser.cdp, "block-0");
-    await waitFor(browser.cdp, "!document.querySelector('button[title^=\"Code block\"]')?.disabled");
+    await waitFor(browser.cdp, "!!document.querySelector('button[title^=\"Code block\"]') && !document.querySelector('button[title^=\"Code block\"]').disabled");
     await clickToolbarButton(browser.cdp, 'button[title^="Code block"]');
     await waitFor(browser.cdp, "!!document.querySelector('.editable-code')");
     await waitForFileText(markdownPath, /```\nprintf\n```/);
@@ -368,7 +368,7 @@ test("the horizontal-rule toolbar button inserts a rule", async (t) => {
   await withApp(t, "intro\n", async ({ browser, markdownPath }) => {
     await waitFor(browser.cdp, "!!document.querySelector('[data-block-id=\"block-0\"]')");
     await focusBlockByClick(browser.cdp, "block-0");
-    await waitFor(browser.cdp, "!document.querySelector('button[title=\"Horizontal rule\"]')?.disabled");
+    await waitFor(browser.cdp, "!!document.querySelector('button[title=\"Horizontal rule\"]') && !document.querySelector('button[title=\"Horizontal rule\"]').disabled");
     await clickToolbarButton(browser.cdp, 'button[title="Horizontal rule"]');
     await waitFor(browser.cdp, "!!document.querySelector('.editable-thematic-break')");
     await waitForFileText(markdownPath, /intro\n\n---/);
@@ -405,7 +405,7 @@ test("converting an empty code block to a quote keeps it and does not hijack the
     );
     // Focus the empty code block with a real click, then convert via the toolbar.
     await clickToolbarButton(browser.cdp, ".editable-code code");
-    await waitFor(browser.cdp, "!document.querySelector('button[title=\"Quote\"]')?.disabled");
+    await waitFor(browser.cdp, "!!document.querySelector('button[title=\"Quote\"]') && !document.querySelector('button[title=\"Quote\"]').disabled");
     await clickToolbarButton(browser.cdp, 'button[title="Quote"]');
     await new Promise((r) => setTimeout(r, 700));
     const saved = await readFile(markdownPath, "utf8");
@@ -476,7 +476,7 @@ test("converting a code block with content to a quote does not throw (removeChil
       "window.__errs = []; window.addEventListener('error', (e) => window.__errs.push(String(e.message)));"
     );
     await clickToolbarButton(browser.cdp, ".editable-code code");
-    await waitFor(browser.cdp, "!document.querySelector('button[title=\"Quote\"]')?.disabled");
+    await waitFor(browser.cdp, "!!document.querySelector('button[title=\"Quote\"]') && !document.querySelector('button[title=\"Quote\"]').disabled");
     await clickToolbarButton(browser.cdp, 'button[title="Quote"]');
     await new Promise((r) => setTimeout(r, 600));
     assert.equal(

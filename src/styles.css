@@ -1538,13 +1538,15 @@ button {
   padding: 2px 0 2px 22px;
   color: var(--text);
   border-radius: 0;
+  /* On the container so both the editable quote and read-only rendered quotes
+     (which have no .editable-text wrapper) get the italic distinction. */
+  font-style: italic;
 }
 
 .editable-quote .editable-text {
   font-family: var(--font-document);
   font-size: 18px;
   line-height: 1.6;
-  font-style: italic;
 }
 
 .markdown-canvas code {
