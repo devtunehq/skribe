@@ -27,6 +27,7 @@ import {
   MessageSquare,
   Minus,
   Pilcrow,
+  Plus,
   Quote,
   RefreshCw,
   RotateCcw,
@@ -99,7 +100,11 @@ import {
   shouldPasteAsMarkdownBlocks,
   spliceMarkdownPaste,
   updateMarkdownBlock,
-  updateMarkdownBlockShape
+  updateMarkdownBlockShape,
+  withTableColumnAdded,
+  withTableColumnRemoved,
+  withTableRowAdded,
+  withTableRowRemoved
 } from "./document";
 import {
   applyProposalDecisionTransitions,
@@ -923,6 +928,14 @@ function scrollToInlineChange(changeKey: string | null) {
 
 // Block types whose shape can be swapped by the formatting controls (paragraph /
 // heading / quote / list). Images, tables and code are left untouched.
+// A structural edit to a table: add or delete a row/column. `index` is the
+// body-row or column index for the delete variants (ignored by the adds).
+type TableEdit =
+  | { kind: "add-row" }
+  | { kind: "add-column" }
+  | { kind: "delete-row"; index: number }
+  | { kind: "delete-column"; index: number };
+
 function isShapeConvertibleType(type: string) {
   return (
     type === "paragraph" ||
@@ -3107,6 +3120,41 @@ function useSkribeController() {
     liveEditHistoryActiveRef.current = false;
   }
 
+  // Add or remove a table row/column. Serializes the live table DOM first (so any
+  // in-progress cell edits survive), applies the structure change to that Markdown,
+  // then commits + remounts. A no-op transform (e.g. delete blocked by the 2-column
+  // minimum) leaves the document untouched.
+  function editTable(blockId: string, edit: TableEdit) {
+    const current = stateRef.current;
+    const node = blockRefs.current[blockId];
+    if (!current || !node) return;
+    const currentText = blockNodeToMarkdown(node, "table");
+    const nextText =
+      edit.kind === "add-row"
+        ? withTableRowAdded(currentText)
+        : edit.kind === "add-column"
+          ? withTableColumnAdded(currentText)
+          : edit.kind === "delete-row"
+            ? withTableRowRemoved(currentText, edit.index ?? -1)
+            : withTableColumnRemoved(currentText, edit.index ?? -1);
+    if (nextText === currentText) return;
+
+    commit((state) => {
+      const positional = positionalBlockId(state.markdown, blockId);
+      return {
+        ...state,
+        markdown: updateMarkdownBlock(state.markdown, positional, nextText),
+        review: { ...state.review, updatedAt: nowIso() }
+      };
+    }, { resyncDom: true });
+
+    if (liveEditTimerRef.current) {
+      window.clearTimeout(liveEditTimerRef.current);
+      liveEditTimerRef.current = null;
+    }
+    liveEditHistoryActiveRef.current = false;
+  }
+
   // The stable ids of every block the current selection touches, top to bottom.
   // A collapsed caret yields the single block it sits in; a drag across blocks
   // yields all of them — so formatting can apply to a whole multi-block range.
@@ -4311,6 +4359,7 @@ function useSkribeController() {
     insertThematicBreakAfterBlock,
     insertTableAfterBlock,
     toggleTaskListItem,
+    editTable,
     applyInlineCommand,
     applyInlineCode,
     openLinkPopover,
@@ -4858,7 +4907,8 @@ function CenterPane() {
     updateFloatingToolbarPosition,
     updateProposalChangeDecision,
     updateProposalStatus,
-    toggleTaskListItem
+    toggleTaskListItem,
+    editTable
   } = useSkribeControllerContext();
 
   if (!documentState) return null;
@@ -4921,6 +4971,7 @@ function CenterPane() {
           onMoveBlock={moveCanvasBlock}
           onDeleteBlock={deleteCanvasBlock}
           onToggleTask={toggleTaskListItem}
+          onEditTable={editTable}
           onProposalChangeDecision={updateProposalChangeDecision}
           onRequestProposalRevision={requestProposalRevision}
           onTableImageExported={notifyTableImageExported}
@@ -5657,6 +5708,7 @@ interface MarkdownCanvasProps {
   onMoveBlock: (blockId: string, targetBlockId: string, placement: BlockDropPlacement) => void;
   onDeleteBlock: (blockId: string) => void;
   onToggleTask: (blockId: string) => void;
+  onEditTable: (blockId: string, edit: TableEdit) => void;
   onProposalChangeDecision: (proposalId: string, changeKey: string, decision: ProposalChangeDecision) => void;
   onRequestProposalRevision: (proposalId: string, change: ProposalChangeBlock, instruction: string) => void;
   onTableImageExported: (status: "success" | "error") => void;
@@ -5827,6 +5879,7 @@ function EditableMarkdownCanvas({
   onMoveBlock,
   onDeleteBlock,
   onToggleTask,
+  onEditTable,
   onProposalChangeDecision,
   onRequestProposalRevision,
   onTableImageExported
@@ -6020,6 +6073,7 @@ function EditableMarkdownCanvas({
                   onCommitDocument={onCommitDocument}
                   onDocumentInput={onDocumentInput}
                   onToggleTask={onToggleTask}
+                  onEditTable={onEditTable}
                   onTableImageExported={onTableImageExported}
                 />
               </EditableBlockShell>
@@ -6122,6 +6176,7 @@ interface EditableBlockProps {
   onCommitDocument: () => void;
   onDocumentInput: () => void;
   onToggleTask: (blockId: string) => void;
+  onEditTable: (blockId: string, edit: TableEdit) => void;
   onTableImageExported: (status: "success" | "error") => void;
 }
 
@@ -6140,6 +6195,7 @@ const EditableBlock = React.memo(function EditableBlock({
   onCommitDocument,
   onDocumentInput,
   onToggleTask,
+  onEditTable,
   onTableImageExported
 }: EditableBlockProps) {
   const editableRef = useRef<HTMLElement | null>(null);
@@ -6275,7 +6331,14 @@ const EditableBlock = React.memo(function EditableBlock({
   }
 
   if (block.type === "table") {
-    return <EditableTableBlock block={block} editableProps={editableProps} onTableImageExported={onTableImageExported} />;
+    return (
+      <EditableTableBlock
+        block={block}
+        editableProps={editableProps}
+        onEditTable={onEditTable}
+        onTableImageExported={onTableImageExported}
+      />
+    );
   }
 
   return (
@@ -6338,10 +6401,12 @@ function EditableImageBlock({
 function EditableTableBlock({
   block,
   editableProps,
+  onEditTable,
   onTableImageExported
 }: {
   block: ReturnType<typeof parseMarkdownBlocks>[number];
   editableProps: React.HTMLAttributes<HTMLElement> & { ref: (node: HTMLElement | null) => void; "data-block-id": string };
+  onEditTable: (blockId: string, edit: TableEdit) => void;
   onTableImageExported: (status: "success" | "error") => void;
 }) {
   const tableRef = useRef<HTMLTableElement | null>(null);
@@ -6356,7 +6421,8 @@ function EditableTableBlock({
 
   const columnCount = Math.max(table.headers.length, ...table.rows.map((row) => row.length), 2);
   const headers = Array.from({ length: columnCount }, (_, index) => table.headers[index] ?? "");
-  const rows = table.rows.length > 0 ? table.rows : [Array.from({ length: columnCount }, () => "")];
+  const hasBodyRows = table.rows.length > 0;
+  const rows = hasBodyRows ? table.rows : [Array.from({ length: columnCount }, () => "")];
   const headerCells = keyedRenderItems(headers, `header-${block.id}`, (cell) => cell);
   const rowEntries = keyedRenderItems(rows, `row-${block.id}`, (row) => row.join("\u001f"));
   const cellStyle = (index: number): React.CSSProperties => {
@@ -6377,6 +6443,16 @@ function EditableTableBlock({
       onTableImageExported("error");
     }
   };
+  // Structure controls sit inside the contentEditable table, so keep the caret put
+  // (preventDefault on mousedown) and don't let the click bubble into cell editing.
+  const keepCaret = (event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  const runEdit = (edit: TableEdit) => (event: React.MouseEvent) => {
+    keepCaret(event);
+    onEditTable(block.id, edit);
+  };
 
   return (
     <div className="editable-table-shell">
@@ -6384,13 +6460,9 @@ function EditableTableBlock({
         type="button"
         className="table-image-download"
         contentEditable={false}
-        onMouseDown={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-        }}
+        onMouseDown={keepCaret}
         onClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
+          keepCaret(event);
           void exportTableImage();
         }}
         title="Download table as image"
@@ -6404,18 +6476,44 @@ function EditableTableBlock({
             {headerCells.map(({ item: cell, key }, columnIndex) => (
               <th key={key} style={cellStyle(columnIndex)}>
                 <InlineMarkdown markdown={cell} keyPrefix={key} />
+                {columnCount > 2 ? (
+                  <button
+                    type="button"
+                    className="table-delete-column"
+                    contentEditable={false}
+                    title="Delete column"
+                    aria-label="Delete column"
+                    onMouseDown={keepCaret}
+                    onClick={runEdit({ kind: "delete-column", index: columnIndex })}
+                  >
+                    <X size={11} />
+                  </button>
+                ) : null}
               </th>
             ))}
           </tr>
         </thead>
         <tbody>
-          {rowEntries.map(({ item: row, key: rowKey }) => {
+          {rowEntries.map(({ item: row, key: rowKey }, rowIndex) => {
             const cells = Array.from({ length: columnCount }, (_, columnIndex) => row[columnIndex] ?? "");
             const rowCells = keyedRenderItems(cells, `cell-${rowKey}`, (cell) => cell);
             return (
               <tr key={rowKey}>
                 {rowCells.map(({ item: cell, key }, columnIndex) => (
                   <td key={key} style={cellStyle(columnIndex)}>
+                    {columnIndex === 0 && hasBodyRows ? (
+                      <button
+                        type="button"
+                        className="table-delete-row"
+                        contentEditable={false}
+                        title="Delete row"
+                        aria-label="Delete row"
+                        onMouseDown={keepCaret}
+                        onClick={runEdit({ kind: "delete-row", index: rowIndex })}
+                      >
+                        <X size={11} />
+                      </button>
+                    ) : null}
                     <InlineMarkdown markdown={cell} keyPrefix={key} />
                   </td>
                 ))}
@@ -6424,6 +6522,28 @@ function EditableTableBlock({
           })}
         </tbody>
       </table>
+      <button
+        type="button"
+        className="table-add-column"
+        contentEditable={false}
+        title="Add column"
+        aria-label="Add column"
+        onMouseDown={keepCaret}
+        onClick={runEdit({ kind: "add-column" })}
+      >
+        <Plus size={14} />
+      </button>
+      <button
+        type="button"
+        className="table-add-row"
+        contentEditable={false}
+        title="Add row"
+        aria-label="Add row"
+        onMouseDown={keepCaret}
+        onClick={runEdit({ kind: "add-row" })}
+      >
+        <Plus size={14} />
+      </button>
     </div>
   );
 }

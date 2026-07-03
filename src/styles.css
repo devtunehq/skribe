@@ -1750,6 +1750,93 @@ button {
   outline: none;
 }
 
+/* Table structure controls — hidden until the table (or the relevant row/column)
+   is hovered/focused. They stay in the DOM so they remain programmatically
+   reachable; pointer-events guard against invisible click targets. */
+.table-add-column,
+.table-add-row,
+.table-delete-row,
+.table-delete-column {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--line-ink);
+  background: var(--paper-white);
+  color: var(--text-strong);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 120ms ease,
+    background 120ms ease;
+}
+
+.table-add-column {
+  position: absolute;
+  top: -34px;
+  right: 34px;
+  z-index: 3;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius);
+  box-shadow: -2px 2px 0 0 var(--ink);
+}
+
+.table-add-row {
+  width: 100%;
+  height: 22px;
+  margin-top: 6px;
+  border-radius: var(--radius);
+}
+
+.table-delete-row,
+.table-delete-column {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  z-index: 3;
+}
+
+.table-delete-column {
+  top: 4px;
+  right: 4px;
+}
+
+.table-delete-row {
+  top: 50%;
+  left: 4px;
+  transform: translateY(-50%);
+}
+
+.editable-table th,
+.editable-table td {
+  position: relative;
+}
+
+.editable-table-shell:hover .table-add-column,
+.editable-table-shell:focus-within .table-add-column,
+.editable-table-shell:hover .table-add-row,
+.editable-table-shell:focus-within .table-add-row,
+.editable-table th:hover .table-delete-column,
+.editable-table tbody tr:hover .table-delete-row,
+.table-add-column:focus-visible,
+.table-add-row:focus-visible,
+.table-delete-row:focus-visible,
+.table-delete-column:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.table-add-column:hover,
+.table-add-row:hover,
+.table-delete-row:hover,
+.table-delete-column:hover {
+  background: var(--mellow-yellow);
+  outline: none;
+}
+
 .editable-table th,
 .editable-table td {
   min-width: 110px;
