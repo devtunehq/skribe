@@ -81,7 +81,23 @@ export async function startSkribeServer(markdownPath, options = {}) {
   child.stderr.on("data", (chunk) => output.push(chunk.toString()));
 
   const baseUrl = `http://127.0.0.1:${port}`;
-  await waitForHttpJson(`${baseUrl}/api/health`);
+  try {
+    // Allow a generous window: a loaded CI box can be slow to boot the server, and
+    // an 8s default was flaking intermittently.
+    await waitForHttpJson(`${baseUrl}/api/health`, 25000);
+  } catch (error) {
+    // Kill the spawned server on a failed start. Otherwise the leaked child keeps
+    // node --test from exiting, hanging the whole file until the runner's timeout.
+    if (child.exitCode === null) {
+      child.kill("SIGKILL");
+      await Promise.race([once(child, "exit"), new Promise((resolve) => setTimeout(resolve, 500))]);
+    }
+    await removeTempDir(configDir).catch(() => {});
+    await removeTempDir(dataDir).catch(() => {});
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)}\nServer output:\n${output.join("")}`
+    );
+  }
 
   return {
     baseUrl,
