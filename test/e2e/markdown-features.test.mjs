@@ -374,3 +374,49 @@ test("the horizontal-rule toolbar button inserts a rule", async (t) => {
     await waitForFileText(markdownPath, /intro\n\n---/);
   });
 });
+
+// --- Regressions: empty code block robustness (reported "removeChild" crash) ---
+
+test("an empty code block survives the live-save debounce (does not vanish)", async (t) => {
+  await withApp(t, "", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('[data-block-id=\"block-0\"]')");
+    await caretInBlock(browser.cdp, "block-0");
+    await insertText(browser.cdp, "```");
+    await press(browser.cdp, "Enter", { code: "Enter", keyCode: 13 });
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-code')");
+    await new Promise((r) => setTimeout(r, 1500)); // past the 1200ms live-save debounce
+    assert.ok(
+      await evaluate(browser.cdp, "!!document.querySelector('.editable-code')"),
+      "empty code block vanished after the live-save"
+    );
+    await waitForFileText(markdownPath, /```/);
+    // The preserved empty block must not smuggle a hidden sentinel between the
+    // fences — it round-trips as a genuinely empty fenced block.
+    assert.doesNotMatch(await readFile(markdownPath, "utf8"), /​/, "sentinel persisted inside the code fence");
+  });
+});
+
+test("converting an empty code block to a quote keeps it and does not hijack the next block", async (t) => {
+  await withApp(t, "```\n\n```\n\nafter\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-code')");
+    await evaluate(
+      browser.cdp,
+      "window.__errs = []; window.addEventListener('error', (e) => window.__errs.push(String(e.message)));"
+    );
+    // Focus the empty code block with a real click, then convert via the toolbar.
+    await clickToolbarButton(browser.cdp, ".editable-code code");
+    await waitFor(browser.cdp, "!document.querySelector('button[title=\"Quote\"]')?.disabled");
+    await clickToolbarButton(browser.cdp, 'button[title="Quote"]');
+    await new Promise((r) => setTimeout(r, 700));
+    const saved = await readFile(markdownPath, "utf8");
+    // The following paragraph must not be pulled into a quote (it used to be, when
+    // the empty code block got dropped and everything shifted up).
+    assert.doesNotMatch(saved, /> after/, '"after" was hijacked into a quote');
+    assert.match(saved, /after/, '"after" was lost');
+    assert.equal(
+      (await evaluate(browser.cdp, "window.__errs || []")).filter((e) => /removeChild/.test(e)).length,
+      0,
+      "removeChild error thrown during conversion"
+    );
+  });
+});
