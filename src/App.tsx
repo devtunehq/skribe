@@ -1633,6 +1633,11 @@ function useSkribeController() {
 
       const text = blockNodeToMarkdown(node, sourceBlock.type);
       if (text.trim()) return [{ ...sourceBlock, text }];
+      // A code block is a deliberate structural block: keep it even when empty (its
+      // contentEditable can read back as "" or a placeholder-<br> "\n") so it isn't
+      // dropped on a live-save or mid-conversion, which would shift the next block
+      // up into its place.
+      if (sourceBlock.type === "code") return [{ ...sourceBlock, text: "​" }];
       // Keep an empty block while the caret is inside it — e.g. a block just
       // created with Enter that the writer is about to fill in. Lists round-trip
       // empty as "- "; other empty blocks need a zero-width-space sentinel so the
@@ -1664,7 +1669,10 @@ function useSkribeController() {
         const node = blockRefs.current[block.id];
         if (!node) return [block];
         const text = blockNodeToMarkdown(node, block.type);
-        return text.trim() ? [{ ...block, text }] : [];
+        if (text.trim()) return [{ ...block, text }];
+        // Keep an empty code block (structural) rather than dropping it.
+        if (block.type === "code") return [{ ...block, text: "​" }];
+        return [];
       })
     );
   }
@@ -3067,11 +3075,18 @@ function useSkribeController() {
     // The commit below serializes the live DOM (capturing this and any other
     // block's in-progress edits) while the debounce timer is still armed, then
     // remounts the block under its new shape via resyncDom.
+    //
+    // Only fold the live text back in when it has real content. An empty block —
+    // notably a focused empty code block, whose contentEditable reports the
+    // browser's placeholder <br> as "\n" — would otherwise be *deleted* by
+    // updateMarkdownBlock (empty text drops the block) rather than converted, and
+    // unmounting that focused, browser-mutated node throws "removeChild".
     commit((state) => {
       const positional = positionalBlockId(state.markdown, blockId);
-      const markdownWithLatestText = currentText
-        ? updateMarkdownBlock(state.markdown, positional, currentText)
-        : state.markdown;
+      const markdownWithLatestText =
+        currentText && currentText.trim()
+          ? updateMarkdownBlock(state.markdown, positional, currentText)
+          : state.markdown;
       return {
         ...state,
         markdown: updateMarkdownBlockShape(markdownWithLatestText, positional, patch),
