@@ -272,6 +272,15 @@ function editableCodeNodeToText(node: HTMLElement) {
   return text.replace(/\u00a0/g, " ").replace(/\u200b/g, "");
 }
 
+// Escaped HTML for a code block's contentEditable, rendered via dangerouslySetInnerHTML
+// so React never reconciles its (browser-mutated) children. `white-space: pre-wrap`
+// renders the newlines; an empty block gets a placeholder <br> for a caret line.
+function codeBlockInnerHtml(text: string) {
+  const stripped = text.replace(/\u200b/g, "");
+  if (stripped === "") return "<br>";
+  return stripped.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 function blockNodeToMarkdown(node: HTMLElement, blockType?: string) {
   if (blockType === "code") return editableCodeNodeToText(node);
   const html = blockType === "table" ? node.outerHTML : node.innerHTML;
@@ -6375,9 +6384,16 @@ const EditableBlock = React.memo(function EditableBlock({
   }
 
   if (block.type === "code") {
+    // Set the code content as opaque innerHTML instead of JSX children. The browser's
+    // contentEditable mutates those children (splits text, moves the placeholder
+    // <br>) out from under React, so when the block is converted to another type
+    // React's child reconciliation tries to removeChild a node that is no longer
+    // there and throws "NotFoundError: ... not a child of this node". innerHTML is
+    // swapped wholesale, never reconciled node-by-node, so that can't happen. Code
+    // has no inline formatting or comment anchors, so nothing is lost by this.
     return (
       <pre className="editable-code">
-        <code {...editableProps}>{block.text.replace(/​/g, "") === "" ? <br /> : block.text}</code>
+        <code {...editableProps} dangerouslySetInnerHTML={{ __html: codeBlockInnerHtml(block.text) }} />
       </pre>
     );
   }

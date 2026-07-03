@@ -448,3 +448,44 @@ test("a quote block is styled distinctly from a code block (accent bar, not a bo
     assert.equal(style.quoteItalic, "italic");
   });
 });
+
+test("code content with HTML-like text renders literally (no injection) and round-trips", async (t) => {
+  // dangerouslySetInnerHTML must escape, so `<b>`/`<script>` are shown as text, not
+  // injected as elements, and the markdown file keeps the raw characters.
+  const md = "```\n<b>x</b> & <script>y</script>\n```\n";
+  await withApp(t, md, async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-code')");
+    assert.equal(
+      await evaluate(browser.cdp, "document.querySelectorAll('.editable-code code b, .editable-code code script').length"),
+      0,
+      "HTML in code was injected as real elements"
+    );
+    assert.match(
+      await evaluate(browser.cdp, "document.querySelector('.editable-code code').textContent"),
+      /<b>x<\/b> & <script>y<\/script>/
+    );
+    assert.equal(await readFile(markdownPath, "utf8"), md); // file keeps raw characters
+  });
+});
+
+test("converting a code block with content to a quote does not throw (removeChild regression)", async (t) => {
+  await withApp(t, "```js\nconst a = 1;\nconst b = 2;\n```\n\nafter\n", async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-code')");
+    await evaluate(
+      browser.cdp,
+      "window.__errs = []; window.addEventListener('error', (e) => window.__errs.push(String(e.message)));"
+    );
+    await clickToolbarButton(browser.cdp, ".editable-code code");
+    await waitFor(browser.cdp, "!document.querySelector('button[title=\"Quote\"]')?.disabled");
+    await clickToolbarButton(browser.cdp, 'button[title="Quote"]');
+    await new Promise((r) => setTimeout(r, 600));
+    assert.equal(
+      (await evaluate(browser.cdp, "window.__errs || []")).filter((e) => /removeChild|not a child/.test(e)).length,
+      0
+    );
+    // The code content became a quote; "after" is untouched.
+    const saved = await readFile(markdownPath, "utf8");
+    assert.doesNotMatch(saved, /```/, "block should no longer be code");
+    assert.match(saved, /after/);
+  });
+});
