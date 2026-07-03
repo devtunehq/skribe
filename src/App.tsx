@@ -3155,6 +3155,50 @@ function useSkribeController() {
     liveEditHistoryActiveRef.current = false;
   }
 
+  // Put the caret at the end of a table cell's content.
+  function focusTableCell(cell: Element) {
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(cell);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  // Move the caret to the next/previous table cell. Returns false (so the browser's
+  // default Tab runs) when the caret isn't in a cell, or at the edges: Shift+Tab in
+  // the first cell tabs out of the table. Tab past the last cell appends a row and
+  // drops the caret into its first cell once it renders.
+  function moveTableCell(blockId: string, backwards: boolean) {
+    const tableNode = blockRefs.current[blockId];
+    const selection = window.getSelection();
+    if (!tableNode || !selection || selection.rangeCount === 0) return false;
+
+    const start = selection.getRangeAt(0).startContainer;
+    const startElement = start instanceof Element ? start : start.parentElement;
+    const cell = startElement?.closest("th, td");
+    if (!cell || !tableNode.contains(cell)) return false;
+
+    const cells = Array.from(tableNode.querySelectorAll("th, td"));
+    const targetIndex = cells.indexOf(cell) + (backwards ? -1 : 1);
+    if (targetIndex < 0) return false;
+    if (targetIndex >= cells.length) {
+      if (backwards) return false;
+      editTable(blockId, { kind: "add-row" });
+      // The add remounts the table, so focus the new row's first cell next frame.
+      requestAnimationFrame(() => {
+        const bodyRows = blockRefs.current[blockId]?.querySelectorAll("tbody tr");
+        const firstCell = bodyRows?.[bodyRows.length - 1]?.querySelector("td");
+        if (firstCell) focusTableCell(firstCell);
+      });
+      return true;
+    }
+
+    focusTableCell(cells[targetIndex]);
+    return true;
+  }
+
   // The stable ids of every block the current selection touches, top to bottom.
   // A collapsed caret yields the single block it sits in; a drag across blocks
   // yields all of them — so formatting can apply to a whole multi-block range.
@@ -3926,6 +3970,17 @@ function useSkribeController() {
       if (event.key === "Backspace" || event.key === "Delete") {
         event.preventDefault();
         deleteCanvasBlock(blockId);
+        return;
+      }
+    }
+
+    // Tab / Shift+Tab move between cells inside a table (Tab past the last cell adds
+    // a row). Only handled while the caret is actually in a table cell; otherwise it
+    // falls through to the browser's default focus movement.
+    if (!isCommand && event.key === "Tab") {
+      const type = stateRef.current ? findBlockById(stateRef.current.markdown, blockId)?.type : null;
+      if (type === "table" && moveTableCell(blockId, event.shiftKey)) {
+        event.preventDefault();
         return;
       }
     }

@@ -8,6 +8,7 @@ import {
   evaluate,
   makeMarkdownDoc,
   navigate,
+  press,
   removeTempDir,
   startSkribeServer,
   waitFor,
@@ -113,5 +114,64 @@ test("a two-column table exposes no delete-column control (min two columns)", as
       await evaluate(browser.cdp, "document.querySelectorAll('.table-delete-column').length"),
       0
     );
+  });
+});
+
+// Put the caret at the start of the nth table cell (header cells first, then body
+// cells in row order) and return whether the table ended up focused.
+async function caretInCell(cdp, cellIndex) {
+  return evaluate(
+    cdp,
+    `(() => {
+      const table = document.querySelector('.editable-table');
+      table.focus();
+      const cell = table.querySelectorAll('th, td')[${cellIndex}];
+      const r = document.createRange();
+      r.selectNodeContents(cell);
+      r.collapse(true);
+      const s = getSelection();
+      s.removeAllRanges();
+      s.addRange(r);
+      return document.activeElement === table;
+    })()`
+  );
+}
+
+async function caretCellText(cdp) {
+  return evaluate(
+    cdp,
+    `(() => {
+      const sel = getSelection();
+      if (!sel.rangeCount) return null;
+      let n = sel.getRangeAt(0).startContainer;
+      n = n.nodeType === 1 ? n : n.parentElement;
+      const cell = n?.closest('th, td');
+      return cell ? cell.textContent.trim() : null;
+    })()`
+  );
+}
+
+test("Tab and Shift+Tab move the caret between table cells", async (t) => {
+  await withApp(t, TABLE, async ({ browser }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-table')");
+    // Cells in order: th A, th B, td 1, td 2.
+    assert.ok(await caretInCell(browser.cdp, 0)); // header "A"
+    await press(browser.cdp, "Tab", { code: "Tab", keyCode: 9 });
+    assert.equal(await caretCellText(browser.cdp), "B");
+    await press(browser.cdp, "Tab", { code: "Tab", keyCode: 9 });
+    assert.equal(await caretCellText(browser.cdp), "1");
+    await press(browser.cdp, "Tab", { code: "Tab", keyCode: 9, shiftKey: true });
+    assert.equal(await caretCellText(browser.cdp), "B");
+  });
+});
+
+test("Tab in the last cell appends a new row", async (t) => {
+  await withApp(t, TABLE, async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-table tbody tr').length === 1");
+    // Caret in the last cell (index 3 -> td "2").
+    assert.ok(await caretInCell(browser.cdp, 3));
+    await press(browser.cdp, "Tab", { code: "Tab", keyCode: 9 });
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-table tbody tr').length === 2");
+    await waitForFileText(markdownPath, /\| 1 \| 2 \|\n\|\s*\|\s*\|/);
   });
 });
