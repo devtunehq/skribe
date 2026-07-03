@@ -390,6 +390,9 @@ test("an empty code block survives the live-save debounce (does not vanish)", as
       "empty code block vanished after the live-save"
     );
     await waitForFileText(markdownPath, /```/);
+    // The preserved empty block must not smuggle a hidden sentinel between the
+    // fences — it round-trips as a genuinely empty fenced block.
+    assert.doesNotMatch(await readFile(markdownPath, "utf8"), /​/, "sentinel persisted inside the code fence");
   });
 });
 

@@ -1636,8 +1636,9 @@ function useSkribeController() {
       // A code block is a deliberate structural block: keep it even when empty (its
       // contentEditable can read back as "" or a placeholder-<br> "\n") so it isn't
       // dropped on a live-save or mid-conversion, which would shift the next block
-      // up into its place.
-      if (sourceBlock.type === "code") return [{ ...sourceBlock, text: "​" }];
+      // up into its place. An empty fenced block round-trips as text "" — no
+      // sentinel, so no hidden character ends up inside the fences.
+      if (sourceBlock.type === "code") return [{ ...sourceBlock, text: "" }];
       // Keep an empty block while the caret is inside it — e.g. a block just
       // created with Enter that the writer is about to fill in. Lists round-trip
       // empty as "- "; other empty blocks need a zero-width-space sentinel so the
@@ -1670,8 +1671,9 @@ function useSkribeController() {
         if (!node) return [block];
         const text = blockNodeToMarkdown(node, block.type);
         if (text.trim()) return [{ ...block, text }];
-        // Keep an empty code block (structural) rather than dropping it.
-        if (block.type === "code") return [{ ...block, text: "​" }];
+        // Keep an empty code block (structural) rather than dropping it; text "" so
+        // the fence round-trips without a hidden sentinel character inside it.
+        if (block.type === "code") return [{ ...block, text: "" }];
         return [];
       })
     );
@@ -3638,7 +3640,7 @@ function useSkribeController() {
 
     const blocks = rendered.flatMap((block) => {
       if (block.id === blockId) {
-        return [{ ...block, type: "code" as const, language, level: undefined, marker: undefined, checked: undefined, text: "​" }];
+        return [{ ...block, type: "code" as const, language, level: undefined, marker: undefined, checked: undefined, text: "" }];
       }
       if (isVoidBlockType(block.type)) return [block];
       const domNode = blockRefs.current[block.id];
@@ -6375,7 +6377,7 @@ const EditableBlock = React.memo(function EditableBlock({
   if (block.type === "code") {
     return (
       <pre className="editable-code">
-        <code {...editableProps}>{block.text}</code>
+        <code {...editableProps}>{block.text.replace(/​/g, "") === "" ? <br /> : block.text}</code>
       </pre>
     );
   }
