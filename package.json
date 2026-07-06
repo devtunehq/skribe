@@ -1,6 +1,6 @@
 {
   "name": "skribe-editor",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Local-first Markdown writing and review workbench with AI chat, comments, and reviewable diffs.",
   "license": "MIT",
   "repository": {

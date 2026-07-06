@@ -946,3 +946,60 @@ test("settings dialog persists language, theme, font, and collapsed panel defaul
     }
   );
 });
+
+test("clearing chat empties the transcript and survives a later edit", async (t) => {
+  const createdAt = "2026-06-09T09:00:00.000Z";
+  await withApp(
+    t,
+    "# Draft\n\nFirst paragraph body.\n",
+    async ({ browser, server }) => {
+      const { cdp } = browser;
+      // Open the Chat tab; both seeded messages should render.
+      await evaluate(cdp, "document.querySelector('.panel-tabs button:nth-child(2)').click()");
+      await waitFor(cdp, "document.querySelectorAll('.chat-panel .message-bubble').length >= 2");
+      await waitFor(cdp, "Boolean(document.querySelector('.chat-clear-button'))");
+
+      // Clear the transcript (auto-accept the confirm dialog).
+      await evaluate(cdp, "window.confirm = () => true; true");
+      await evaluate(cdp, "document.querySelector('.chat-clear-button').click(); true");
+      await waitFor(cdp, "!document.querySelector('.chat-panel .message-bubble')");
+
+      // A subsequent editor edit must NOT resurrect the cleared chat (the
+      // stateRef-desync regression) and must itself be preserved.
+      await evaluate(
+        cdp,
+        `(() => {
+          const block = document.querySelector('[contenteditable][data-block-id]');
+          block.focus();
+          const range = document.createRange();
+          range.selectNodeContents(block);
+          range.collapse(false);
+          const selection = window.getSelection();
+          selection.removeAllRanges();
+          selection.addRange(range);
+          return true;
+        })()`
+      );
+      await insertText(cdp, " EDITED");
+      await evaluate(cdp, "document.querySelector('[contenteditable][data-block-id]').blur(); true");
+
+      const started = Date.now();
+      let doc;
+      while (Date.now() - started < 6000) {
+        doc = (await jsonRequest(server.baseUrl, "/api/document")).payload;
+        if (doc.markdown.includes("EDITED")) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      assert.ok(doc.markdown.includes("EDITED"), "expected the edit to persist");
+      assert.deepEqual(doc.review.chat, [], "cleared chat must stay empty through a later edit");
+    },
+    {
+      review: {
+        chat: [
+          { id: "c1", author: "human", body: "hello there", createdAt },
+          { id: "c2", author: "agent", body: "hi, how can I help?", createdAt }
+        ]
+      }
+    }
+  );
+});

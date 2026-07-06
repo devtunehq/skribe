@@ -53,7 +53,6 @@ import {
   fetchRevisionHistory,
   restoreDocumentRevision,
   saveDocument,
-  clearAgentChat,
   sendAgentMessage,
   subscribeToDocumentEvents,
   updateAgentConfig,
@@ -3018,15 +3017,16 @@ function useSkribeController() {
     setChatSkillIds(appSettings.defaultSkills);
   }
 
-  async function clearChat() {
+  function clearChat() {
     if (!stateRef.current?.review.chat.length) return;
     if (!window.confirm("Clear the chat transcript? Editorial memory, threads, and proposals are kept.")) return;
-    try {
-      const updated = await clearAgentChat();
-      setDocumentState(updated);
-    } catch (error) {
-      console.error("Unable to clear chat", error);
-    }
+    // Route through commit() like every other document mutation so stateRef stays
+    // in sync (otherwise the next edit resurrects the cleared chat) and any pending
+    // local markdown edits are preserved. The debounced save persists chat: [].
+    commit((state) => ({
+      ...state,
+      review: { ...state.review, chat: [], updatedAt: nowIso() }
+    }));
   }
 
   function updateCanvasBlock(blockId: string, html: string) {
@@ -7400,6 +7400,10 @@ function ChatPanel({
   onRequestProposalRevision
 }: ChatPanelProps) {
   const isAgentWorkingInChat = agentSession?.status === "running" && agentSession.activeTurn?.source === "chat";
+  // Any running or queued turn (chat *or* thread) can write to review state; a
+  // thread turn finishing after a clear would reintroduce the old chat via its
+  // newer SSE snapshot, so block the clear until the agent is fully idle.
+  const agentBusy = Boolean(agentSession && (agentSession.status === "running" || agentSession.queueDepth > 0));
   const chatStackRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     stickToBottomIfNear(chatStackRef.current);
@@ -7421,8 +7425,12 @@ function ChatPanel({
           type="button"
           className="chat-clear-button"
           onClick={onClearChat}
-          disabled={messages.length === 0}
-          title="Clear the chat transcript. Threads, proposals, and editorial memory are kept."
+          disabled={messages.length === 0 || agentBusy}
+          title={
+            agentBusy
+              ? "Wait for the agent to finish before clearing."
+              : "Clear the chat transcript. Threads, proposals, and editorial memory are kept."
+          }
         >
           <Trash2 size={13} />
           Clear chat
