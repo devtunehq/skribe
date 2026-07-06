@@ -2966,7 +2966,7 @@ select:focus,
 
 .chat-clear-button:hover:not(:disabled) {
   color: var(--danger, #c0392b);
-  border-color: currentColor;
+  border-color: currentcolor;
 }
 
 .chat-clear-button:disabled {

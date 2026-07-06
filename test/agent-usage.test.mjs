@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildTurnUsage, parseClaudeResultEnvelope, parseCodexUsageFromStream } from "../server/agent-usage.mjs";
+import {
+  buildTurnUsage,
+  extractCodexMessageText,
+  parseClaudeResultEnvelope,
+  parseCodexUsageFromStream
+} from "../server/agent-usage.mjs";
 
 test("buildTurnUsage returns null when no tokens were reported", () => {
   assert.equal(buildTurnUsage({ runtime: "claude", inputTokens: 0, outputTokens: 0 }), null);
@@ -15,6 +20,27 @@ test("buildTurnUsage normalizes tokens, window, and cost", () => {
   );
   // A non-positive window collapses to null rather than a bogus percentage base.
   assert.equal(buildTurnUsage({ runtime: "local", inputTokens: 10, contextWindow: 0 }).contextWindow, null);
+});
+
+test("buildTurnUsage treats non-finite cost as null", () => {
+  assert.equal(buildTurnUsage({ runtime: "claude", inputTokens: 10, costUsd: Number.NaN }).costUsd, null);
+  assert.equal(buildTurnUsage({ runtime: "claude", inputTokens: 10, costUsd: "abc" }).costUsd, null);
+  assert.equal(buildTurnUsage({ runtime: "claude", inputTokens: 10, costUsd: 0 }).costUsd, 0);
+});
+
+test("extractCodexMessageText recovers the agent message from the JSONL stream", () => {
+  const stdout = [
+    '{"type":"thread.started"}',
+    '{"type":"item.completed","item":{"type":"error","message":"ignored"}}',
+    '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"chatReply\\":\\"hi\\"}"}}',
+    '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}'
+  ].join("\n");
+  assert.equal(extractCodexMessageText(stdout), '{"chatReply":"hi"}');
+});
+
+test("extractCodexMessageText throws when no agent message is present", () => {
+  assert.throws(() => extractCodexMessageText('{"type":"turn.completed","usage":{}}'), /no agent message/i);
+  assert.throws(() => extractCodexMessageText(""), /no agent message/i);
 });
 
 test("parseClaudeResultEnvelope unwraps the reply and sums cache buckets into input", () => {

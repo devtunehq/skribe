@@ -51,6 +51,31 @@ export function parseClaudeResultEnvelope(stdout, { contextWindow } = {}) {
   };
 }
 
+// Extracts the agent's final reply text from Codex's JSONL event stream. Codex
+// emits the message as `{type:"item.completed", item:{type:"agent_message", text}}`.
+// Used as a fallback when the `-o` output file is missing — feeding the raw JSONL
+// to the reply parser would otherwise produce garbage. Throws if no message is
+// present so the caller surfaces a clean error instead of a corrupted reply.
+export function extractCodexMessageText(stdout) {
+  let text = null;
+  for (const line of String(stdout || "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{") || !trimmed.includes("agent_message")) continue;
+    try {
+      const event = JSON.parse(trimmed);
+      if (event?.item?.type === "agent_message" && typeof event.item.text === "string") {
+        text = event.item.text;
+      }
+    } catch {
+      // Ignore non-JSON or partial lines.
+    }
+  }
+  if (text == null) {
+    throw new Error("Codex produced no output file and no agent message could be recovered from its event stream.");
+  }
+  return text;
+}
+
 // Scans Codex's JSONL event stream (stdout under `--json`) for the final
 // `turn.completed` usage event. Codex reports `input_tokens` as the full prompt
 // size (cached tokens are a subset), so we do not add `cached_input_tokens`.

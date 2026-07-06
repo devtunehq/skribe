@@ -7,7 +7,12 @@ import { createReadStream, existsSync } from "node:fs";
 import { cp, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { basename, delimiter, dirname, extname, join, normalize, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildTurnUsage, parseClaudeResultEnvelope, parseCodexUsageFromStream } from "./agent-usage.mjs";
+import {
+  buildTurnUsage,
+  extractCodexMessageText,
+  parseClaudeResultEnvelope,
+  parseCodexUsageFromStream
+} from "./agent-usage.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const root = resolve(__dirname, "..");
@@ -2930,19 +2935,6 @@ async function handleApi(req, res) {
     return true;
   }
 
-  if (req.method === "POST" && url.pathname === "/api/agent/chat/clear") {
-    // Clears the chat transcript. Because recentChat for agent turns is derived
-    // from review.chat, emptying it also stops the cleared messages from being
-    // replayed into the model's context. Editorial memory (the context ledger,
-    // proposals, thread history) is intentionally left intact.
-    updateDocument(
-      (doc) => ({ ...doc, review: { ...doc.review, chat: [] } }),
-      "chat:clear"
-    );
-    sendJson(res, 200, getDocument());
-    return true;
-  }
-
   if (req.method === "POST" && url.pathname === "/api/checkpoint") {
     await checkpoint();
     sendJson(res, 200, getDocument());
@@ -3661,7 +3653,12 @@ async function runCodexAgent({ turn, prompt, model, effort, contextWindow = null
     throw new Error(result.stderr || result.stdout || `codex exited with ${result.code}`);
   }
 
-  const finalText = existsSync(outputPath) ? await readFile(outputPath, "utf8") : result.stdout;
+  // Prefer the `-o` output file (the model's final message). When it is missing,
+  // recover the message from the JSONL event stream rather than feeding raw events
+  // (now that `--json` is set) into parseAgentOutput.
+  const finalText = existsSync(outputPath)
+    ? await readFile(outputPath, "utf8")
+    : extractCodexMessageText(result.stdout);
   await appendEvent({
     type: "agent:raw-output",
     at: nowIso(),

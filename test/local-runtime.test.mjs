@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -306,29 +306,6 @@ test("local runtime executes chat turns and parses JSON replies", async () => {
   } finally {
     await server.stop();
     await fake.close();
-  }
-});
-
-test("clear chat endpoint empties the transcript but keeps editorial memory", async () => {
-  const server = await startServer({ env: { SKRIBE_AGENT_RUNTIME: "stub" } });
-
-  try {
-    await jsonRequest(server.baseUrl, "/api/agent/message", {
-      method: "POST",
-      body: JSON.stringify({ source: "chat", body: "Say hello" })
-    });
-    const before = await waitForAgentIdle(server.baseUrl);
-    assert.ok(before.review.chat.length > 0, "expected the stub turn to add a chat reply");
-    const ledgerBefore = before.review.contextLedger.length;
-    assert.ok(ledgerBefore > 0, "expected the turn to record editorial memory");
-
-    const cleared = await jsonRequest(server.baseUrl, "/api/agent/chat/clear", { method: "POST" });
-    assert.equal(cleared.response.status, 200);
-    assert.deepEqual(cleared.payload.review.chat, []);
-    // Editorial memory (the context ledger) is intentionally preserved.
-    assert.equal(cleared.payload.review.contextLedger.length, ledgerBefore);
-  } finally {
-    await server.stop();
   }
 });
 
