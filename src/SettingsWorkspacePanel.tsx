@@ -21,6 +21,17 @@ export function SettingsWorkspacePanel({
         </SettingsLabel>
       </label>
 
+      <label className="settings-check">
+        <input
+          type="checkbox"
+          checked={settings.showStatusBar}
+          onChange={(event) => onChange({ showStatusBar: event.target.checked })}
+        />
+        <SettingsLabel tooltip="Show the bottom status bar with agent runtime, word count, and context usage.">
+          Show status bar
+        </SettingsLabel>
+      </label>
+
       <div className="settings-grid">
         <label className="settings-check">
           <input

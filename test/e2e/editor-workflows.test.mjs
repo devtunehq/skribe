@@ -847,13 +847,16 @@ test("settings dialog persists language, theme, font, and collapsed panel defaul
           };
         })()`
       );
+      // The app shell is pinned to the viewport height with internal scrolling, so the
+      // document itself no longer scrolls (page height == viewport height). The settings
+      // backdrop must still fully cover the visible page.
       assert.ok(
-        backdropCoverage.pageHeight > backdropCoverage.viewportHeight,
-        `expected long page, got page ${backdropCoverage.pageHeight}px and viewport ${backdropCoverage.viewportHeight}px`
+        backdropCoverage.pageHeight <= backdropCoverage.viewportHeight + 1,
+        `expected the shell to fit the viewport, got page ${backdropCoverage.pageHeight}px and viewport ${backdropCoverage.viewportHeight}px`
       );
       assert.ok(
-        backdropCoverage.backdropHeight >= backdropCoverage.pageHeight - 1,
-        `backdrop ${backdropCoverage.backdropHeight}px shorter than page ${backdropCoverage.pageHeight}px`
+        backdropCoverage.backdropHeight >= backdropCoverage.viewportHeight - 1,
+        `backdrop ${backdropCoverage.backdropHeight}px shorter than viewport ${backdropCoverage.viewportHeight}px`
       );
       const selectLayout = await evaluate(
         browser.cdp,

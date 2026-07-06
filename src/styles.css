@@ -304,11 +304,17 @@ button {
 /* ---------- App shell ---------- */
 
 .app-shell {
-  min-height: 100vh;
-  min-height: 100dvh;
+  --status-bar-height: 30px;
+  height: 100vh;
+  height: 100dvh;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
   background: var(--bg);
+}
+
+.app-shell.flow-mode,
+.app-shell.no-status-bar {
+  --status-bar-height: 0px;
 }
 
 .app-shell.flow-mode {
@@ -934,8 +940,8 @@ button {
 .workspace {
   display: grid;
   grid-template-columns: 250px minmax(420px, 1fr) 420px;
-  min-height: calc(100vh - 64px);
-  min-height: calc(100dvh - 64px);
+  min-height: calc(100vh - 64px - var(--status-bar-height));
+  min-height: calc(100dvh - 64px - var(--status-bar-height));
 }
 
 .app-shell.flow-mode .workspace {
@@ -974,14 +980,18 @@ button {
 .right-panel-content {
   display: grid;
   grid-template-rows: 52px 1fr;
-  min-height: calc(100vh - 64px);
+  /* Definite height (not just min-height) so the panel body scrolls internally
+     instead of growing the shell taller than the viewport. Mirrors .center-pane. */
+  height: calc(100vh - 64px - var(--status-bar-height));
+  height: calc(100dvh - 64px - var(--status-bar-height));
+  overflow: hidden;
 }
 
 .center-pane {
   min-width: 0;
   display: grid;
   grid-template-rows: 52px 1fr;
-  max-height: calc(100vh - 64px);
+  max-height: calc(100vh - 64px - var(--status-bar-height));
   overflow: hidden;
   background: var(--canvas-oat);
 }
@@ -2839,6 +2849,131 @@ select:focus,
   flex-wrap: wrap;
 }
 
+.message-usage {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+
+.status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: var(--status-bar-height);
+  padding: 0 14px;
+  border-top: 1px solid var(--line);
+  background: var(--surface, var(--bg));
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+}
+
+.status-bar-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.status-agent {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.status-agent strong {
+  color: var(--ink, inherit);
+  font-weight: 700;
+}
+
+.status-agent span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-agent-state {
+  text-transform: capitalize;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: none;
+}
+
+.status-dot.is-running {
+  background: var(--accent-ink, #2f6f4f);
+}
+
+.status-dot.is-error {
+  background: var(--danger, #c0392b);
+}
+
+.status-words {
+  white-space: nowrap;
+}
+
+.context-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.context-meter.is-empty {
+  opacity: 0.6;
+}
+
+.context-meter.is-warn {
+  color: var(--warn, #b7791f);
+}
+
+.context-meter.is-critical {
+  color: var(--danger, #c0392b);
+}
+
+.chat-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 6px 10px 0;
+}
+
+.chat-clear-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  border-radius: var(--radius);
+  padding: 4px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chat-clear-button:hover:not(:disabled) {
+  color: var(--danger, #c0392b);
+  border-color: currentColor;
+}
+
+.chat-clear-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .skill-chip,
 .message-skill-row span {
   display: inline-flex;
@@ -3802,6 +3937,8 @@ select:focus,
 @media (max-width: 940px) {
   .app-shell {
     display: block;
+    height: auto;
+    min-height: 100dvh;
   }
 
   .topbar {
@@ -3817,8 +3954,8 @@ select:focus,
 
   .center-pane {
     order: 1;
-    min-height: calc(100vh - 64px);
-    min-height: calc(100dvh - 64px);
+    min-height: calc(100vh - 64px - var(--status-bar-height));
+    min-height: calc(100dvh - 64px - var(--status-bar-height));
     max-height: none;
   }
 
@@ -3836,6 +3973,8 @@ select:focus,
 
   .right-panel-content {
     min-height: 0;
+    height: auto;
+    overflow: visible;
     grid-template-rows: auto minmax(0, auto);
   }
 
@@ -3974,6 +4113,8 @@ select:focus,
 
   .right-panel-content {
     display: block;
+    height: auto;
+    overflow: visible;
   }
 
   .panel-tabs {

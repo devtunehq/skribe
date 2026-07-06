@@ -158,6 +158,12 @@ export async function sendAgentMessage(request: AgentMessageRequest): Promise<Do
   return response.json();
 }
 
+export async function clearAgentChat(): Promise<DocumentState> {
+  const response = await fetch("/api/agent/chat/clear", { method: "POST" });
+  if (!response.ok) throw new Error(`Unable to clear chat: ${response.status}`);
+  return response.json();
+}
+
 export function subscribeToDocumentEvents(onDocument: (state: DocumentState) => void) {
   const source = new EventSource("/api/events");
   // Expose a "stream connected" signal so callers (and e2e tests) can wait for

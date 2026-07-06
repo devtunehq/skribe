@@ -83,6 +83,17 @@ export function SettingsAgentPanel({
             ))}
             {modelSelectValue === "__custom" ? <option value="__custom">{settings.agentModel}</option> : null}
           </select>
+          {selectedRuntimeStatus?.supportsManualModel ? (
+            <input
+              type="text"
+              placeholder={modelOptions.length ? "or type a model id" : "type a model id (e.g. opus)"}
+              value={modelSelectValue === "__custom" ? settings.agentModel : ""}
+              onChange={(event) => {
+                const value = event.target.value.trim();
+                onChange({ agentModel: value === "" ? "auto" : value });
+              }}
+            />
+          ) : null}
         </label>
       </div>
 

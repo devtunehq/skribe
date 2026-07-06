@@ -104,6 +104,7 @@ async function createFakeLocalInferenceServer(options = {}) {
     lowQualityOnce: options.lowQualityOnce ?? false,
     lowQualityReturned: false,
     responseShape: options.responseShape ?? "message",
+    usage: options.usage ?? null,
     models: options.models ?? [{ id: "test-model" }, { id: "alt-model" }],
     completionContent:
       options.completionContent ??
@@ -156,6 +157,7 @@ async function createFakeLocalInferenceServer(options = {}) {
           state.responseShape === "text"
             ? { choices: [{ text: responseContent, finish_reason: "stop" }] }
             : { choices: [{ message: { content: responseContent }, finish_reason: "stop" }] };
+        if (state.usage) payload.usage = state.usage;
 
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(payload));
@@ -301,6 +303,66 @@ test("local runtime executes chat turns and parses JSON replies", async () => {
     assert.equal(document.agentSession.lastError, null);
     assert.ok(document.review.chat.some((message) => message.body.includes("Local reply body")));
     assert.equal(fake.state.requests[0]?.model, "test-model");
+  } finally {
+    await server.stop();
+    await fake.close();
+  }
+});
+
+test("clear chat endpoint empties the transcript but keeps editorial memory", async () => {
+  const server = await startServer({ env: { SKRIBE_AGENT_RUNTIME: "stub" } });
+
+  try {
+    await jsonRequest(server.baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: JSON.stringify({ source: "chat", body: "Say hello" })
+    });
+    const before = await waitForAgentIdle(server.baseUrl);
+    assert.ok(before.review.chat.length > 0, "expected the stub turn to add a chat reply");
+    const ledgerBefore = before.review.contextLedger.length;
+    assert.ok(ledgerBefore > 0, "expected the turn to record editorial memory");
+
+    const cleared = await jsonRequest(server.baseUrl, "/api/agent/chat/clear", { method: "POST" });
+    assert.equal(cleared.response.status, 200);
+    assert.deepEqual(cleared.payload.review.chat, []);
+    // Editorial memory (the context ledger) is intentionally preserved.
+    assert.equal(cleared.payload.review.contextLedger.length, ledgerBefore);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("local runtime attaches token usage to chat replies", async () => {
+  const fake = await createFakeLocalInferenceServer({
+    completionContent: JSON.stringify({ chatReply: "Reply with usage" }),
+    usage: { prompt_tokens: 1234, completion_tokens: 56 }
+  });
+  const server = await startServer({
+    env: {
+      SKRIBE_AGENT_RUNTIME: "local",
+      SKRIBE_LOCAL_BASE_URL: fake.baseUrl
+    }
+  });
+
+  try {
+    await jsonRequest(server.baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: JSON.stringify({ source: "chat", body: "Say hello" })
+    });
+
+    const document = await waitForAgentIdle(server.baseUrl);
+    const message = document.review.chat.find((item) => item.body.includes("Reply with usage"));
+    assert.ok(message);
+    const expectedUsage = {
+      runtime: "local",
+      inputTokens: 1234,
+      outputTokens: 56,
+      contextWindow: null,
+      costUsd: null
+    };
+    assert.deepEqual(message.usage, expectedUsage);
+    // The same usage is mirrored onto the session so the topbar meter can show it.
+    assert.deepEqual(document.agentSession.lastUsage, expectedUsage);
   } finally {
     await server.stop();
     await fake.close();

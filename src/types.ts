@@ -46,12 +46,21 @@ export interface Anchor {
   end: number;
 }
 
+export interface AgentUsage {
+  runtime: string;
+  inputTokens: number;
+  outputTokens: number;
+  contextWindow: number | null;
+  costUsd: number | null;
+}
+
 export interface ThreadMessage {
   id: string;
   author: Author;
   body: string;
   createdAt: string;
   skills?: AgentSkillSelection[];
+  usage?: AgentUsage | null;
 }
 
 export interface Suggestion {
@@ -81,6 +90,7 @@ export interface ChatMessage {
   body: string;
   createdAt: string;
   skills?: AgentSkillSelection[];
+  usage?: AgentUsage | null;
 }
 
 export interface DocumentProposal {
@@ -130,6 +140,7 @@ export interface AppSettings {
   defaultSkills: string[];
   autoReplyToComments: boolean;
   showResolvedThreads: boolean;
+  showStatusBar: boolean;
   panelState: {
     leftCollapsed: boolean;
     rightCollapsed: boolean;
@@ -212,6 +223,7 @@ export interface AgentSession {
   } | null;
   lastRunAt: string | null;
   lastError: string | null;
+  lastUsage?: AgentUsage | null;
   updatedAt: string;
 }
 
