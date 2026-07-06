@@ -21,6 +21,7 @@ import {
   Italic,
   Eye,
   EyeOff,
+  Gauge,
   Link as LinkIcon,
   List,
   ListOrdered,
@@ -40,6 +41,7 @@ import {
   SquareCode,
   Strikethrough,
   Table,
+  Trash2,
   Upload,
   X
 } from "lucide-react";
@@ -51,6 +53,7 @@ import {
   fetchRevisionHistory,
   restoreDocumentRevision,
   saveDocument,
+  clearAgentChat,
   sendAgentMessage,
   subscribeToDocumentEvents,
   updateAgentConfig,
@@ -161,6 +164,7 @@ import type {
   AgentRuntimeConfig,
   AgentSkill,
   AgentSkillSelection,
+  AgentUsage,
   AppSettings,
   Author,
   ChatMessage,
@@ -392,6 +396,7 @@ const defaultAppSettings: AppSettings = {
   defaultSkills: [],
   autoReplyToComments: true,
   showResolvedThreads: false,
+  showStatusBar: true,
   panelState: {
     leftCollapsed: false,
     rightCollapsed: false
@@ -3013,6 +3018,17 @@ function useSkribeController() {
     setChatSkillIds(appSettings.defaultSkills);
   }
 
+  async function clearChat() {
+    if (!stateRef.current?.review.chat.length) return;
+    if (!window.confirm("Clear the chat transcript? Editorial memory, threads, and proposals are kept.")) return;
+    try {
+      const updated = await clearAgentChat();
+      setDocumentState(updated);
+    } catch (error) {
+      console.error("Unable to clear chat", error);
+    }
+  }
+
   function updateCanvasBlock(blockId: string, html: string) {
     const currentBlock = stateRef.current ? findBlockById(stateRef.current.markdown, blockId) : null;
     const registeredNode = blockRefs.current[blockId] ?? null;
@@ -4489,6 +4505,7 @@ function useSkribeController() {
     updateThreadStatus,
     updateSuggestionStatus,
     addChatMessage,
+    clearChat,
     applyLink,
     copyActiveSelectionToClipboard,
     cutActiveSelectionToClipboard,
@@ -4565,7 +4582,7 @@ function SkribeShell() {
     <main
       className={`app-shell ${isFlowMode ? "flow-mode" : ""} ${isLeftRailCollapsed ? "left-collapsed" : ""} ${
         isRightPanelCollapsed ? "right-collapsed" : ""
-      }`}
+      } ${appSettings.showStatusBar ? "" : "no-status-bar"}`}
       data-theme={appSettings.theme}
       data-document-font={appSettings.documentFont}
       lang={editorLanguage}
@@ -4576,6 +4593,7 @@ function SkribeShell() {
         <CenterPane />
         {isFlowMode ? null : <RightPanel />}
       </section>
+      {isFlowMode || !appSettings.showStatusBar ? null : <StatusBar />}
       {isFlowMode ? (
         <button
           type="button"
@@ -4591,6 +4609,29 @@ function SkribeShell() {
       <SkribeOverlays />
       {lastCopied ? <div className="toast">{lastCopied}</div> : null}
     </main>
+  );
+}
+
+function StatusBar() {
+  const { documentState, agentSession, selectedRuntimeLabel, selectedModelLabel, agentStatusLabel } =
+    useSkribeControllerContext();
+  if (!documentState) return null;
+  const words = documentState.markdown.split(/\s+/).filter(Boolean).length;
+  return (
+    <footer className="status-bar">
+      <div className="status-bar-group">
+        <span className="status-agent" title={`${selectedRuntimeLabel} · ${selectedModelLabel}`}>
+          <strong>{selectedRuntimeLabel}</strong>
+          <span>{selectedModelLabel}</span>
+        </span>
+        <span className={`status-dot is-${agentSession?.status ?? "idle"}`} />
+        <span className="status-agent-state">{agentStatusLabel}</span>
+      </div>
+      <div className="status-bar-group">
+        <span className="status-words">{words.toLocaleString()} words</span>
+        <ContextMeter usage={agentSession?.lastUsage} />
+      </div>
+    </footer>
   );
 }
 
@@ -5173,6 +5214,7 @@ function RightPanel() {
     visibleThreads,
     activateThread,
     addChatMessage,
+    clearChat,
     addThread,
     addThreadMessage,
     persistSettings,
@@ -5279,6 +5321,7 @@ function RightPanel() {
             onSetChatDraft={setChatDraft}
             onSetSelectedSkillIds={setChatSkillIds}
             onSend={addChatMessage}
+            onClearChat={clearChat}
             onProposalStatus={updateProposalStatus}
             onProposalChangeDecision={updateProposalChangeDecision}
             onRequestProposalRevision={requestProposalRevision}
@@ -5537,6 +5580,64 @@ function MessageSkillChips({ skills }: { skills?: AgentSkillSelection[] }) {
         <span key={skill.id}>/{skill.id}</span>
       ))}
     </div>
+  );
+}
+
+function formatTokenCount(value: number): string {
+  if (value >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k`;
+  return String(value);
+}
+
+function usagePercent(usage: AgentUsage): number | null {
+  if (!usage.contextWindow || usage.contextWindow <= 0) return null;
+  return Math.round((usage.inputTokens / usage.contextWindow) * 100);
+}
+
+function usageTooltip(usage: AgentUsage): string {
+  return (
+    `${usage.runtime}: ${usage.inputTokens.toLocaleString()} input + ${usage.outputTokens.toLocaleString()} output tokens` +
+    (usage.contextWindow
+      ? ` of a ${usage.contextWindow.toLocaleString()}-token context window`
+      : " (context window unknown)")
+  );
+}
+
+function MessageUsage({ usage }: { usage?: AgentUsage | null }) {
+  if (!usage || (usage.inputTokens <= 0 && usage.outputTokens <= 0)) return null;
+  const input = formatTokenCount(usage.inputTokens);
+  const percent = usagePercent(usage);
+  const context =
+    percent != null ? `${input} / ${formatTokenCount(usage.contextWindow as number)} ctx (${percent}%)` : `${input} in`;
+  const cost =
+    usage.costUsd != null ? ` · $${usage.costUsd < 0.01 ? usage.costUsd.toFixed(4) : usage.costUsd.toFixed(2)}` : "";
+  return (
+    <small className="message-usage" title={usageTooltip(usage)}>
+      {context} · {formatTokenCount(usage.outputTokens)} out{cost}
+    </small>
+  );
+}
+
+// Context gauge for the bottom status bar. Reflects the most recent turn's input
+// tokens against the runtime's real context window.
+function ContextMeter({ usage }: { usage?: AgentUsage | null }) {
+  const hasUsage = Boolean(usage && usage.inputTokens > 0);
+  const percent = hasUsage ? usagePercent(usage as AgentUsage) : null;
+  const detail = !hasUsage
+    ? "—"
+    : percent != null
+      ? `${formatTokenCount((usage as AgentUsage).inputTokens)} / ${formatTokenCount(
+          (usage as AgentUsage).contextWindow as number
+        )} (${percent}%)`
+      : `${formatTokenCount((usage as AgentUsage).inputTokens)} in`;
+  const level = percent == null ? "" : percent >= 90 ? "is-critical" : percent >= 70 ? "is-warn" : "";
+  return (
+    <span
+      className={`context-meter ${hasUsage ? "" : "is-empty"} ${level}`}
+      title={hasUsage ? usageTooltip(usage as AgentUsage) : "Context usage appears here after the first agent turn."}
+    >
+      <Gauge size={13} />
+      Context {detail}
+    </span>
   );
 }
 
@@ -6946,6 +7047,7 @@ function ThreadPanel(props: ThreadPanelProps) {
                 </div>
                 {message.body ? <p>{displayAgentMessageBody(message.body)}</p> : null}
                 <MessageSkillChips skills={message.skills} />
+                <MessageUsage usage={message.usage} />
               </article>
             ))}
             {isAgentWorkingForActiveThread ? <AgentTypingIndicator label="Agent is drafting a thread reply" /> : null}
@@ -7272,6 +7374,7 @@ interface ChatPanelProps {
   onSetChatDraft: (value: string) => void;
   onSetSelectedSkillIds: (value: string[]) => void;
   onSend: () => void;
+  onClearChat: () => void;
   onProposalStatus: (proposalId: string, status: "accepted" | "rejected") => void;
   onProposalChangeDecision: (proposalId: string, changeKey: string, decision: ProposalChangeDecision) => void;
   onRequestProposalRevision: (proposalId: string, change: ProposalChangeBlock, instruction: string) => void;
@@ -7291,6 +7394,7 @@ function ChatPanel({
   onSetChatDraft,
   onSetSelectedSkillIds,
   onSend,
+  onClearChat,
   onProposalStatus,
   onProposalChangeDecision,
   onRequestProposalRevision
@@ -7312,6 +7416,18 @@ function ChatPanel({
   ).length;
   return (
     <div className="panel-body chat-panel">
+      <div className="chat-actions">
+        <button
+          type="button"
+          className="chat-clear-button"
+          onClick={onClearChat}
+          disabled={messages.length === 0}
+          title="Clear the chat transcript. Threads, proposals, and editorial memory are kept."
+        >
+          <Trash2 size={13} />
+          Clear chat
+        </button>
+      </div>
       <div className="message-stack chat-stack" ref={chatStackRef}>
         <section className="memory-card">
           <div className="memory-card-header">
@@ -7362,6 +7478,7 @@ function ChatPanel({
               </div>
               {message.body ? <p>{displayAgentMessageBody(message.body)}</p> : null}
               <MessageSkillChips skills={message.skills} />
+              <MessageUsage usage={message.usage} />
             </article>
           ))
         )}

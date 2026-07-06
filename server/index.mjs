@@ -7,6 +7,7 @@ import { createReadStream, existsSync } from "node:fs";
 import { cp, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { basename, delimiter, dirname, extname, join, normalize, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildTurnUsage, parseClaudeResultEnvelope, parseCodexUsageFromStream } from "./agent-usage.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const root = resolve(__dirname, "..");
@@ -58,6 +59,7 @@ const defaultSettings = {
   defaultSkills: [],
   autoReplyToComments: true,
   showResolvedThreads: false,
+  showStatusBar: true,
   panelState: {
     leftCollapsed: false,
     rightCollapsed: false
@@ -101,6 +103,7 @@ const defaultSession = {
   activeTurn: null,
   lastRunAt: null,
   lastError: null,
+  lastUsage: null,
   updatedAt: new Date().toISOString()
 };
 
@@ -365,6 +368,8 @@ function normalizeAppSettings(settings) {
         : defaultSettings.autoReplyToComments,
     showResolvedThreads:
       typeof source.showResolvedThreads === "boolean" ? source.showResolvedThreads : defaultSettings.showResolvedThreads,
+    showStatusBar:
+      typeof source.showStatusBar === "boolean" ? source.showStatusBar : defaultSettings.showStatusBar,
     panelState: normalizePanelState(source.panelState),
     proposalModeDefault: normalizeProposalMode(source.proposalModeDefault),
     diffViewMode: normalizeDiffViewMode(source.diffViewMode),
@@ -1178,7 +1183,7 @@ async function postLocalChatCompletion(baseUrl, body, timeoutMs) {
       };
     }
 
-    return { ok: true, status: response.status, content, finishReason };
+    return { ok: true, status: response.status, content, finishReason, usage: payload?.usage ?? null };
   } catch (error) {
     return {
       ok: false,
@@ -1196,7 +1201,7 @@ function parseHelpModels(helpText, patterns) {
   for (const pattern of patterns) {
     const match = helpText.match(pattern);
     if (!match) continue;
-    const values = match.slice(1).flatMap((value) => String(value || "").split(/[,|/]\s*/));
+    const values = match.slice(1).flatMap((value) => String(value || "").split(/\s*(?:,|\||\/|\bor\b)\s*/i));
     for (const value of values) {
       const model = value.replace(/['"`().]/g, "").trim();
       if (model && !models.some((item) => item.id === model)) {
@@ -1275,6 +1280,7 @@ function parseCodexModelCatalog(catalogText) {
       id: model.slug,
       label: model.display_name || model.slug,
       description: model.description || model.slug,
+      contextWindow: Number(model.context_window) || Number(model.max_context_window) || null,
       source: "catalog"
     }));
     const effortLevels = mergeEffortLevels(
@@ -1388,7 +1394,9 @@ async function detectClaudeRuntime() {
     id: "claude",
     label: "Claude Code",
     command: "claude",
-    modelPatterns: [/alias(?:es)?[^()]*\((?:e\.g\.\s*)?['"]?([a-z0-9:_-]+)['"]?\s+or\s+['"]?([a-z0-9:_-]+)['"]?\)/i]
+    // Capture the whole example-alias list inside the --model parenthetical, e.g.
+    // "(e.g. 'fable', 'opus', or 'sonnet')". parseHelpModels splits it on commas/or.
+    modelPatterns: [/alias(?:es)?[^()]*\(\s*(?:e\.g\.[\s,]*)?([^)]*)\)/i]
   });
   if (!status.available) return status;
 
@@ -2922,6 +2930,19 @@ async function handleApi(req, res) {
     return true;
   }
 
+  if (req.method === "POST" && url.pathname === "/api/agent/chat/clear") {
+    // Clears the chat transcript. Because recentChat for agent turns is derived
+    // from review.chat, emptying it also stops the cleared messages from being
+    // replayed into the model's context. Editorial memory (the context ledger,
+    // proposals, thread history) is intentionally left intact.
+    updateDocument(
+      (doc) => ({ ...doc, review: { ...doc.review, chat: [] } }),
+      "chat:clear"
+    );
+    sendJson(res, 200, getDocument());
+    return true;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/checkpoint") {
     await checkpoint();
     sendJson(res, 200, getDocument());
@@ -3008,7 +3029,8 @@ async function processAgentQueueTurn() {
           queueDepth: agentQueue.length,
           activeTurn: null,
           lastRunAt: nowIso(),
-          lastError: null
+          lastError: null,
+          lastUsage: output?.usage ?? null
         },
         "agent:complete"
       );
@@ -3193,8 +3215,14 @@ function clipAroundNeedle(text, needle, maxChars) {
 function markdownForAgentTurn(turn, runtimeId = null, options = {}) {
   const doc = getDocument();
   const policy = buildResponsePolicy(turn);
-  const defaultMax = runtimeId === "local" ? 3500 : 24000;
-  const maxChars = Number(options.maxChars || process.env.SKRIBE_AGENT_MARKDOWN_MAX_CHARS || defaultMax);
+  const isLocalRuntime = runtimeId === "local";
+  // CLI runtimes (Claude Code, Codex) have large context windows, so we never clip
+  // the document for them — clipping silently dropped the tail and left the agent
+  // reporting a "clipped" document. Only local inference, with its small context
+  // window, gets a character budget. An explicit caller override or
+  // SKRIBE_AGENT_MARKDOWN_MAX_CHARS still wins for either runtime.
+  const overrideMax = Number(options.maxChars) || Number(process.env.SKRIBE_AGENT_MARKDOWN_MAX_CHARS) || 0;
+  const maxChars = overrideMax > 0 ? overrideMax : isLocalRuntime ? 3500 : Number.POSITIVE_INFINITY;
   if (doc.markdown.length <= maxChars) return doc.markdown;
 
   if (policy.intent === "anchored_thread") {
@@ -3427,7 +3455,7 @@ async function buildLocalAgentMessages(turn, runtimeSelection, { minimal = false
   return { system, user };
 }
 
-async function executeLocalAgentTurn({ turn, runtimeSelection, model, timeoutMs, minimal = false }) {
+async function executeLocalAgentTurn({ turn, runtimeSelection, model, contextWindow = null, timeoutMs, minimal = false }) {
   const endpoint = await resolveLocalInferenceEndpoint();
   if (!endpoint) {
     throw new Error(
@@ -3491,20 +3519,31 @@ async function executeLocalAgentTurn({ turn, runtimeSelection, model, timeoutMs,
     finalText: result.content.slice(-4000)
   });
 
-  return normalizeLocalAgentOutput(turn, parseAgentOutput(result.content), result.content);
+  const output = normalizeLocalAgentOutput(turn, parseAgentOutput(result.content), result.content);
+  // OpenAI-compatible usage reports prompt_tokens as the full input; the local
+  // server's context window is not in the response, so it stays best-effort (null
+  // unless the runtime exposes one).
+  output.usage = buildTurnUsage({
+    runtime: "local",
+    inputTokens: result.usage?.prompt_tokens,
+    outputTokens: result.usage?.completion_tokens,
+    contextWindow,
+    costUsd: null
+  });
+  return output;
 }
 
 function isRetriableLocalAgentError(message) {
   return /incomplete response|empty completion|token limit/i.test(message);
 }
 
-async function runLocalAgent({ turn, runtimeSelection, model, timeoutMs }) {
+async function runLocalAgent({ turn, runtimeSelection, model, contextWindow = null, timeoutMs }) {
   try {
-    return await executeLocalAgentTurn({ turn, runtimeSelection, model, timeoutMs, minimal: false });
+    return await executeLocalAgentTurn({ turn, runtimeSelection, model, contextWindow, timeoutMs, minimal: false });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!isRetriableLocalAgentError(message)) throw error;
-    return await executeLocalAgentTurn({ turn, runtimeSelection, model, timeoutMs, minimal: true });
+    return await executeLocalAgentTurn({ turn, runtimeSelection, model, contextWindow, timeoutMs, minimal: true });
   }
 }
 
@@ -3570,13 +3609,20 @@ ${currentMarkdown}
 `;
 }
 
+function contextWindowForSelection(runtimeSelection) {
+  const model = runtimeSelection.model;
+  return runtimeSelection.status?.models?.find((entry) => entry.id === model)?.contextWindow ?? null;
+}
+
 async function runAgentRuntime(turn, runtimeSelection) {
+  const contextWindow = contextWindowForSelection(runtimeSelection);
   if (runtimeSelection.adapter.id === "local") {
     return runtimeSelection.adapter.run({
       turn,
       runtimeSelection,
       model: runtimeSelection.model,
       effort: runtimeSelection.effort,
+      contextWindow,
       timeoutMs: agentTimeoutMs
     });
   }
@@ -3586,14 +3632,16 @@ async function runAgentRuntime(turn, runtimeSelection) {
     prompt: await buildAgentPrompt(turn, runtimeSelection),
     model: runtimeSelection.model,
     effort: runtimeSelection.effort,
+    contextWindow,
     timeoutMs: agentTimeoutMs
   });
 }
 
-async function runCodexAgent({ turn, prompt, model, effort, timeoutMs }) {
+async function runCodexAgent({ turn, prompt, model, effort, contextWindow = null, timeoutMs }) {
   const outputPath = join(activeDocument.docDir, `.agent-output-${turn.id}.json`);
   const args = [
     "exec",
+    "--json",
     "--skip-git-repo-check",
     "--sandbox",
     "read-only",
@@ -3622,14 +3670,14 @@ async function runCodexAgent({ turn, prompt, model, effort, timeoutMs }) {
     finalText: finalText.slice(-4000)
   });
 
-  return parseAgentOutput(finalText);
+  return { ...parseAgentOutput(finalText), usage: parseCodexUsageFromStream(result.stdout, { contextWindow }) };
 }
 
-async function runClaudeAgent({ prompt, model, effort, timeoutMs }) {
+async function runClaudeAgent({ prompt, model, effort, contextWindow = null, timeoutMs }) {
   const args = [
     "--print",
     "--output-format",
-    "text",
+    "json",
     "--permission-mode",
     "dontAsk",
     "--tools",
@@ -3646,15 +3694,16 @@ async function runClaudeAgent({ prompt, model, effort, timeoutMs }) {
     throw new Error(result.stderr || result.stdout || `claude exited with ${result.code}`);
   }
 
+  const { replyText, usage } = parseClaudeResultEnvelope(result.stdout, { contextWindow });
   await appendEvent({
     type: "agent:raw-output",
     at: nowIso(),
     stdout: result.stdout.slice(-4000),
     stderr: result.stderr.slice(-4000),
-    finalText: result.stdout.slice(-4000)
+    finalText: replyText.slice(-4000)
   });
 
-  return parseAgentOutput(result.stdout);
+  return { ...parseAgentOutput(replyText), usage };
 }
 
 function buildStubAgentResult(turn) {
@@ -3969,6 +4018,7 @@ function buildFallbackProposalFromReplaceWithEdits(turn, output, markdown) {
 
 function applyAgentOutput(turn, output) {
   const normalizedOutput = normalizeAgentOutputForTurn(turn, output);
+  const usage = output?.usage ?? null;
   const createdAt = nowIso();
   updateDocument((doc) => {
     const threadReplies = Array.isArray(normalizedOutput.threadReplies) ? normalizedOutput.threadReplies : [];
@@ -4045,13 +4095,15 @@ function applyAgentOutput(turn, output) {
             id: makeId("msg"),
             author: "agent",
             body: String(reply.body),
-            createdAt
+            createdAt,
+            usage
           })),
           ...fallbackForThread.map((body) => ({
             id: makeId("msg"),
             author: "agent",
             body,
-            createdAt
+            createdAt,
+            usage
           }))
         ],
         suggestions: [
@@ -4077,7 +4129,8 @@ function applyAgentOutput(turn, output) {
         id: makeId("chat"),
         author: "agent",
         body: chatReply || fallbackReply,
-        createdAt
+        createdAt,
+        usage
       });
       ledgerEvents.push(
         makeLedgerEvent({
