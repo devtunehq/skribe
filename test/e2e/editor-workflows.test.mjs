@@ -105,6 +105,19 @@ async function clickButtonByText(cdp, rootSelector, text) {
   );
 }
 
+async function fillTextarea(cdp, selector, value) {
+  return evaluate(
+    cdp,
+    `(() => {
+      const textarea = document.querySelector(${JSON.stringify(selector)});
+      if (!textarea) return false;
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(textarea, ${JSON.stringify(value)});
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      return textarea.value === ${JSON.stringify(value)};
+    })()`
+  );
+}
+
 test("manual edits autosave without moving the caret, and undo/redo works", async (t) => {
   await withApp(
     t,
@@ -461,15 +474,11 @@ test("anchored threads can be created from selected text and receive stub agent 
       await waitFor(browser.cdp, "Boolean(document.querySelector('.floating-format-toolbar button[title=\"Comment on selected text\"]'))");
       await evaluate(browser.cdp, "document.querySelector('.floating-format-toolbar button[title=\"Comment on selected text\"]').click()");
       await waitFor(browser.cdp, "Boolean(document.querySelector('.new-thread-box textarea'))");
-      await evaluate(
-        browser.cdp,
-        `(() => {
-          const textarea = document.querySelector('.new-thread-box textarea');
-          Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(textarea, 'Tighten this please.');
-          textarea.dispatchEvent(new Event('input', { bubbles: true }));
-          return true;
-        })()`
+      assert.equal(
+        await evaluate(browser.cdp, "document.querySelector('.new-thread-box textarea')?.disabled === false"),
+        true
       );
+      assert.equal(await fillTextarea(browser.cdp, ".new-thread-box textarea", "Tighten this please."), true);
       assert.equal(await clickButtonByText(browser.cdp, ".new-thread-box", "Add thread"), true);
       await waitFor(
         browser.cdp,
@@ -489,6 +498,56 @@ test("anchored threads can be created from selected text and receive stub agent 
       assert.equal(threadState.threadCount, 1);
       assert.deepEqual(threadState.messages, ["human", "agent"]);
       assert.equal(threadState.hasHighlight, true);
+    }
+  );
+});
+
+test("composer Propose toggle asks the stub agent for a document proposal", async (t) => {
+  await withApp(
+    t,
+    "# Draft\n\nBody copy for a proposal.\n",
+    async ({ browser }) => {
+      await evaluate(
+        browser.cdp,
+        `Array.from(document.querySelectorAll('.panel-tabs button')).find((button) => button.textContent.includes('Chat'))?.click()`
+      );
+      await waitFor(browser.cdp, "Boolean(document.querySelector('.chat-composer textarea'))");
+      assert.equal(
+        await evaluate(browser.cdp, "document.querySelector('.chat-composer textarea')?.disabled === false"),
+        true
+      );
+      assert.equal(
+        await evaluate(
+          browser.cdp,
+          "document.querySelector('.chat-composer button[aria-label=\"Propose document edits\"]')?.getAttribute('aria-pressed') === 'false'"
+        ),
+        true
+      );
+      assert.equal(await clickButtonByText(browser.cdp, ".chat-composer", "Propose"), true);
+      assert.equal(
+        await evaluate(
+          browser.cdp,
+          "document.querySelector('.chat-composer button[aria-label=\"Propose document edits\"]')?.getAttribute('aria-pressed') === 'true'"
+        ),
+        true
+      );
+      assert.equal(await fillTextarea(browser.cdp, ".chat-composer textarea", "What do you think of the tone?"), true);
+      assert.equal(await clickButtonByText(browser.cdp, ".chat-composer", "Send"), true);
+      await waitFor(
+        browser.cdp,
+        "fetch('/api/document').then((response) => response.json()).then((doc) => doc.review.proposals.length >= 1)",
+        8000
+      );
+
+      const proposalState = await evaluate(
+        browser.cdp,
+        `fetch('/api/document').then((response) => response.json()).then((doc) => ({
+          proposalCount: doc.review.proposals.length,
+          title: doc.review.proposals[0]?.title ?? null
+        }))`
+      );
+      assert.equal(proposalState.proposalCount, 1);
+      assert.equal(proposalState.title, "Stub document edit");
     }
   );
 });

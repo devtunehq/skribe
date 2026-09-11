@@ -74,6 +74,7 @@ import {
   AGENT_RUNTIME_UNAVAILABLE_TITLE,
   agentModelDraftFromConfiguredModel,
   effectiveRuntimeId,
+  isAgentRuntimeUnavailable,
   mergeRuntimeConfigFromSession,
   providerSelectValue as resolveProviderSelectValue,
   selectedRuntimeDisplayLabel
@@ -4343,8 +4344,7 @@ function useSkribeController() {
   const configuredEffort = currentConfiguredEffort();
   const runtimeOptions = agentRuntimeConfig?.runtimes ?? [];
   const providerOptions = runtimeOptions.filter((runtime) => runtime.id !== "stub");
-  const hasAvailableAgentRuntime = providerOptions.some((runtime) => runtime.available);
-  const agentRuntimeUnavailable = Boolean(agentRuntimeConfig && providerOptions.length > 0 && !hasAvailableAgentRuntime);
+  const agentRuntimeUnavailable = isAgentRuntimeUnavailable(agentRuntimeConfig, configuredRuntime);
   const effectiveRuntime = effectiveRuntimeId(configuredRuntime, resolvedRuntime);
   const providerSelectValue = resolveProviderSelectValue(configuredRuntime, resolvedRuntime, providerOptions);
   const selectedRuntimeStatus = runtimeOptions.find((runtime) => runtime.id === effectiveRuntime) ?? null;
@@ -5918,7 +5918,9 @@ function SkillComposer({
               className={`secondary-button small skill-composer-toggle${proposeDocumentEdits ? " is-active" : ""}`}
               onClick={() => onProposeDocumentEditsChange(!proposeDocumentEdits)}
               title="Return a reviewable document diff for this message"
+              aria-label="Propose document edits"
               aria-pressed={Boolean(proposeDocumentEdits)}
+              disabled={disabled}
             >
               <FileText size={14} />
               Propose
