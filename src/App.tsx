@@ -3995,6 +3995,13 @@ function useSkribeController() {
         setLinkDraft("");
         return;
       }
+      // Table cells are markdown-serialized as a grid. Do not fall through to
+      // the contentEditable <a> insert — that writes link syntax into a cell
+      // as literal text instead of a rendered hyperlink.
+      if (target.tableCell) {
+        setLinkPopover(null);
+        return;
+      }
     }
 
     const range = linkRangeRef.current?.cloneRange() ?? selectionRangeRef.current?.cloneRange();

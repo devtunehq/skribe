@@ -3112,10 +3112,12 @@ select:focus,
   gap: 6px;
 }
 
-.skill-composer-toggle.is-active {
-  background: var(--sky-blue);
+.skill-composer-toggle.is-active,
+.skill-composer-toggle[aria-pressed="true"] {
+  background: var(--mellow-yellow);
   border-color: var(--ink);
-  color: var(--accent-ink);
+  color: var(--coal);
+  box-shadow: -2px 2px 0 0 var(--ink);
 }
 
 .skill-picker-header strong,
