@@ -60,6 +60,7 @@ export interface AppControllerState {
   threadSkillIds: Record<string, string[]>;
   chatDraft: string;
   chatSkillIds: string[];
+  proposeDocumentEdits: boolean;
   floatingToolbar: FloatingToolbarState | null;
   linkPopover: LinkPopoverState | null;
   selectionContextMenu: SelectionContextMenuState | null;
@@ -105,6 +106,7 @@ export function createAppControllerState(defaultSettings: AppSettings): AppContr
     threadSkillIds: {},
     chatDraft: "",
     chatSkillIds: [],
+    proposeDocumentEdits: false,
     floatingToolbar: null,
     linkPopover: null,
     selectionContextMenu: null,
@@ -175,6 +177,7 @@ export function createAppControllerSetters(dispatch: Dispatch<AppControllerActio
     setThreadSkillIds: controllerSetter(dispatch, "threadSkillIds"),
     setChatDraft: controllerSetter(dispatch, "chatDraft"),
     setChatSkillIds: controllerSetter(dispatch, "chatSkillIds"),
+    setProposeDocumentEdits: controllerSetter(dispatch, "proposeDocumentEdits"),
     setFloatingToolbar: controllerSetter(dispatch, "floatingToolbar"),
     setLinkPopover: controllerSetter(dispatch, "linkPopover"),
     setSelectionContextMenu: controllerSetter(dispatch, "selectionContextMenu"),

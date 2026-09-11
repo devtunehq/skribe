@@ -335,4 +335,5 @@ export interface AgentMessageRequest {
   threadId?: string | null;
   document: DocumentState;
   skills?: AgentSkillSelection[];
+  allowDocumentProposals?: boolean;
 }

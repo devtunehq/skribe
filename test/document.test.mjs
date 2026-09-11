@@ -81,6 +81,13 @@ test("table structure helpers add and remove rows and columns", () => {
   // Guards: can't drop below two columns, and a non-table string is unchanged.
   assert.equal(withTableColumnRemoved(base, 0), base);
   assert.equal(withTableRowAdded("not a table"), "not a table");
+
+  // Insert before an existing body row / column instead of only appending.
+  const insertedRow = parseMarkdownTable(withTableRowAdded(twoRow, 1));
+  assert.deepEqual(insertedRow.rows, [["1", "2"], ["", ""], ["3", "4"]]);
+  const insertedCol = parseMarkdownTable(withTableColumnAdded(threeCol, 1));
+  assert.deepEqual(insertedCol.headers, ["A", "", "B", "C"]);
+  assert.deepEqual(insertedCol.rows, [["1", "", "2", "3"]]);
 });
 
 test("table cells with pipes stay clean and don't accumulate backslashes on edits", () => {

@@ -837,3 +837,29 @@ test("local runtime rejects punctuation-only truncated replies", async () => {
     await fake.close();
   }
 });
+
+test("allowDocumentProposals on a chat turn creates a reviewable stub proposal", async () => {
+  const server = await startServer();
+  try {
+    await jsonRequest(server.baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: JSON.stringify({ source: "chat", body: "What do you think of the tone?" })
+    });
+    const withoutFlag = await waitForAgentIdle(server.baseUrl);
+    assert.equal(withoutFlag.review.proposals.length, 0);
+
+    await jsonRequest(server.baseUrl, "/api/agent/message", {
+      method: "POST",
+      body: JSON.stringify({
+        source: "chat",
+        body: "What do you think of the tone?",
+        allowDocumentProposals: true
+      })
+    });
+    const withFlag = await waitForAgentIdle(server.baseUrl);
+    assert.equal(withFlag.review.proposals.length, 1);
+    assert.equal(withFlag.review.proposals[0].title, "Stub document edit");
+  } finally {
+    await server.stop();
+  }
+});

@@ -721,10 +721,18 @@ export function parseMarkdownTable(markdown: string) {
 // break the 2-column / header-row minimums Markdown tables require) is returned
 // unchanged. Column alignment is not preserved — serializeMarkdownTable already
 // drops it on every edit, so these match that existing behaviour.
-export function withTableColumnAdded(markdown: string) {
+// `columnIndex` / `rowIndex` insert before that column or body row; omit to append.
+export function withTableColumnAdded(markdown: string, columnIndex?: number) {
   const table = parseMarkdownTable(markdown);
   if (!table) return markdown;
-  return serializeMarkdownTable([...table.headers, ""], table.rows.map((row) => [...row, ""]));
+  const insertAt =
+    columnIndex === undefined ? table.headers.length : Math.max(0, Math.min(columnIndex, table.headers.length));
+  const insertEmpty = (row: string[]) => {
+    const next = [...row];
+    next.splice(insertAt, 0, "");
+    return next;
+  };
+  return serializeMarkdownTable(insertEmpty(table.headers), table.rows.map(insertEmpty));
 }
 
 export function withTableColumnRemoved(markdown: string, columnIndex: number) {
@@ -735,11 +743,14 @@ export function withTableColumnRemoved(markdown: string, columnIndex: number) {
   return serializeMarkdownTable(dropColumn(table.headers), table.rows.map(dropColumn));
 }
 
-export function withTableRowAdded(markdown: string) {
+export function withTableRowAdded(markdown: string, rowIndex?: number) {
   const table = parseMarkdownTable(markdown);
   if (!table) return markdown;
   const emptyRow = Array.from({ length: table.headers.length }, () => "");
-  return serializeMarkdownTable(table.headers, [...table.rows, emptyRow]);
+  const rows = [...table.rows];
+  const insertAt = rowIndex === undefined ? rows.length : Math.max(0, Math.min(rowIndex, rows.length));
+  rows.splice(insertAt, 0, emptyRow);
+  return serializeMarkdownTable(table.headers, rows);
 }
 
 export function withTableRowRemoved(markdown: string, rowIndex: number) {

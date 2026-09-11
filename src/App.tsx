@@ -122,9 +122,10 @@ import {
   clamp,
   getMarkdownBlockLineSpans,
   markdownOffsetFromPlainOffset,
-  markdownRangeFromPlainRange,
   renderedMarkdownSnippet,
-  visibleMarkdownCharacters
+  visibleMarkdownCharacters,
+  wrapPlainRangeWithMarkdownLink,
+  wrapTableCellPlainRangeWithMarkdownLink
 } from "./markdownRanges";
 import {
   applyThreadSuggestionToMarkdown,
@@ -187,12 +188,19 @@ type SupportedDocumentFont = DocumentFont;
 type SupportedAppTheme = AppTheme;
 type SupportedDiffViewMode = DiffViewMode;
 type BlockDropPlacement = "before" | "after";
+type TableCellTarget = {
+  rowIndex: number;
+  columnIndex: number;
+  plainStart: number;
+  plainEnd: number;
+};
 type LinkTargetState = {
   blockId: string;
   selectedText: string;
   plainStart: number;
   plainEnd: number;
   markdownAtOpen: string;
+  tableCell?: TableCellTarget;
 };
 type ClipboardPayload = {
   plainText: string;
@@ -670,14 +678,6 @@ function normalizeLinkHref(value: string) {
   return `https://${trimmed}`;
 }
 
-function escapeMarkdownLinkLabel(value: string) {
-  return value.replace(/\\/g, "\\\\").replace(/\]/g, "\\]");
-}
-
-function escapeMarkdownLinkHref(value: string) {
-  return value.replace(/\s+/g, "%20").replace(/\)/g, "%29");
-}
-
 function renderKeyHash(value: string) {
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {
@@ -899,20 +899,45 @@ function caretRangeFromPoint(x: number, y: number) {
   return nextRange;
 }
 
+function tableCellTargetFromRange(range: Range, table: HTMLElement, selectedText: string): TableCellTarget | null {
+  const startElement =
+    range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
+  const endElement = range.endContainer instanceof Element ? range.endContainer : range.endContainer.parentElement;
+  const startCell = startElement?.closest("th, td");
+  const endCell = endElement?.closest("th, td");
+  if (!startCell || startCell !== endCell || !table.contains(startCell)) return null;
+
+  const row = startCell.parentElement;
+  if (!(row instanceof HTMLTableRowElement)) return null;
+  const rowIndex = Array.from(table.querySelectorAll("tr")).indexOf(row);
+  const columnIndex = Array.from(row.querySelectorAll("th, td")).indexOf(startCell);
+  if (rowIndex < 0 || columnIndex < 0) return null;
+
+  const beforeSelection = range.cloneRange();
+  beforeSelection.selectNodeContents(startCell);
+  beforeSelection.setEnd(range.startContainer, range.startOffset);
+  const plainStart = beforeSelection.toString().length;
+  return {
+    rowIndex,
+    columnIndex,
+    plainStart,
+    plainEnd: plainStart + selectedText.length
+  };
+}
+
 function applyMarkdownLinkToSelection(markdown: string, target: LinkTargetState, href: string) {
-  const range =
-    markdown === target.markdownAtOpen
-      ? markdownRangeFromPlainRange(markdown, target.plainStart, target.plainEnd)
-      : (() => {
-          const index = markdown.indexOf(target.selectedText);
-          return index >= 0 ? { start: index, end: index + target.selectedText.length } : null;
-        })();
-  if (!range) return null;
-
-  const label = escapeMarkdownLinkLabel(target.selectedText.replace(/\s+/g, " ").trim());
-  if (!label) return null;
-
-  return `${markdown.slice(0, range.start)}[${label}](${escapeMarkdownLinkHref(href)})${markdown.slice(range.end)}`;
+  if (target.tableCell) {
+    return wrapTableCellPlainRangeWithMarkdownLink(
+      markdown,
+      target.tableCell.rowIndex,
+      target.tableCell.columnIndex,
+      target.tableCell.plainStart,
+      target.tableCell.plainEnd,
+      target.selectedText,
+      href
+    );
+  }
+  return wrapPlainRangeWithMarkdownLink(markdown, target.plainStart, target.plainEnd, target.selectedText, href);
 }
 
 function getNextInlineChangeKey(target: EventTarget | null) {
@@ -942,10 +967,11 @@ function scrollToInlineChange(changeKey: string | null) {
 // Block types whose shape can be swapped by the formatting controls (paragraph /
 // heading / quote / list). Images, tables and code are left untouched.
 // A structural edit to a table: add or delete a row/column. `index` is the
-// body-row or column index for the delete variants (ignored by the adds).
+// body-row or column index to insert before (adds) or remove (deletes). Omit
+// index on add-row / add-column to append.
 type TableEdit =
-  | { kind: "add-row" }
-  | { kind: "add-column" }
+  | { kind: "add-row"; index?: number }
+  | { kind: "add-column"; index?: number }
   | { kind: "delete-row"; index: number }
   | { kind: "delete-column"; index: number };
 
@@ -1009,6 +1035,7 @@ function useSkribeController() {
     threadSkillIds,
     chatDraft,
     chatSkillIds,
+    proposeDocumentEdits,
     floatingToolbar,
     linkPopover,
     selectionContextMenu,
@@ -1046,6 +1073,7 @@ function useSkribeController() {
     setThreadSkillIds,
     setChatDraft,
     setChatSkillIds,
+    setProposeDocumentEdits,
     setFloatingToolbar,
     setLinkPopover,
     setSelectionContextMenu,
@@ -1849,7 +1877,7 @@ function useSkribeController() {
     const body = latestHumanMessage
       ? `Reply to this anchored thread. Human note: ${latestHumanMessage}`
       : `Reply to this anchored thread about: ${thread.anchor.exact}`;
-    triggerAgent("thread", body, current, threadId);
+    triggerAgent("thread", body, current, threadId, [], proposeDocumentEdits);
   }
 
   function updateFloatingToolbarPosition() {
@@ -2112,10 +2140,11 @@ function useSkribeController() {
     body: string,
     nextState: DocumentState | null,
     threadId?: string | null,
-    skills: AgentSkillSelection[] = []
+    skills: AgentSkillSelection[] = [],
+    allowDocumentProposals = false
   ) {
     if (!nextState) return;
-    sendAgentMessage({ source, body, threadId, document: nextState, skills })
+    sendAgentMessage({ source, body, threadId, document: nextState, skills, allowDocumentProposals })
       .then((remote) => {
         const previous = stateRef.current;
         stateRef.current = remote;
@@ -2679,7 +2708,7 @@ function useSkribeController() {
       }
     }));
     if (appSettings.autoReplyToComments) {
-      triggerAgent("thread", prepared.body, nextState, thread.id, prepared.skills);
+      triggerAgent("thread", prepared.body, nextState, thread.id, prepared.skills, proposeDocumentEdits);
     }
 
     setActiveThreadId(thread.id);
@@ -2733,7 +2762,7 @@ function useSkribeController() {
         }
       };
     });
-    triggerAgent("thread", prepared.body, nextState, threadId, prepared.skills);
+    triggerAgent("thread", prepared.body, nextState, threadId, prepared.skills, proposeDocumentEdits);
 
     setReplyDrafts((drafts) => ({ ...drafts, [threadId]: "" }));
     setThreadSkillIds((drafts) => ({ ...drafts, [threadId]: appSettings.defaultSkills }));
@@ -2939,7 +2968,7 @@ function useSkribeController() {
       }
     }));
 
-    triggerAgent("chat", messageBody, nextState);
+    triggerAgent("chat", messageBody, nextState, undefined, [], true);
   }
 
   function requestProposalRewrite(proposalId: string) {
@@ -2979,7 +3008,7 @@ function useSkribeController() {
       }
     }));
 
-    triggerAgent("chat", messageBody, nextState);
+    triggerAgent("chat", messageBody, nextState, undefined, [], true);
   }
 
   function addChatMessage() {
@@ -3011,7 +3040,7 @@ function useSkribeController() {
         updatedAt: createdAt
       }
     }));
-    triggerAgent("chat", prepared.body, nextState, undefined, prepared.skills);
+    triggerAgent("chat", prepared.body, nextState, undefined, prepared.skills, proposeDocumentEdits);
 
     setChatDraft("");
     setChatSkillIds(appSettings.defaultSkills);
@@ -3173,9 +3202,9 @@ function useSkribeController() {
     const currentText = blockNodeToMarkdown(node, "table");
     const nextText =
       edit.kind === "add-row"
-        ? withTableRowAdded(currentText)
+        ? withTableRowAdded(currentText, edit.index)
         : edit.kind === "add-column"
-          ? withTableColumnAdded(currentText)
+          ? withTableColumnAdded(currentText, edit.index)
           : edit.kind === "delete-row"
             ? withTableRowRemoved(currentText, edit.index ?? -1)
             : withTableColumnRemoved(currentText, edit.index ?? -1);
@@ -3925,7 +3954,11 @@ function useSkribeController() {
       markdownAtOpen: blockNodeToMarkdown(
         editableBlock,
         stateRef.current ? findBlockById(stateRef.current.markdown, blockId)?.type : undefined
-      )
+      ),
+      tableCell:
+        editableBlock.tagName === "TABLE"
+          ? tableCellTargetFromRange(range, editableBlock, selectedText) ?? undefined
+          : undefined
     };
     setLinkDraft(existingHref || "https://");
     setLinkPopover(position);
@@ -4376,6 +4409,7 @@ function useSkribeController() {
     threadSkillIds,
     chatDraft,
     chatSkillIds,
+    proposeDocumentEdits,
     floatingToolbar,
     linkPopover,
     selectionContextMenu,
@@ -4410,6 +4444,7 @@ function useSkribeController() {
     setThreadSkillIds,
     setChatDraft,
     setChatSkillIds,
+    setProposeDocumentEdits,
     setLinkPopover,
     setLinkDraft,
     setToneSetupInvocation,
@@ -5199,6 +5234,7 @@ function RightPanel() {
     appSettings,
     chatDraft,
     chatSkillIds,
+    proposeDocumentEdits,
     contextLedger,
     documentState,
     newComment,
@@ -5222,6 +5258,7 @@ function RightPanel() {
     requestThreadAgentReply,
     setChatDraft,
     setChatSkillIds,
+    setProposeDocumentEdits,
     setFloatingToolbar,
     setNewComment,
     setNewThreadSkillIds,
@@ -5305,6 +5342,8 @@ function RightPanel() {
               })
             }
             agentSession={agentSession}
+            proposeDocumentEdits={proposeDocumentEdits}
+            onProposeDocumentEditsChange={setProposeDocumentEdits}
           />
         ) : (
           <ChatPanel
@@ -5315,6 +5354,8 @@ function RightPanel() {
             chatDraft={chatDraft}
             agentSkills={agentSkills}
             selectedSkillIds={chatSkillIds}
+            proposeDocumentEdits={proposeDocumentEdits}
+            onProposeDocumentEditsChange={setProposeDocumentEdits}
             diffViewMode={appSettings.diffViewMode}
             humanLabel={humanLabel}
             agentRuntimeUnavailable={agentRuntimeUnavailable}
@@ -5654,7 +5695,9 @@ function SkillComposer({
   submitIcon,
   onSubmit,
   disabled = false,
-  disabledReason
+  disabledReason,
+  proposeDocumentEdits,
+  onProposeDocumentEditsChange
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -5669,6 +5712,8 @@ function SkillComposer({
   onSubmit: () => void;
   disabled?: boolean;
   disabledReason?: string;
+  proposeDocumentEdits?: boolean;
+  onProposeDocumentEditsChange?: (value: boolean) => void;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [cursor, setCursor] = useState(0);
@@ -5866,10 +5911,24 @@ function SkillComposer({
       ) : null}
 
       <div className="skill-composer-actions">
-        <button type="button" className="secondary-button small" onClick={() => setIsPickerOpen((open) => !open)} title="Browse agent skills">
-          <Sparkles size={14} />
-          Skills
-        </button>
+        <div className="skill-composer-tools">
+          {onProposeDocumentEditsChange ? (
+            <button
+              type="button"
+              className={`secondary-button small skill-composer-toggle${proposeDocumentEdits ? " is-active" : ""}`}
+              onClick={() => onProposeDocumentEditsChange(!proposeDocumentEdits)}
+              title="Return a reviewable document diff for this message"
+              aria-pressed={Boolean(proposeDocumentEdits)}
+            >
+              <FileText size={14} />
+              Propose
+            </button>
+          ) : null}
+          <button type="button" className="secondary-button small" onClick={() => setIsPickerOpen((open) => !open)} title="Browse agent skills">
+            <Sparkles size={14} />
+            Skills
+          </button>
+        </div>
         <button type="button" className="primary-button" onClick={onSubmit} disabled={disabled}>
           {submitIcon}
           {submitLabel}
@@ -6678,6 +6737,17 @@ function EditableTableBlock({
           <tr>
             {headerCells.map(({ item: cell, key }, columnIndex) => (
               <th key={key} style={cellStyle(columnIndex)}>
+                <button
+                  type="button"
+                  className="table-insert-column"
+                  contentEditable={false}
+                  title="Insert column before"
+                  aria-label="Insert column before"
+                  onMouseDown={keepCaret}
+                  onClick={runEdit({ kind: "add-column", index: columnIndex })}
+                >
+                  <Plus size={11} />
+                </button>
                 {cell ? <InlineMarkdown markdown={cell} keyPrefix={key} /> : <br />}
                 {columnCount > 2 ? (
                   <button
@@ -6704,6 +6774,19 @@ function EditableTableBlock({
               <tr key={rowKey}>
                 {rowCells.map(({ item: cell, key }, columnIndex) => (
                   <td key={key} style={cellStyle(columnIndex)}>
+                    {columnIndex === 0 ? (
+                      <button
+                        type="button"
+                        className="table-insert-row"
+                        contentEditable={false}
+                        title="Insert row above"
+                        aria-label="Insert row above"
+                        onMouseDown={keepCaret}
+                        onClick={runEdit({ kind: "add-row", index: rowIndex })}
+                      >
+                        <Plus size={11} />
+                      </button>
+                    ) : null}
                     {columnIndex === 0 && canDeleteRows ? (
                       <button
                         type="button"
@@ -6729,8 +6812,8 @@ function EditableTableBlock({
         type="button"
         className="table-add-column"
         contentEditable={false}
-        title="Add column"
-        aria-label="Add column"
+        title="Add column at end"
+        aria-label="Add column at end"
         onMouseDown={keepCaret}
         onClick={runEdit({ kind: "add-column" })}
       >
@@ -6740,8 +6823,8 @@ function EditableTableBlock({
         type="button"
         className="table-add-row"
         contentEditable={false}
-        title="Add row"
-        aria-label="Add row"
+        title="Add row at end"
+        aria-label="Add row at end"
         onMouseDown={keepCaret}
         onClick={runEdit({ kind: "add-row" })}
       >
@@ -6891,6 +6974,8 @@ interface ThreadPanelProps {
   onSuggestionStatus: (threadId: string, suggestionId: string, status: "accepted" | "rejected") => void;
   onToggleResolvedThreads: () => void;
   agentSession?: AgentSession;
+  proposeDocumentEdits: boolean;
+  onProposeDocumentEditsChange: (value: boolean) => void;
 }
 
 function ThreadPanel(props: ThreadPanelProps) {
@@ -6922,7 +7007,9 @@ function ThreadPanel(props: ThreadPanelProps) {
     onSetStatus,
     onSuggestionStatus,
     onToggleResolvedThreads,
-    agentSession
+    agentSession,
+    proposeDocumentEdits,
+    onProposeDocumentEditsChange
   } = props;
   const workingThreadId = agentSession?.activeTurn?.source === "thread" ? agentSession.activeTurn.threadId : null;
   const isAgentWorkingForActiveThread =
@@ -6951,6 +7038,8 @@ function ThreadPanel(props: ThreadPanelProps) {
             onSubmit={onAddThread}
             disabled={agentRuntimeUnavailable}
             disabledReason={`${AGENT_RUNTIME_UNAVAILABLE_MESSAGE}skribe doctor.`}
+            proposeDocumentEdits={proposeDocumentEdits}
+            onProposeDocumentEditsChange={onProposeDocumentEditsChange}
           />
           <div className="button-row">
             <button type="button" className="ghost-button" onClick={onClearSelection}>
@@ -7120,6 +7209,8 @@ function ThreadPanel(props: ThreadPanelProps) {
               onSubmit={() => onAddMessage(activeThread.id)}
               disabled={agentRuntimeUnavailable}
               disabledReason={`${AGENT_RUNTIME_UNAVAILABLE_MESSAGE}skribe doctor.`}
+              proposeDocumentEdits={proposeDocumentEdits}
+              onProposeDocumentEditsChange={onProposeDocumentEditsChange}
             />
           </div>
 
@@ -7368,6 +7459,8 @@ interface ChatPanelProps {
   chatDraft: string;
   agentSkills: AgentSkill[];
   selectedSkillIds: string[];
+  proposeDocumentEdits: boolean;
+  onProposeDocumentEditsChange: (value: boolean) => void;
   diffViewMode: SupportedDiffViewMode;
   humanLabel: string;
   agentRuntimeUnavailable: boolean;
@@ -7388,6 +7481,8 @@ function ChatPanel({
   chatDraft,
   agentSkills,
   selectedSkillIds,
+  proposeDocumentEdits,
+  onProposeDocumentEditsChange,
   diffViewMode,
   humanLabel,
   agentRuntimeUnavailable,
@@ -7508,6 +7603,8 @@ function ChatPanel({
           onSubmit={onSend}
           disabled={agentRuntimeUnavailable}
           disabledReason={`${AGENT_RUNTIME_UNAVAILABLE_MESSAGE}skribe doctor.`}
+          proposeDocumentEdits={proposeDocumentEdits}
+          onProposeDocumentEditsChange={onProposeDocumentEditsChange}
         />
       </div>
     </div>
