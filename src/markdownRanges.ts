@@ -1,4 +1,10 @@
-import { isThematicBreak, markdownBlockIdFromIndex, parseMarkdownImage } from "./document.ts";
+import {
+  isThematicBreak,
+  markdownBlockIdFromIndex,
+  parseMarkdownImage,
+  parseMarkdownTable,
+  serializeMarkdownTable
+} from "./document.ts";
 import type { MarkdownBlockIdentity } from "./document.ts";
 
 export interface MarkdownBlockLineSpan {
@@ -347,4 +353,122 @@ export function markdownOffsetFromPlainOffset(markdown: string, plainOffset: num
   return character.linkEnd !== undefined && character.sourceIndex === (character.linkLabelEnd ?? 0) - 1
     ? character.linkEnd
     : character.sourceIndex + 1;
+}
+
+function escapeMarkdownLinkLabel(value: string) {
+  return value.replace(/\\/g, "\\\\").replace(/\]/g, "\\]");
+}
+
+function escapeMarkdownLinkHref(value: string) {
+  return value.replace(/\s+/g, "%20").replace(/\)/g, "%29");
+}
+
+function markdownRangeMatchesSelection(
+  markdown: string,
+  range: { start: number; end: number } | null,
+  selectedText: string
+) {
+  if (!range) return false;
+  const needle = comparableText(selectedText);
+  if (!needle) return false;
+  const sliced = markdown.slice(range.start, range.end);
+  if (comparableText(sliced).includes(needle)) return true;
+  const visible = visibleMarkdownCharacters(sliced)
+    .map((character) => sliced[character.sourceIndex])
+    .join("");
+  return comparableText(visible).includes(needle);
+}
+
+function markdownRangeForSelectedText(markdown: string, selectedText: string, hintPlainStart: number) {
+  if (!selectedText) return null;
+  const characters = visibleMarkdownCharacters(markdown);
+  const visible = characters.map((character) => markdown[character.sourceIndex]).join("");
+  const hits: number[] = [];
+  let from = 0;
+  while (from <= visible.length - selectedText.length) {
+    const index = visible.indexOf(selectedText, from);
+    if (index < 0) break;
+    hits.push(index);
+    from = index + 1;
+  }
+  if (hits.length === 0) return null;
+  const start = hits.reduce((best, hit) =>
+    Math.abs(hit - hintPlainStart) < Math.abs(best - hintPlainStart) ? hit : best
+  );
+  return markdownRangeFromPlainRange(markdown, start, start + selectedText.length);
+}
+
+function spliceMarkdownLink(
+  markdown: string,
+  range: { start: number; end: number },
+  selectedText: string,
+  href: string
+) {
+  const label = escapeMarkdownLinkLabel(selectedText.replace(/\s+/g, " ").trim());
+  if (!label || !href) return null;
+  return `${markdown.slice(0, range.start)}[${label}](${escapeMarkdownLinkHref(href)})${markdown.slice(range.end)}`;
+}
+
+// Wrap the visible selection in `[label](href)`. Plain offsets are a hint — they
+// can drift (tables especially, because the DOM concatenates cell text while the
+// markdown still contains pipes and separator rows). If the mapped range is not
+// the selected text, fall back to locating that text in the visible-character map.
+export function wrapPlainRangeWithMarkdownLink(
+  markdown: string,
+  plainStart: number,
+  plainEnd: number,
+  selectedText: string,
+  href: string
+) {
+  const mapped = markdownRangeFromPlainRange(markdown, plainStart, plainEnd);
+  const range = markdownRangeMatchesSelection(markdown, mapped, selectedText)
+    ? mapped
+    : markdownRangeForSelectedText(markdown, selectedText, plainStart);
+  if (!range) return null;
+  return spliceMarkdownLink(markdown, range, selectedText, href);
+}
+
+export function wrapTableCellPlainRangeWithMarkdownLink(
+  markdown: string,
+  rowIndex: number,
+  columnIndex: number,
+  plainStart: number,
+  plainEnd: number,
+  selectedText: string,
+  href: string
+) {
+  const table = parseMarkdownTable(markdown);
+  if (!table || columnIndex < 0) return null;
+
+  if (rowIndex === 0) {
+    if (columnIndex >= table.headers.length) return null;
+    const nextCell = wrapPlainRangeWithMarkdownLink(
+      table.headers[columnIndex] ?? "",
+      plainStart,
+      plainEnd,
+      selectedText,
+      href
+    );
+    if (nextCell === null) return null;
+    const headers = table.headers.map((cell, index) => (index === columnIndex ? nextCell : cell));
+    return serializeMarkdownTable(headers, table.rows);
+  }
+
+  const bodyIndex = rowIndex - 1;
+  if (bodyIndex < 0) return null;
+  const rows = table.rows.map((row) => [...row]);
+  while (rows.length <= bodyIndex) {
+    rows.push(Array.from({ length: table.headers.length }, () => ""));
+  }
+  if (columnIndex >= (rows[bodyIndex]?.length ?? 0)) return null;
+  const nextCell = wrapPlainRangeWithMarkdownLink(
+    rows[bodyIndex][columnIndex] ?? "",
+    plainStart,
+    plainEnd,
+    selectedText,
+    href
+  );
+  if (nextCell === null) return null;
+  rows[bodyIndex][columnIndex] = nextCell;
+  return serializeMarkdownTable(table.headers, rows);
 }

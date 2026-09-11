@@ -138,16 +138,17 @@ export function SettingsAgentPanel({
       </label>
 
       <label className="settings-field">
-        <SettingsLabel tooltip="Controls whether broad rewrites should ask first or produce reviewable diffs when requested.">
-          Proposal mode
+        <SettingsLabel tooltip="Default for document-level diffs. Conservative asks first unless Propose is on in the composer. Bold prefers a reviewable diff when you ask for edits.">
+          Proposal default
         </SettingsLabel>
         <select
           value={settings.proposalModeDefault}
           onChange={(event) => onChange({ proposalModeDefault: event.target.value === "bold" ? "bold" : "conservative" })}
         >
-          <option value="conservative">Conservative</option>
-          <option value="bold">Bold</option>
+          <option value="conservative">Conservative — ask first</option>
+          <option value="bold">Bold — prefer reviewable diffs</option>
         </select>
+        <small>Turn on Propose in Chat (or a thread composer) to force a reviewable diff for that message.</small>
       </label>
 
       <label className="settings-field">

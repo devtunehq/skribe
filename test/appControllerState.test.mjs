@@ -38,6 +38,7 @@ test("app controller state initializes editor, settings, and panel defaults", ()
   assert.equal(state.saveState, "loading");
   assert.equal(state.settingsSaveState, "saved");
   assert.equal(state.panelMode, "threads");
+  assert.equal(state.proposeDocumentEdits, false);
   assert.deepEqual(state.revisionState, { revisions: [], currentRevisionId: null });
   assert.deepEqual(state.replyDrafts, {});
   assert.deepEqual(state.blockResetKeys, {});

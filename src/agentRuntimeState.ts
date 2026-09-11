@@ -14,6 +14,19 @@ export function effectiveRuntimeId(
   return configuredRuntime === "auto" ? resolvedRuntime ?? null : configuredRuntime;
 }
 
+export function isAgentRuntimeUnavailable(
+  config: AgentRuntimeConfig | null | undefined,
+  configuredRuntime: string
+) {
+  if (!config) return false;
+  // Stub is a test/dev runtime, not shown in the provider picker. When it is
+  // explicitly selected, composers must stay usable even if Codex/Claude/local
+  // are missing on this machine.
+  if (configuredRuntime === "stub") return false;
+  const providerOptions = config.runtimes.filter((runtime) => runtime.id !== "stub");
+  return providerOptions.length > 0 && !providerOptions.some((runtime) => runtime.available);
+}
+
 export function providerSelectValue(
   configuredRuntime: string,
   resolvedRuntime: string | null | undefined,

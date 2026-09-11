@@ -1771,6 +1771,8 @@ button {
    reachable; pointer-events guard against invisible click targets. */
 .table-add-column,
 .table-add-row,
+.table-insert-row,
+.table-insert-column,
 .table-delete-row,
 .table-delete-column {
   display: inline-flex;
@@ -1809,7 +1811,9 @@ button {
 }
 
 .table-delete-row,
-.table-delete-column {
+.table-delete-column,
+.table-insert-row,
+.table-insert-column {
   position: absolute;
   width: 18px;
   height: 18px;
@@ -1828,6 +1832,18 @@ button {
   transform: translateY(-50%);
 }
 
+.table-insert-column {
+  top: -9px;
+  left: -9px;
+  z-index: 4;
+}
+
+.table-insert-row {
+  top: -9px;
+  left: -9px;
+  z-index: 4;
+}
+
 .editable-table th,
 .editable-table td {
   position: relative;
@@ -1837,10 +1853,16 @@ button {
 .editable-table-shell:focus-within .table-add-column,
 .editable-table-shell:hover .table-add-row,
 .editable-table-shell:focus-within .table-add-row,
+.editable-table-shell:hover .table-insert-column,
+.editable-table-shell:focus-within .table-insert-column,
+.editable-table-shell:hover .table-insert-row,
+.editable-table-shell:focus-within .table-insert-row,
 .editable-table th:hover .table-delete-column,
 .editable-table tbody tr:hover .table-delete-row,
 .table-add-column:focus-visible,
 .table-add-row:focus-visible,
+.table-insert-column:focus-visible,
+.table-insert-row:focus-visible,
 .table-delete-row:focus-visible,
 .table-delete-column:focus-visible {
   opacity: 1;
@@ -1849,6 +1871,8 @@ button {
 
 .table-add-column:hover,
 .table-add-row:hover,
+.table-insert-column:hover,
+.table-insert-row:hover,
 .table-delete-row:hover,
 .table-delete-column:hover {
   background: var(--mellow-yellow);
@@ -3080,6 +3104,20 @@ select:focus,
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.skill-composer-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.skill-composer-toggle.is-active,
+.skill-composer-toggle[aria-pressed="true"] {
+  background: var(--mellow-yellow);
+  border-color: var(--ink);
+  color: var(--coal);
+  box-shadow: -2px 2px 0 0 var(--ink);
 }
 
 .skill-picker-header strong,

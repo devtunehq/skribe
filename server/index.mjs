@@ -2930,7 +2930,8 @@ async function handleApi(req, res) {
       }
     }
     const skills = await enrichSelectedSkills(selectedSkills);
-    enqueueAgentTurn({ source, threadId, body: bodyText, skills });
+    const allowDocumentProposals = body.allowDocumentProposals === true;
+    enqueueAgentTurn({ source, threadId, body: bodyText, skills, allowDocumentProposals });
     sendJson(res, 202, getDocument());
     return true;
   }
@@ -3170,7 +3171,7 @@ function asksForDocumentProposal(turn, proposalModeDefault = getSettings().propo
 function inferTurnIntent(turn) {
   const proposalModeDefault = getSettings().proposalModeDefault;
   if (isSkillOnlyTurn(turn)) return "skill_pass";
-  if (asksForDocumentProposal(turn, proposalModeDefault)) {
+  if (turn.allowDocumentProposals || asksForDocumentProposal(turn, proposalModeDefault)) {
     return turn.source === "thread" ? "thread_document_proposal" : "document_proposal";
   }
   if (turn.source === "thread") return "anchored_thread";
@@ -3319,13 +3320,16 @@ function buildAgentContextPacket(turn, { compact = false } = {}) {
 function buildProposalModeInstruction(responsePolicy) {
   if (!responsePolicy.allowDocumentProposals) {
     return [
-      "Proposal mode for this turn: DISABLED.",
-      "Do not return documentProposals. Use chatReply or threadReplies instead."
+      "Proposal mode for this turn: OFF.",
+      "Do not return documentProposals. Use chatReply or threadReplies instead.",
+      "If a document-level rewrite would help, ask whether they want a reviewable diff.",
+      "Tell them they can turn on Propose in the chat composer, or reply go ahead / show me the diff.",
+      "Never tell them to turn on proposal mode as if it were a hidden setting. There is a Propose control on the composer."
     ].join("\n");
   }
 
   return [
-    "Proposal mode for this turn: ENABLED.",
+    "Proposal mode for this turn: ON.",
     "If the human asks for a diff, proposal, reviewable edit, concrete edit pass, or asks you to make changes, you MUST return exactly one documentProposals entry.",
     responsePolicy.intent === "thread_document_proposal"
       ? "This is an anchored thread turn. Use activeThread as the focus and create a documentProposals entry for the relevant passage or section in the full Markdown document."
@@ -3427,7 +3431,7 @@ async function buildLocalAgentMessages(turn, runtimeSelection, { minimal = false
     "- Do not edit files.",
     minimal ? "- Keep the answer focused on the current turn." : "- Follow requested skill instructions when provided.",
     "- Respect writingPreferences.toneOfVoice and document.editorLanguage.",
-    "- If responsePolicy.allowDocumentProposals is false, do not return documentProposals.",
+    "- If responsePolicy.allowDocumentProposals is false, do not return documentProposals. Do not mention a missing proposal-mode setting; the composer has a Propose control.",
     turn.source === "thread"
       ? "- This is an anchored thread turn. Put your answer in threadReplies with the provided threadId."
       : "- This is a chat turn. Put your answer in chatReply.",
@@ -3570,7 +3574,7 @@ ${skillRules.map((rule) => `\n${rule}`).join("")}
 - Respect writingPreferences.toneOfVoice as the default style for replies and proposed edits. Current user instructions, requested skills, and anchored comment context override the global tone when they conflict.
 - Follow responsePolicy exactly.
 - If responsePolicy.proposalModeDefault is "conservative", ask before broad rewrites unless responsePolicy.allowDocumentProposals is true. If it is "bold", prefer reviewable documentProposals for edit requests that imply changing the draft.
-- If responsePolicy.allowDocumentProposals is false, do not return documentProposals. Use chatReply or threadReplies instead.
+- If responsePolicy.allowDocumentProposals is false, do not return documentProposals. Use chatReply or threadReplies instead. Do not invent a missing "proposal mode" setting; the composer has a Propose control, and the human can also reply go ahead.
 - If responsePolicy.intent is "skill_pass", load and follow the requested skill instructions, then decide from those instructions and the human's wording whether the skill is meant to transform/rewrite/edit the current draft or only advise/review/analyze.
 - For transformational skill passes, return a documentProposals entry immediately with the full revised Markdown in replacementMarkdown. Do not ask for confirmation first when the skill itself is an instruction to rewrite, transform, humanize, adapt voice, copyedit, polish, or otherwise change the text.
 - For advisory/review/analyze skill passes, return concise chatReply findings and ask before preparing a document-level diff unless the human explicitly asked for a diff/proposal.
@@ -3733,7 +3737,7 @@ function buildStubAgentResult(turn) {
       ]
     };
   }
-  if (/rewrite|revise|edit|tighten|proposal|pass|diff|proceed|go ahead/i.test(turn.body || "")) {
+  if (/rewrite|revise|edit|tighten|proposal|pass|diff|proceed|go ahead/i.test(turn.body || "") || turn.allowDocumentProposals) {
     const doc = getDocument();
     return {
       chatReply: "I drafted a reviewable document-level proposal.",

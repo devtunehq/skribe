@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { markdownRangeFromPlainRange, renderedMarkdownSnippet } from "../src/markdownRanges.ts";
+import { markdownRangeFromPlainRange, renderedMarkdownSnippet, wrapPlainRangeWithMarkdownLink, wrapTableCellPlainRangeWithMarkdownLink } from "../src/markdownRanges.ts";
 import {
   buildSelectionFromMarkdownRange,
   deleteSelectionDraftFromMarkdown,
@@ -62,4 +62,47 @@ test("deleting an entire selected block removes the block without leaving an emp
   const nextMarkdown = deleteSelectionDraftFromMarkdown(markdown, draft);
 
   assert.equal(nextMarkdown, "Keep before.\n\nKeep after.\n");
+});
+
+test("linking selected table text wraps that cell even when whole-table offsets are wrong", () => {
+  const markdown = [
+    "| Example | What customers pay for |",
+    "| --- | --- |",
+    "| Grafana Cloud | Managed observability services for metrics and visualisation. |",
+    "| ClickHouse Cloud | Operating and maintaining PostgreSQL as a managed database service. |"
+  ].join("\n");
+
+  // Offsets as if the DOM concatenated cell text and skipped table pipes/separators —
+  // those land in the Grafana description, which is the reported bug.
+  const wrongStart = markdown.indexOf("metrics");
+  const linked = wrapPlainRangeWithMarkdownLink(
+    markdown,
+    wrongStart,
+    wrongStart + "ClickHouse Cloud".length,
+    "ClickHouse Cloud",
+    "https://clickhouse.com"
+  );
+  assert.match(linked ?? "", /\| \[ClickHouse Cloud\]\(https:\/\/clickhouse\.com\) \|/);
+  assert.doesNotMatch(linked ?? "", /metric\[ClickHouse Cloud\]/);
+
+  const cellLinked = wrapTableCellPlainRangeWithMarkdownLink(
+    markdown,
+    2,
+    0,
+    0,
+    "ClickHouse Cloud".length,
+    "ClickHouse Cloud",
+    "https://clickhouse.com"
+  );
+  const parsed = cellLinked?.split("\n") ?? [];
+  assert.match(parsed[3] ?? "", /\[ClickHouse Cloud\]\(https:\/\/clickhouse\.com\)/);
+  assert.match(parsed[2] ?? "", /Managed observability services for metrics and visualisation\./);
+});
+
+test("linking duplicate table cell text wraps the selected cell, not the first match", () => {
+  const markdown = "| A | B |\n| --- | --- |\n| N/A | first |\n| N/A | second |";
+  const linked = wrapTableCellPlainRangeWithMarkdownLink(markdown, 2, 0, 0, 3, "N/A", "https://example.com");
+  const rows = linked?.split("\n") ?? [];
+  assert.match(rows[2] ?? "", /\| N\/A \| first \|/);
+  assert.match(rows[3] ?? "", /\| \[N\/A\]\(https:\/\/example\.com\) \| second \|/);
 });

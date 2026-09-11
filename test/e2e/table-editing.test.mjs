@@ -212,3 +212,69 @@ test("Tab in the last cell appends a new row", async (t) => {
     await waitForFileText(markdownPath, /\| 1 \| 2 \|\n\|[ \t]*\|[ \t]*\|/);
   });
 });
+
+test("insert-row-above and insert-column-before place empty cells between existing ones", async (t) => {
+  const twoRows = "| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n";
+  await withApp(t, twoRows, async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-table tbody tr').length === 2");
+    assert.ok(await clickControl(browser.cdp, ".table-insert-row", 1));
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-table tbody tr').length === 3");
+    await waitForFileText(markdownPath, /\| 1 \| 2 \|\n\|[ \t]*\|[ \t]*\|\n\| 3 \| 4 \|/);
+
+    assert.ok(await clickControl(browser.cdp, ".table-insert-column", 1));
+    await waitFor(browser.cdp, "document.querySelectorAll('.editable-table thead th').length === 3");
+    await waitForFileText(markdownPath, /\| A \|[ \t]*\| B \|/);
+  });
+});
+
+function selectTextInTableExpression(text) {
+  return `(() => {
+    const table = document.querySelector('.editable-table');
+    if (!table) return { ok: false, reason: 'missing table' };
+    const walker = document.createTreeWalker(table, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    while (node && !node.textContent.includes(${JSON.stringify(text)})) node = walker.nextNode();
+    if (!node) return { ok: false, reason: 'missing text' };
+    const start = node.textContent.indexOf(${JSON.stringify(text)});
+    const range = document.createRange();
+    range.setStart(node, start);
+    range.setEnd(node, start + ${JSON.stringify(text)}.length);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    table.focus();
+    table.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: 40, clientY: 40 }));
+    return { ok: true, selected: selection.toString() };
+  })()`;
+}
+
+test("insert-link wraps the selected table cell, not a different cell", async (t) => {
+  const md =
+    "| Example | What |\n| --- | --- |\n| Grafana Cloud | Managed observability services for metrics and visualisation. |\n| ClickHouse Cloud | Operating and maintaining PostgreSQL. |\n";
+  await withApp(t, md, async ({ browser, markdownPath }) => {
+    await waitFor(browser.cdp, "!!document.querySelector('.editable-table')");
+    const selected = await evaluate(browser.cdp, selectTextInTableExpression("ClickHouse Cloud"));
+    assert.deepEqual(selected, { ok: true, selected: "ClickHouse Cloud" });
+    await waitFor(browser.cdp, "Boolean(document.querySelector('.floating-format-toolbar button[title=\"Insert link\"]'))");
+    await evaluate(browser.cdp, "document.querySelector('.floating-format-toolbar button[title=\"Insert link\"]').click()");
+    await waitFor(browser.cdp, "Boolean(document.querySelector('.link-popover input'))");
+    await evaluate(
+      browser.cdp,
+      `(() => {
+        const input = document.querySelector('.link-popover input');
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'https://clickhouse.com');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        document.querySelector('.link-popover .primary-button').dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        return true;
+      })()`
+    );
+    await waitForFileText(markdownPath, /\[ClickHouse Cloud\]\(https:\/\/clickhouse\.com\)/);
+    const saved = await readFile(markdownPath, "utf8");
+    assert.match(saved, /Managed observability services for metrics and visualisation\./);
+    assert.doesNotMatch(saved, /metric\[ClickHouse Cloud\]/);
+    await waitFor(
+      browser.cdp,
+      "Array.from(document.querySelectorAll('.editable-table a')).some((anchor) => anchor.textContent === 'ClickHouse Cloud' && anchor.href.startsWith('https://clickhouse.com'))"
+    );
+  });
+});

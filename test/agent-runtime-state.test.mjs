@@ -8,6 +8,7 @@ import {
   mergeRuntimeConfigFromSession,
   modelIsAdvertisedByDifferentRuntime,
   providerSelectValue,
+  isAgentRuntimeUnavailable,
   selectedRuntimeDisplayLabel
 } from "../src/agentRuntimeState.ts";
 
@@ -93,6 +94,51 @@ test("selected runtime label shows auto with resolved provider", () => {
     }),
     AGENT_RUNTIME_UNAVAILABLE_LABEL
   );
+});
+
+test("stub runtime keeps composers enabled when real providers are missing", () => {
+  const config = {
+    ...runtimeConfig,
+    configuredRuntime: "stub",
+    resolvedRuntime: "stub",
+    runtimes: [
+      {
+        id: "codex",
+        label: "Codex CLI",
+        available: false,
+        version: null,
+        supportsModelFlag: true,
+        supportsStructuredOutput: true,
+        supportsManualModel: true,
+        models: [],
+        defaultModel: null,
+        supportsEffort: true,
+        effortLevels: [],
+        defaultEffort: null,
+        notes: []
+      },
+      {
+        id: "stub",
+        label: "Stub",
+        available: true,
+        version: null,
+        supportsModelFlag: false,
+        supportsStructuredOutput: true,
+        supportsManualModel: false,
+        models: [],
+        defaultModel: null,
+        supportsEffort: false,
+        effortLevels: [],
+        defaultEffort: null,
+        notes: []
+      }
+    ]
+  };
+
+  assert.equal(isAgentRuntimeUnavailable(null, "auto"), false);
+  assert.equal(isAgentRuntimeUnavailable(config, "stub"), false);
+  assert.equal(isAgentRuntimeUnavailable(config, "auto"), true);
+  assert.equal(isAgentRuntimeUnavailable(runtimeConfig, "auto"), false);
 });
 
 test("effective runtime id follows auto resolution", () => {
