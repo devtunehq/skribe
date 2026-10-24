@@ -4311,7 +4311,10 @@ function useSkribeController() {
   const runtimeOptions = agentRuntimeConfig?.runtimes ?? [];
   const providerOptions = runtimeOptions.filter((runtime) => runtime.id !== "stub");
   const hasAvailableAgentRuntime = providerOptions.some((runtime) => runtime.available);
-  const agentRuntimeUnavailable = Boolean(agentRuntimeConfig && providerOptions.length > 0 && !hasAvailableAgentRuntime);
+  // An explicitly configured stub runtime (SKRIBE_AGENT_RUNTIME=stub) always works, even with no provider CLI installed.
+  const agentRuntimeUnavailable = Boolean(
+    agentRuntimeConfig && resolvedRuntime !== "stub" && providerOptions.length > 0 && !hasAvailableAgentRuntime
+  );
   const effectiveRuntime = effectiveRuntimeId(configuredRuntime, resolvedRuntime);
   const providerSelectValue = resolveProviderSelectValue(configuredRuntime, resolvedRuntime, providerOptions);
   const selectedRuntimeStatus = runtimeOptions.find((runtime) => runtime.id === effectiveRuntime) ?? null;
