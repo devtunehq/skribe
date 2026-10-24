@@ -20,7 +20,7 @@ async function waitForServer(baseUrl, process, timeoutMs = 8000) {
     }
 
     try {
-      const response = await fetch(`${baseUrl}/api/health`);
+      const response = await fetch(`${baseUrl}/api/health`, { signal: AbortSignal.timeout(1000) });
       if (response.ok) return;
     } catch (error) {
       lastError = error;
@@ -33,6 +33,22 @@ async function waitForServer(baseUrl, process, timeoutMs = 8000) {
 }
 
 async function startServer(options = {}) {
+  // When the caller doesn't pin a port, retry on a fresh random port if the server
+  // can't bind. The random range overlaps the OS ephemeral range (fake servers and
+  // outgoing connections), so a pick is occasionally already in use.
+  const attempts = options.port ? 1 : 5;
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await startServerOnce(options);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+async function startServerOnce(options = {}) {
   const configDir = await mkdtemp(join(tmpdir(), "skribe-config-"));
   const dataDir = await mkdtemp(join(tmpdir(), "skribe-data-"));
   const port = options.port ?? 46000 + Math.floor(Math.random() * 1000);
@@ -58,7 +74,17 @@ async function startServer(options = {}) {
   child.stdout.on("data", (chunk) => output.push(chunk.toString()));
   child.stderr.on("data", (chunk) => output.push(chunk.toString()));
 
-  await waitForServer(baseUrl, child);
+  try {
+    await waitForServer(baseUrl, child);
+  } catch (error) {
+    if (child.exitCode === null) {
+      child.kill("SIGKILL");
+      await Promise.race([once(child, "exit"), new Promise((resolve) => setTimeout(resolve, 500))]);
+    }
+    await rm(configDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true });
+    throw error;
+  }
 
   return {
     baseUrl,
