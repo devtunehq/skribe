@@ -125,7 +125,7 @@ Persist writing preferences, theme, document font, agent runtime, model, effort,
 
 Requirements:
 
-- Node.js 20 or newer
+- Node.js 22.23.4+, 24.22.1+, or 26.12.1+ (the October 2026 security releases)
 - `npm`
 - Optional: Codex CLI or Claude Code if you want live agent replies from your existing provider subscription
 - Optional: any OpenAI-compatible local inference server if you want on-device agent replies without a cloud CLI
